@@ -1,14 +1,3 @@
-/**
- * Copyright 2025- Justin Vyduna
- *
- * This file is part of the LX Studio software library. By using
- * LX, you agree to the terms of the LX Studio Software License
- * and Distribution Agreement, available at: http://lx.studio/license
- *
- * Please note that the LX license is not open-source. The license
- * allows for free, non-commercial use.
- */
-
 package apotheneum.jvyduna.patterns;
 
 import java.util.ArrayList;
@@ -17,6 +6,7 @@ import java.util.Random;
 
 import apotheneum.Apotheneum;
 import apotheneum.ApotheneumPattern;
+import apotheneum.jvyduna.util.PerceptualHue;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
@@ -24,9 +14,11 @@ import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
 import heronarts.lx.color.LXDynamicColor;
 import heronarts.lx.model.LXPoint;
+import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundDiscreteParameter;
 import heronarts.lx.parameter.CompoundParameter;
 import heronarts.lx.parameter.EnumParameter;
+import heronarts.lx.parameter.LXParameter;
 import heronarts.lx.parameter.TriggerParameter;
 import heronarts.lx.utils.LXUtils;
 
@@ -129,10 +121,14 @@ public class Rubik extends ApotheneumPattern {
     .setUnits(CompoundParameter.Units.PERCENT_NORMALIZED)
     .setDescription("Softness of the tile edges (0 = hard, 1 = only the center is full bright)");
 
+  public final BooleanParameter beamMode =
+    new BooleanParameter("Beam", false)
+    .setDescription("Projection: off = gnomonic perspective from center (bulges during turns); on = orthographic collimated emitters — each sticker a 0°-beam searchlight, free of perspective bulge");
+
   public final CompoundParameter scale =
     new CompoundParameter("Scale", 1, 0, 4)
     .setUnits(CompoundParameter.Units.PERCENT_NORMALIZED)
-    .setDescription("Overall scale of the projected stickers (100% = fills the wall)");
+    .setDescription("Overall scale of the projection (100% = fills the wall). In Beam mode: >100% is reverse-projected but clipped at center");
 
   public final CompoundParameter yCenter =
     new CompoundParameter("YCenter", 0, -1, 1)
@@ -140,9 +136,10 @@ public class Rubik extends ApotheneumPattern {
     .setDescription("Vertical center of the projected image (0 = wall center; + moves it up)");
 
   public final CompoundParameter yFloor =
-    new CompoundParameter("YFloor", 0, 0, 2)
+    new CompoundParameter("YFloor", 1, 0, 2)
     .setUnits(CompoundParameter.Units.PERCENT_NORMALIZED)
-    .setDescription("Mute LEDs below a floor: 0 = off; 100% = just below the bottom sticker row; 200% = only the top row remains");
+    .setPolarity(LXParameter.Polarity.BIPOLAR)
+    .setDescription("Floor below which LEDs are muted, centered at 100% default: 0% = show full image; 100% = just below the bottom row; 200% = only the top row");
 
   public final EnumParameter<Surface> surfaces =
     new EnumParameter<Surface>("Surface", Surface.OUTER)
@@ -159,6 +156,7 @@ public class Rubik extends ApotheneumPattern {
     addParameter("easing", this.easing);
     addParameter("gap", this.gap);
     addParameter("edgeFade", this.edgeFade);
+    addParameter("beamMode", this.beamMode);
     addParameter("scale", this.scale);
     addParameter("yCenter", this.yCenter);
     addParameter("yFloor", this.yFloor);
@@ -503,22 +501,36 @@ public class Rubik extends ApotheneumPattern {
   // ---- Palette --------------------------------------------------------------
 
   private final int[] faceColor = new int[6];
+  // Scratch for perceptual hue allocation (no per-frame heap): hueWork holds the
+  // defined colors' perceptual positions plus the generated ones; hueOut receives
+  // the generated positions.
+  private final float[] hueWork = new float[8];
+  private final float[] hueOut = new float[6];
 
   private void computeFaceColors() {
     List<LXDynamicColor> swatch = this.lx.engine.palette.swatch.colors;
-    int fromSwatch = Math.min(swatch.size(), 5);
-    // When the palette supplies a full set of 5 colors, use 50% white for the
-    // sixth face rather than an auto-picked hue.
-    boolean fullPalette = swatch.size() >= 5;
-    for (int i = 0; i < 6; ++i) {
-      if (i < fromSwatch) {
+    int defined = Math.min(swatch.size(), 5);
+    if (swatch.size() >= 5) {
+      // Full 5-color palette: faces 0..4 from the swatch, sixth = 50% white.
+      for (int i = 0; i < 5; ++i) {
         this.faceColor[i] = swatch.get(i).getColor();
-      } else if (i == 5 && fullPalette) {
-        this.faceColor[i] = LXColor.hsb(0f, 0f, 50f); // 50% brightness white
-      } else {
-        // Fill remaining slots with evenly spaced, fully saturated hues.
-        this.faceColor[i] = LXColor.hsb((i * 60f + 20f) % 360f, 100f, 100f);
       }
+      this.faceColor[5] = LXColor.hsb(0f, 0f, 50f); // 50% brightness white
+      return;
+    }
+    // Fewer than 5 defined: keep the defined colors, then fill the remaining faces
+    // with fully-saturated hues placed to make all six hues as perceptually
+    // even (equal-jump) as possible, wrap-aware. Defined colors are anchored at
+    // their own perceptual positions.
+    for (int i = 0; i < defined; ++i) {
+      int c = swatch.get(i).getColor();
+      this.faceColor[i] = c;
+      this.hueWork[i] = PerceptualHue.toPerceptualPosition(LXColor.h(c));
+    }
+    int generate = 6 - defined;
+    PerceptualHue.fillCircle(this.hueWork, defined, generate, this.hueOut);
+    for (int j = 0; j < generate; ++j) {
+      this.faceColor[defined + j] = PerceptualHue.color(this.hueOut[j]);
     }
   }
 
@@ -583,44 +595,91 @@ public class Rubik extends ApotheneumPattern {
     final double g = 1.0 - this.gap.getValue();
     final double feather = this.edgeFade.getValue() * g;
 
-    // Overall scale + vertical recentering of the projected image. Dividing the
-    // transverse ray components by the scale factor magnifies the stickers about
-    // the wall center (central projection is invariant to uniform 3D scale, so we
-    // must scale transverse-to-normal). yCenter shifts the vertical origin.
+    // Overall scale + vertical recentering. yCenter shifts the vertical origin; the
+    // vertical sample vy is shared by both projection modes and the floor test.
     final double s = Math.max(this.scale.getValue(), 1e-3);
     final double yc = this.yCenter.getValue();
+    final boolean beam = this.beamMode.isOn();
 
-    // YFloor mutes LEDs whose (scaled/recentered) vertical falls below a floor line,
-    // measured in the same frame as the sticker rows: rows span [-1,-1/3] (bottom),
-    // [-1/3,1/3] (middle), [1/3,1] (top). 0 = off; 100% = -1/3 (below bottom row);
-    // 200% = +1/3 (only the top row remains).
-    final double yFloorParam = this.yFloor.getValue();
-    final boolean hasFloor = yFloorParam > 0;
-    final double floorLine = -1.0 + yFloorParam * (2.0 / 3.0);
+    // YFloor mutes LEDs whose vertical vy falls below a floor line, measured in the
+    // same frame as the sticker rows: rows span [-1,-1/3] (bottom), [-1/3,1/3]
+    // (middle), [1/3,1] (top). Bipolar, default 100%: 0% = -1 (full image); 100% =
+    // -1/3 (below bottom row); 200% = +1/3 (only the top row).
+    final double floorLine = -1.0 + this.yFloor.getValue() * (2.0 / 3.0);
 
     for (Apotheneum.Cube.Face face : Apotheneum.cube.exterior.faces) {
       for (Apotheneum.Column column : face.columns) {
         for (LXPoint p : column.points) {
-          double dx = (p.x - this.cx) / this.sxz;
-          double dy = ((p.y - this.cy) / this.sy - yc) / s;
-          if (hasFloor && dy < floorLine) {
+          double nx = (p.x - this.cx) / this.sxz;
+          double vy = ((p.y - this.cy) / this.sy - yc) / s;
+          if (vy < floorLine) {
             this.colors[p.index] = LXColor.BLACK;
             continue; // below the floor -> muted
           }
-          double dz = (p.z - this.cz) / this.sxz;
-          // The dominant horizontal axis is this wall's outward normal (|comp|~1);
-          // scale only the in-plane (transverse) horizontal axis.
-          if (Math.abs(dx) >= Math.abs(dz)) {
-            dz /= s; // X-normal wall -> Z is the horizontal transverse axis
+          double nz = (p.z - this.cz) / this.sxz;
+          if (beam) {
+            // Orthographic: scale is a true model resize, so the LED position is
+            // sampled at P/s against the unscaled sticker geometry.
+            this.colors[p.index] = projectLEDOrtho(nx / s, vy, nz / s, g, feather, pulse);
           } else {
-            dx /= s; // Z-normal wall -> X is the horizontal transverse axis
+            // Gnomonic: scale only the in-plane (transverse) horizontal axis; the
+            // dominant horizontal axis is this wall's outward normal (|comp|~1).
+            double dx = nx, dz = nz;
+            if (Math.abs(dx) >= Math.abs(dz)) {
+              dz /= s; // X-normal wall -> Z is the horizontal transverse axis
+            } else {
+              dx /= s; // Z-normal wall -> X is the horizontal transverse axis
+            }
+            this.colors[p.index] = projectLED(dx, vy, dz, g, feather, pulse);
           }
-          this.colors[p.index] = projectLED(dx, dy, dz, g, feather, pulse);
         }
       }
     }
 
     distributeSurfaces();
+  }
+
+  /**
+   * Orthographic (collimated-emitter) projection: each sticker is a rectangular
+   * beam along its own surface normal, 0° divergence, so there is no perspective
+   * bulge. An LED at normalized position P is lit by a sticker when P projects
+   * inside the sticker's u,v rectangle and lies in the sticker's outward hemisphere
+   * (P·n >= 0 — the "cannot cross past center" clip that keeps a beam from wrapping
+   * to the opposite wall). Nearest sticker (smallest |P-c|·n depth) wins. At
+   * scale = 100% the emitter cube fills the installation (a giant flashlight);
+   * < 100% projects smaller un-magnified rectangles; > 100% reverse-projects.
+   */
+  private int projectLEDOrtho(double px, double py, double pz, double g, double feather, double pulse) {
+    double bestDepth = Double.MAX_VALUE;
+    int bestColor = LXColor.BLACK;
+
+    for (int i = 0; i < this.rCount; ++i) {
+      double[] n = this.rn[i];
+      if (px * n[0] + py * n[1] + pz * n[2] < 0) {
+        continue; // behind the center plane for this emitter -> clipped
+      }
+      double[] cc = this.rc[i];
+      double wx = px - cc[0];
+      double wy = py - cc[1];
+      double wz = pz - cc[2];
+      double[] u = this.ru[i];
+      double a = (wx * u[0] + wy * u[1] + wz * u[2]) / (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+      if (a < -1 || a > 1) {
+        continue;
+      }
+      double[] v = this.rv[i];
+      double b = (wx * v[0] + wy * v[1] + wz * v[2]) / (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+      if (b < -1 || b > 1) {
+        continue;
+      }
+      double depth = Math.abs(wx * n[0] + wy * n[1] + wz * n[2]);
+      if (depth < bestDepth) {
+        bestDepth = depth;
+        double mask = tileMask(a, g, feather) * tileMask(b, g, feather);
+        bestColor = scaleColor(this.faceColor[this.rColor[i]], mask * pulse);
+      }
+    }
+    return bestColor;
   }
 
   /** Cast a ray from the center along (dx,dy,dz), return the color of the nearest visible sticker. */

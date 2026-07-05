@@ -91,7 +91,13 @@ rest. The rotation angle is `easing.apply(subPhase) · sign · 90°`.
 `Easing` (nested enum): `DECELERATE` (default), `ACCELERATE`, `SMOOTHSTEP`,
 `LINEAR`, each implementing `double apply(double t)`.
 
-## Projection — central (gnomonic) raycast
+## Projection
+
+Two projection modes, selected by the `beamMode` (Beam) toggle: the default
+**gnomonic** raycast (perspective from the center), and an **orthographic**
+collimated-emitter mode.
+
+### Gnomonic (default) — central raycast
 
 Everything is done in a normalized frame centered on the installation with the
 walls at ±1: `d = ((p − center) / scale)`, using the horizontal half-extent for
@@ -118,60 +124,75 @@ all 54 quads (`projectLED`): nearest `t > 0` with an outward-facing normal
 
 The intersection also yields tile-local coords `a,b ∈ [-1,1]` for shading.
 
+### Orthographic (Beam) — collimated emitters
+
+With `beamMode` on, each sticker is instead a **collimated emitter**: a rectangular
+beam fired straight out along its own surface normal with 0° divergence (a
+searchlight). There is **no perspective bulge** — turns read as flat panels sweeping
+rather than bulging cubies. An LED at normalized position `P` is lit by a sticker
+when `P` projects inside that sticker's `u,v` rectangle **and** lies in the
+sticker's outward hemisphere (`P·n ≥ 0`); the nearest sticker (smallest `|P−c|·n`)
+wins (`projectLEDOrtho`). The `P·n ≥ 0` test is the *"cannot cross past center"*
+clip: a beam only illuminates its own half of the installation, never wrapping to
+the opposite wall.
+
+Because central projection is invariant to uniform scale but an orthographic
+emitter is not, here `scale` is a true resize of the emitter cube, applied by
+sampling at `P/scale` against the unscaled sticker geometry:
+
+- **100%** — the emitter cube exactly fills the installation: a giant flashlight,
+  each wall showing its flat face.
+- **< 100%** — a smaller cube casts smaller, **un-magnified** rectangles onto the
+  walls (0° beam), black around them.
+- **> 100%** — the emitter is larger than the installation; the beams
+  reverse-project (magnify) but are still clipped at the center, so nothing crosses
+  to the far wall.
+
 ### Scale and vertical recentering
 
-Two controls reshape the projected image on the walls. Because central projection
-is invariant to a uniform 3D scale of the model about the center, the image is
-scaled instead by dividing each LED ray's **transverse** components (the two axes
-perpendicular to that wall's outward normal) by the `scale` factor — magnifying the
-stickers about the wall center. `scale = 100%` is the untouched full-wall fit;
-`< 100%` shrinks the cube (black surround as rays miss it); `> 100%` (up to 400%)
-enlarges it (clipped at the wall edges). Each wall's outward normal is simply
-whichever of X/Z dominates for that LED (it physically sits on that wall, so its
-normal component is ≈ ±1).
-
-`yCenter` shifts the vertical origin of the sample (`dy → (dy − yCenter)/scale`),
-sliding the image up (+) or down (−) the wall by up to a full half-height.
-Combined with a reduced `scale`, the whole projection can be lifted clear of the
-portal openings.
+`scale` and `yCenter` reshape the projected image (both modes). In **gnomonic**
+mode, because central projection is invariant to a uniform 3D scale, the image is
+scaled by dividing each LED ray's **transverse** component (the horizontal axis
+perpendicular to that wall's outward normal — whichever of X/Z dominates for that
+LED) by `scale`, magnifying about the wall center: `100%` = full-wall fit, `<100%`
+shrinks (black surround), `>100%` (up to 400%) enlarges (clipped at wall edges). In
+**Beam** mode `scale` is a literal emitter resize (see above). `yCenter` shifts the
+shared vertical sample `vy = ((p.y−cy)/sy − yCenter)/scale`, sliding the image up
+(+) / down (−); combined with `scale` it lifts the projection clear of the portals.
 
 ### YFloor — mute below a horizontal line
 
-`yFloor` blacks out every wall LED whose (scaled/recentered) vertical `dy` falls
-below a floor line, measured in the **same frame as the sticker rows** — so the
-floor tracks the image as `scale`/`yCenter` move it. The 3×3 rows occupy
-`dy ∈ [-1,-⅓]` (bottom), `[-⅓,⅓]` (middle), `[⅓,1]` (top), and the floor is linear:
-`floor = -1 + yFloor·(2/3)`.
+`yFloor` blacks out every wall LED whose vertical sample `vy` falls below a floor
+line, measured in the **same frame as the sticker rows** (so the floor tracks the
+image as `scale`/`yCenter` move it) and applied identically in both projection
+modes. The 3×3 rows occupy `vy ∈ [-1,-⅓]` (bottom), `[-⅓,⅓]` (middle), `[⅓,1]`
+(top). It is a **bipolar control centered at its 100% default**, linear
+`floor = -1 + yFloor·(2/3)`:
 
-- `0` — off (no muting).
-- `100%` — floor at `-⅓`, right below the bottom row: the bottom row is muted,
-  middle and top remain.
+- `0%` — floor at `-1`: full image, nothing muted.
+- `100%` (default) — floor at `-⅓`: the bottom row is muted, middle and top remain.
 - `200%` — floor at `+⅓`: only the top row remains.
 
-Besides framing, this is the tool for hiding the top/bottom-cap leak that central
+Besides framing, this is the tool for hiding the top/bottom-cap leak that gnomonic
 projection produces at `scale < 100%` (the virtual cube's up/down faces reaching the
 walls near the edges): raise the floor to clip the lower leak, or use it with
 `yCenter`/`scale` to seat the projection above the portal openings.
 
-> Note vs. the plan: an explicit ortho⇄gnomonic `k` blend proved unnecessary.
-> Pure central projection is already flat at rest (planar faces project
-> uniformly) and only distorts where 3D geometry actually moves, so the "bulge
-> tracks motion" behavior is inherent. Consequently there are **no black side
-> bars** — each wall is filled edge-to-edge and meets its neighbors like a real
-> cube. Tiles are the wall size / 3 (≈ slightly wider than tall on the 50×45
-> grid). A letterbox/"square-tile" mode could be layered on later if desired.
-
 ## Face colors (palette)
 
 The six face colors are taken from the active Chromatik palette swatch each frame:
-face `i` uses swatch color `i` for the first five faces. For the sixth face:
+face `i` uses swatch color `i` for the first five faces.
 
-- if the swatch defines **all five** colors (`swatch.size() >= 5`), the sixth face
-  is **50% brightness white** (`hsb(0,0,50)`) — a neutral complement to a full
-  five-color palette;
-- otherwise the remaining faces fall back to an **auto picker** (evenly spaced,
-  fully saturated hues) so the cube always shows six distinct colors even with a
-  sparse swatch.
+- **5 colors defined** (`swatch.size() >= 5`): faces 0–4 are the swatch colors and
+  the sixth is **50% brightness white** (`hsb(0,0,50)`), a neutral complement.
+- **Fewer than 5 defined**: the defined colors are kept, and the remaining faces are
+  filled with fully-saturated hues placed to make all six hues as **perceptually
+  even** as possible. The defined colors are anchored at their positions on a
+  perceptually-uniform hue circle (see `util/PerceptualHue`, a FastLED-"rainbow"-style
+  remap that gives orange/yellow room and compresses green/blue), then the gaps are
+  filled by greedily bisecting the largest arc (wrap-aware), and each new position is
+  mapped back to a spectral HSV hue for rendering. This yields more evenly-*named*
+  jumps (red, orange, green, …) than raw 60° HSV steps, and it's allocation-free.
 
 ## Shading
 
@@ -213,9 +234,10 @@ where it differs from the field name.
 | `easing` (Ease) | EnumParameter&lt;Easing&gt; | DECELERATE | — | turn motion curve |
 | `gap` (Gap) | CompoundParameter | 0.14 | 0..1 | gap between stickers (100% = stickers vanish) |
 | `edgeFade` (Fade) | CompoundParameter | 0.25 | 0..1 | tile edge softness |
-| `scale` (Scale) | CompoundParameter | 1.0 | 0..4 | overall scale of the projection (100% = full wall) |
+| `beamMode` (Beam) | BooleanParameter | off | — | off = gnomonic perspective; on = orthographic collimated emitters (no bulge) |
+| `scale` (Scale) | CompoundParameter | 1.0 | 0..4 | projection scale (100% = full wall; Beam mode = literal emitter resize) |
 | `yCenter` (YCenter) | CompoundParameter | 0 | -1..1 | vertical center of the image (+ = up) |
-| `yFloor` (YFloor) | CompoundParameter | 0 | 0..2 | mute LEDs below a floor (0 = off; 100% = below bottom row; 200% = only top row) |
+| `yFloor` (YFloor) | CompoundParameter | 1.0 | 0..2 | bipolar floor, default 100%; 0% = full image, 100% = below bottom row, 200% = only top row |
 | `surfaces` (Surface) | EnumParameter&lt;Surface&gt; | OUTER | — | OUTER / INNER / BOTH |
 
 UI is Chromatik's default auto-generated control panel (no custom

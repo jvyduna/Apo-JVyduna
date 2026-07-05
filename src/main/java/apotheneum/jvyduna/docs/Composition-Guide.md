@@ -118,7 +118,7 @@ The lane stack mirrors your mixer: every channel, group, and the master bus auto
 
 ### The lane sidebar (right edge)
 
-Each lane's header cell in the right-hand sidebar packs in several unlabeled interactions:
+Each lane's header cell in the right-hand sidebar has:
 
 - **Expander triangle** — collapse / expand the lane. Modifiers do more:
   - `Cmd+click` the triangle (or `Cmd+Enter` / `Shift+Enter` with the lane focused): **maximize** the lane to fill the window.

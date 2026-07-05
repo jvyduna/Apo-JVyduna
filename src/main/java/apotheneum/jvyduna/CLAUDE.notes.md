@@ -1,4 +1,4 @@
-# CLAUDE.notes.md — jvyduna package (personal Claude memory)
+/m# CLAUDE.notes.md — jvyduna package (personal Claude memory)
 
 Personal Claude Code guidance for Jeff Vyduna's `apotheneum.jvyduna.*` work.
 
@@ -64,6 +64,13 @@ Jeff's goal is to compose a 20 minute piece for Apothneum that is tightly choreo
   would break their build. Carry it as a persistent unstaged modification; never
   `git add pom.xml` for this change. (Revisit if/when arrange is released and the
   version is one everyone has.)
+
+- **`audio/` is intentionally kept out of git.** The `jvyduna/audio/` folder holds
+  ~258 MB of copyrighted reference tracks (the songs I'm choreographing to). It's
+  ignored via `.git/info/exclude` (local-only, so the shared `.gitignore` stays
+  untouched) — the files live on disk but never enter history or get pushed. Don't
+  `git add` audio. Note the ignore is local to this clone; a fresh clone of the fork
+  won't carry it (there's nothing to re-ignore unless audio is copied in again).
 
 ## Conventions inherited from the repo
 
