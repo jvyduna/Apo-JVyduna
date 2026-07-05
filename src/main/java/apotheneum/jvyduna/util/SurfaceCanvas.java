@@ -115,4 +115,37 @@ public class SurfaceCanvas {
       }
     }
   }
+
+  /**
+   * Copy variant with a brightness multiplier and optional vertical flip.
+   * mult scales each pixel's RGB (clamped to 255, alpha forced opaque);
+   * flipY reads the canvas upside down without touching its contents.
+   *
+   * @param orientation Target surface
+   * @param colors Pattern color buffer (this.colors in the pattern)
+   * @param mult RGB multiplier, typically 0..1 for dimming, >1 to boost
+   * @param flipY Read rows bottom-to-top (e.g. cave/inversion modes)
+   */
+  public void copyTo(Apotheneum.Orientation orientation, int[] colors, double mult, boolean flipY) {
+    final Apotheneum.Column[] columns = orientation.columns();
+    final int w = Math.min(this.width, columns.length);
+    for (int x = 0; x < w; ++x) {
+      final Apotheneum.Column column = columns[x];
+      final int h = Math.min(this.height, column.points.length);
+      for (int y = 0; y < h; ++y) {
+        final int src = this.pixels[(flipY ? (this.height - 1 - y) : y) * this.width + x];
+        colors[column.points[y].index] = scale(src, mult);
+      }
+    }
+  }
+
+  private static int scale(int argb, double mult) {
+    if ((argb & 0x00ffffff) == 0) {
+      return 0xff000000;
+    }
+    final int r = Math.min(255, (int) (((argb >> 16) & 0xff) * mult));
+    final int g = Math.min(255, (int) (((argb >> 8) & 0xff) * mult));
+    final int b = Math.min(255, (int) ((argb & 0xff) * mult));
+    return 0xff000000 | (r << 16) | (g << 8) | b;
+  }
 }

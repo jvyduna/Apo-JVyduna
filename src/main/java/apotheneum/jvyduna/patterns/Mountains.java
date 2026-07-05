@@ -454,38 +454,10 @@ public class Mountains extends ApotheneumPattern {
     this.cylinderField.advance(deltaMs);
 
     final double lift = LIFT_BASE + LIFT_SPAN * Math.min(1, this.audio.level * LIFT_GAIN);
-    copyLifted(this.cubeField.canvas, Apotheneum.cube.exterior, lift);
-    copyLifted(this.cylinderField.canvas, Apotheneum.cylinder.exterior, lift);
+    this.cubeField.canvas.copyTo(Apotheneum.cube.exterior, this.colors, lift, this.inverted);
+    this.cylinderField.canvas.copyTo(Apotheneum.cylinder.exterior, this.colors, lift, this.inverted);
 
     copyCubeExterior();
     copyCylinderExterior();
-  }
-
-  /**
-   * Canvas -> surface copy with the audio brightness lift and optional cave
-   * inversion. Mirrors SurfaceCanvas.copyTo's door-column guard
-   * (column.points.length); kept local because copyTo has no scale hook.
-   */
-  private void copyLifted(SurfaceCanvas canvas, Apotheneum.Orientation orientation, double lift) {
-    final Apotheneum.Column[] columns = orientation.columns();
-    final int w = Math.min(canvas.width, columns.length);
-    for (int x = 0; x < w; ++x) {
-      final Apotheneum.Column column = columns[x];
-      final int h = Math.min(canvas.height, column.points.length);
-      for (int y = 0; y < h; ++y) {
-        final int src = canvas.get(x, this.inverted ? (canvas.height - 1 - y) : y);
-        this.colors[column.points[y].index] = scaleColor(src, lift);
-      }
-    }
-  }
-
-  private static int scaleColor(int argb, double f) {
-    if ((argb & 0x00ffffff) == 0) {
-      return LXColor.BLACK;
-    }
-    final int r = (int) (((argb >> 16) & 0xff) * f);
-    final int g = (int) (((argb >> 8) & 0xff) * f);
-    final int b = (int) ((argb & 0xff) * f);
-    return 0xff000000 | (r << 16) | (g << 8) | b;
   }
 }
