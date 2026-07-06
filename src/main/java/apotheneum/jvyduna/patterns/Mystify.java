@@ -59,17 +59,21 @@ public class Mystify extends ApotheneumPattern {
 
   /** Seconds for a vertex to cross the full canvas width at Speed=1 nominal
    *  rate (wrap-x drift; planned axes use random grid arrivals, dart-guarded
-   *  to never imply traversal faster than TRAVERSE_SEC/5 per span) */
+   *  at low Speed — the guard fades out as Speed approaches SPEED_MAX) */
   private static final double TRAVERSE_SEC = 12;
+
+  /** Top of the Speed knob range; at this value bounce planning is
+   *  deterministic (exactly one BounceDiv apart) and the dart guard is off */
+  private static final double SPEED_MAX = 5;
 
   /** Slowest vertex velocity component, as a fraction of the fastest — keeps
    *  wrap-x drift varied per vertex (planned axes use it only for direction) */
   private static final double VEL_MIN = 0.45;
 
   /** Trail half-life range (ms), mapped exponentially from the Trails knob:
-   *  50 ms reads as almost bare lines; 5000 ms leaves many-second comets */
+   *  50 ms reads as almost bare lines; 20 s leaves near-permanent layers */
   private static final double TRAIL_HALF_LIFE_MIN_MS = 50;
-  private static final double TRAIL_HALF_LIFE_MAX_MS = 5000;
+  private static final double TRAIL_HALF_LIFE_MAX_MS = 20000;
 
   /** Treble transients shorten trails by up to ~30% (1 + 0.15 * 2) — subtle */
   private static final double TREBLE_TRAIL_SHORTEN = 0.15;
@@ -177,7 +181,7 @@ public class Mystify extends ApotheneumPattern {
     .setDescription("Rotate the palette color assignment of the polyline edges"));
 
   public final EnumParameter<Geometry> geometry =
-    new EnumParameter<Geometry>("Geometry", Geometry.CUBE_RING)
+    new EnumParameter<Geometry>("GeoMode", Geometry.CUBE_RING)
     .setDescription("Surface topology: Faces mirrors one sim to all cube faces, Faces4 runs one independent sim per face (x bounces); CubeRing/Cylinder wrap continuously around");
 
   public final DiscreteParameter shapes =
@@ -185,20 +189,20 @@ public class Mystify extends ApotheneumPattern {
     .setDescription("Number of independent polylines (1 or 2)");
 
   public final DiscreteParameter vertices =
-    new DiscreteParameter("Vertices", 4, 2, MAX_VERTS + 1)
+    new DiscreteParameter("Vrtices", 4, 2, MAX_VERTS + 1)
     .setDescription("Vertices per polyline (2 = a single open line, 3-5 = closed polygon)");
 
   public final CompoundParameter speed =
-    new CompoundParameter("Speed", 1, 0, 5)
+    new CompoundParameter("Speed", 1, 0, SPEED_MAX)
     .setExponent(2)
-    .setDescription("Bounce cadence: the random arrival window is 1..(8/Speed) BounceDiv steps, so higher = faster, more frequent bounces; 0 = pause");
+    .setDescription("Bounce cadence: at max every bounce lands exactly one BounceDiv apart; lower values widen the random arrival window (1..8/Speed BounceDiv steps); 0 = pause");
 
   public final CompoundParameter trails =
-    new CompoundParameter("Trails", 0.5)
-    .setDescription("Decay rate of stamped leftover lines: 0 = fade almost instantly, 1 = many-second persistence");
+    new CompoundParameter("Trails", 0.25)
+    .setDescription("Decay rate of stamped leftover lines: 0 = fade almost instantly, 1 = ~20 s half-life near-permanent layers");
 
   public final EnumParameter<Tempo.Division> trailDiv =
-    new EnumParameter<Tempo.Division>("TrailDiv", Tempo.Division.QUARTER)
+    new EnumParameter<Tempo.Division>("TrailDiv", Tempo.Division.EIGHTH)
     .setDescription("Tempo division on whose crossings the live shape is stamped into the trail as a distinct leftover line");
 
   public final EnumParameter<SurfaceCanvas.Blend> trailBlend =
@@ -214,7 +218,7 @@ public class Mystify extends ApotheneumPattern {
     .setDescription("Draw a mirrored copy of every line and flash ball across the geometry's reflection axis (local centerline on face modes, the verified X=Z world diagonal on CubeRing/Cylinder)");
 
   public final EnumParameter<BounceGrid> bounceDiv =
-    new EnumParameter<BounceGrid>("BounceDiv", BounceGrid.ONE)
+    new EnumParameter<BounceGrid>("BncDiv", BounceGrid.ONE)
     .setDescription("Beat grid (in quarter-note beats) that every wall bounce lands on, anchored by pattern load / Scatter");
 
   public final CompoundParameter audioDepth =
@@ -294,6 +298,7 @@ public class Mystify extends ApotheneumPattern {
     super(lx);
     this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
     this.tempoLock = new TempoLock(lx);
+    this.geometry.setWrappable(false); // knob stops at Faces/Cylinder ends instead of wrapping
     for (int f = 0; f < FACE_GROUPS; ++f) {
       this.faceTrail[f] = new SurfaceCanvas(Apotheneum.GRID_WIDTH, Apotheneum.GRID_HEIGHT);
       this.faceScratch[f] = new SurfaceCanvas(Apotheneum.GRID_WIDTH, Apotheneum.GRID_HEIGHT);
@@ -443,14 +448,14 @@ public class Mystify extends ApotheneumPattern {
     switch (geom) {
       case FACES:
         renderSurface(this.faceTrail[0], this.faceScratch[0], geom, 0, stampNow, decayMult);
-        copyToFace(Apotheneum.cube.exterior.front, this.faceScratch[0]);
+        this.faceScratch[0].copyTo(Apotheneum.cube.exterior.front, this.colors);
         copyCubeFace(Apotheneum.cube.exterior.front); // replicates to all 8 faces
         break;
       case FACES_4:
         for (int f = 0; f < FACE_GROUPS; ++f) {
           renderSurface(this.faceTrail[f], this.faceScratch[f], geom, f, stampNow, decayMult);
           final Apotheneum.Cube.Face exterior = Apotheneum.cube.exterior.faces[f];
-          copyToFace(exterior, this.faceScratch[f]);
+          this.faceScratch[f].copyTo(exterior, this.colors);
           if (Apotheneum.cube.interior != null) {
             copy(exterior, Apotheneum.cube.interior.faces[f]);
           }
@@ -490,18 +495,21 @@ public class Mystify extends ApotheneumPattern {
 
   /**
    * Plan one axis's wall arrival: a RANDOM allowed grid beat (anchorBeat +
-   * m * BounceDiv) 1..kMax steps from now, where kMax = 8/Speed — drawn
-   * independently per vertex per axis per bounce, so x/y arrival times
-   * decorrelate and the ricochet angle and bounce location vary (no
-   * periodic corner-to-corner locking). A dart guard bumps targets that
-   * would imply traversal faster than TRAVERSE_SEC/5 per span.
+   * m * BounceDiv) 1..kMax steps from now, where kMax = floor(8/Speed) —
+   * drawn independently per vertex per axis per bounce, so x/y arrival times
+   * decorrelate and the ricochet angle and bounce location vary (no periodic
+   * corner-to-corner locking). At Speed max kMax is 1 and the dart guard is
+   * fully faded, so every bounce lands exactly one BounceDiv apart; at
+   * Speed <= 1 the guard runs at full strength (bumping draws that would
+   * imply traversal faster than TRAVERSE_SEC/5 per span), preserving the
+   * low-speed look.
    */
   private double planAxis(double pos, double vel) {
     final double n = this.bounceDiv.getEnum().beats;
     final double beatMs = this.tempoLock.beatPeriodMs();
     final double now = this.tempoLock.beatPosition();
     final double speedVal = Math.max(this.speed.getValue(), PAUSE_SPEED_EPS);
-    final int kMax = (int) LXUtils.constrain(Math.round(RAND_BOUNCE_STEPS / speedVal), 1, RAND_WINDOW_MAX);
+    final int kMax = (int) LXUtils.constrain(Math.floor(RAND_BOUNCE_STEPS / speedVal), 1, RAND_WINDOW_MAX);
 
     // First allowed grid beat at least MIN_HEADROOM_MS away, then a random
     // number of additional whole grid steps
@@ -509,11 +517,13 @@ public class Mystify extends ApotheneumPattern {
     double target = this.anchorBeat + Math.ceil((now + headroomBeats - this.anchorBeat) / n) * n;
     target += n * this.random.nextInt(kMax);
 
-    // Dart guard: implied traversal never faster than TRAVERSE_SEC/5 per span
-    // (the Speed knob's own ceiling). Bounded loop as paranoia against a
-    // degenerate tempo period.
+    // Dart guard, faded with Speed: full strength at Speed <= 1 (implied
+    // traversal never faster than TRAVERSE_SEC/5 per span), gone at
+    // SPEED_MAX so exact-BounceDiv darts are allowed. Bounded loop as
+    // paranoia against a degenerate tempo period.
+    final double guardFactor = LXUtils.constrain((SPEED_MAX - speedVal) / (SPEED_MAX - 1), 0, 1);
     final double remDist = (vel > 0) ? (1 - pos) : pos;
-    final double minMs = Math.max(MIN_HEADROOM_MS, 1000 * remDist * TRAVERSE_SEC / 5);
+    final double minMs = Math.max(MIN_HEADROOM_MS, 1000 * remDist * (TRAVERSE_SEC / 5) * guardFactor);
     for (int guard = 0; (guard < 1024) && (this.tempoLock.msUntilBeat(target) < minMs); ++guard) {
       target += n;
     }
@@ -846,14 +856,4 @@ public class Mystify extends ApotheneumPattern {
     return yn * (height - 1);
   }
 
-  /** Blit a 50x45 canvas onto one cube face, door-guarded */
-  private void copyToFace(Apotheneum.Cube.Face face, SurfaceCanvas canvas) {
-    for (int x = 0; x < canvas.width; ++x) {
-      final Apotheneum.Column column = face.columns[x];
-      final int h = Math.min(canvas.height, column.points.length);
-      for (int y = 0; y < h; ++y) {
-        this.colors[column.points[y].index] = canvas.get(x, y);
-      }
-    }
-  }
 }

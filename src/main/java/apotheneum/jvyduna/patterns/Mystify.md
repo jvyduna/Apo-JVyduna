@@ -175,17 +175,21 @@ long BounceDiv locked vertices into periodic corner-to-corner paths):
 - Each vertex axis that can bounce (y always; x in the face modes) plans its
   arrival as an **absolute beat index**: the next allowed grid beat (≥100 ms
   headroom) plus a **uniform random 0..kMax−1 additional grid steps**, where
-  `kMax = clamp(round(8 / Speed), 1, 64)` — i.e. the next bounce is 1..kMax
+  `kMax = clamp(floor(8 / Speed), 1, 64)` — i.e. the next bounce is 1..kMax
   BounceDiv steps from now. Drawn independently per vertex per axis per
   bounce: x and y arrival times decorrelate, so which edge is hit and where
   on it varies every ricochet — no static periodic motion. At Speed 1 this is
-  exactly "BounceDiv × rand(8) from now"; Speed scales the window (5 → 1..2,
-  frenetic; 0.5 → 1..16, languid). Speed 0 = pause.
-- **Dart guard**: a random draw could otherwise imply a full-canvas traversal
-  in one short grid step; targets are bumped to later multiples until the
-  implied speed is no faster than `TRAVERSE_SEC/5` = 2.4 s per span (the old
-  Speed knob's own ceiling). CURATE: verify 2.4 s worst-case darts read OK on
-  the full sculpture.
+  exactly "BounceDiv × rand(8) from now"; at **Speed max (5) kMax = 1**, so
+  every bounce lands exactly one BounceDiv apart — deterministic, frenetic;
+  0.5 → 1..16, languid. Speed 0 = pause.
+- **Dart guard, faded with Speed**: a random draw could otherwise imply a
+  full-canvas traversal in one short grid step. At Speed ≤ 1 targets are
+  bumped to later multiples until the implied speed is no faster than
+  `TRAVERSE_SEC/5` = 2.4 s per span (this shapes the low-speed look and is
+  deliberately preserved); the guard strength fades linearly to zero at
+  Speed max (`guardFactor = (5 − Speed)/4`), where exact-BounceDiv full-span
+  darts are the point. CURATE: verify max-Speed darts read OK on the full
+  sculpture, and that the mid-range fade (Speed 2–4) feels continuous.
 - Every frame, velocity is **derived**: `v = remainingDistance /
   msUntilBeat(target)` — arrival is exact by construction and live BPM
   changes bend the motion continuously. A target stranded >250 ms in the past
@@ -218,16 +222,20 @@ UI/registration order: triggers, pattern parameters, Audio, Meta last.
 | `scatter` | Scatter | TriggerParameter | — | — | re-randomize every vertex position + velocity; re-anchor the bounce grid |
 | `reverse` | Reverse | TriggerParameter | — | — | negate all velocities; shapes retrace their paths |
 | `hueJump` | HueJump | TriggerParameter | — | — | rotate the palette color assignment of the edges |
-| `geometry` | Geometry | EnumParameter&lt;Geometry&gt; | CUBE_RING | FACES / FACES_4 / CUBE_RING / CYLINDER | sim topology / target surface |
+| `geometry` | GeoMode | EnumParameter&lt;Geometry&gt; | CUBE_RING | FACES / FACES_4 / CUBE_RING / CYLINDER | sim topology / target surface; knob is non-wrapping (`setWrappable(false)`) |
 | `shapes` | Shapes | DiscreteParameter | 2 | 1..2 | number of polylines (per face group) |
-| `vertices` | Vertices | DiscreteParameter | 4 | 2..5 | vertices per polyline (2 = a single open line) |
-| `speed` | Speed | CompoundParameter | 1 | 0..5 (exp 2) | bounce cadence: random window is 1..(8/Speed) BounceDiv steps; 0 = pause |
-| `trails` | Trails | CompoundParameter | 0.5 | 0..1 | leftover-line decay (exp half-life 50..5000 ms) |
-| `trailDiv` | TrailDiv | EnumParameter&lt;Tempo.Division&gt; | QUARTER | all divisions | division on whose crossings a leftover line is stamped |
+| `vertices` | Vrtices | DiscreteParameter | 4 | 2..5 | vertices per polyline (2 = a single open line) |
+| `speed` | Speed | CompoundParameter | 1 | 0..5 (exp 2) | bounce cadence: max = exactly one BounceDiv per bounce; lower widens the random window (1..8/Speed steps); 0 = pause |
+| `trails` | Trails | CompoundParameter | 0.25 | 0..1 | leftover-line decay (exp half-life 50 ms..20 s) |
+| `trailDiv` | TrailDiv | EnumParameter&lt;Tempo.Division&gt; | EIGHTH | all divisions | division on whose crossings a leftover line is stamped |
 | `trailBlend` | TrailBlend | EnumParameter&lt;SurfaceCanvas.Blend&gt; | Xor | Max / Xor / Diff / Add | how stamps composite against existing trail pixels |
 | `wu` | Wu | BooleanParameter | false | — | Xiaolin Wu antialiased lines instead of Bresenham |
 | `mirror` | Mirror | BooleanParameter | false | — | same-color mirrored copy of every line/ball across the geometry's reflection axis |
-| `bounceDiv` | BounceDiv | EnumParameter&lt;BounceGrid&gt; | 1 | 3/4 / 1 / 2 / 4 / 8 | beat grid (quarter notes) every wall bounce lands on |
+| `bounceDiv` | BncDiv | EnumParameter&lt;BounceGrid&gt; | 1 | 3/4 / 1 / 2 / 4 / 8 | beat grid (quarter notes) every wall bounce lands on |
+
+UI labels are truncation-tuned (Vrtices, BncDiv, GeoMode); the `addParameter`
+keys keep their full names (`vertices`, `bounceDiv`, `geometry`), so saved
+LXP parameter paths are unaffected.
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth: 0 = pure screensaver, 1 = full reactivity |
 | `meta` | Meta | TriggerParameter | — | — | randomly fire one trigger or jump one parameter |
 
@@ -275,13 +283,14 @@ Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [
 
 **Speed model.** Planned-axis velocity is fully emergent:
 `v = remainingDistance / msUntilBeat(target)`, with targets drawn randomly
-from the BounceDiv grid (window 1..8/Speed steps). There is no fixed
+from the BounceDiv grid (window 1..floor(8/Speed) steps). There is no fixed
 traversal cap anymore — **flagged deviation** (user requirement, 2026-07-06):
-the old ≥5 s floor is replaced by the **dart guard**, which bumps any target
-that would imply traversal faster than `TRAVERSE_SEC/5 = 2.4 s` per span.
-Slow side: a random long draw (up to 64 grid steps at low Speed) can make a
-vertex crawl — CURATE: confirm a wall-hugging vertex crawling toward a
-distant beat never reads as stuck.
+the old ≥5 s floor is replaced by the speed-faded **dart guard** — full
+strength (2.4 s/span minimum) at Speed ≤ 1, fading to nothing at Speed max,
+where a full-span traversal inside one BounceDiv (sub-second) is the
+requested look. Slow side: a random long draw (up to 64 grid steps at low
+Speed) can make a vertex crawl — CURATE: confirm a wall-hugging vertex
+crawling toward a distant beat never reads as stuck.
 
 Wrap-x drift runs at `Speed / 12 s` per circumference — at Speed 5 that is
 2.4 s per 200/120-column lap, matching the dart cap. In the face modes the
@@ -311,15 +320,17 @@ better default (`wu` currently ships false = crisp Bresenham).
 | 2026-07-06 | Curation rework: trail/scratch canvas split with TimeGap-stamped leftover lines; Trails = pure decay constant; removed the audio speed-breath; Speed re-ranged 0..5 (0 = pause); replaced Sync/TempoDiv retime nudging with the BounceOnBeats hard grid planner; added Wu antialiasing toggle; max (lighten) line compositing | Recreate the original's distinct-gap moiré look; tempo-exact bounces |
 | 2026-07-06 | Added `Vertices = 2` open-line mode; added `Mirror` toggle (axis verified against the fixture geometry: local centerline on faces, X=Z world diagonal on CubeRing/Cylinder) | Round out the shape vocabulary; kaleidoscope-style symmetry |
 | 2026-07-06 | Batch 3: split TimeGap into `TrailDiv` + `BounceDiv` (renamed from BounceOnBeats, added 3/4); **random bounce planner** (next arrival = 1..8/Speed random BounceDiv steps, per vertex per axis — kills periodic corner-to-corner locking; dart guard at 2.4 s/span); `TrailBlend` (default **Xor** — stamps erase trail crossings, the true interference moiré; live line stays Max; half-open closed-polygon edges prevent vertex self-erase); Trails max half-life 2500→5000 ms; new `Faces4` geometry (4 independent sims, state ×4 = 40 vertices); per-edge palette cycling (3-color palette + 5 vertices now uses all 3, was 2); removed `Energy` (baked at its 0 value: 12 s nominal, 0.6 flash); flash pops are now palette-colored pulsing balls (radius ≤3, was a white 1-px cross) | Live-viewing feedback: periodic paths, weak moiré, unused palette colors, dead Energy knob, clashing white flashes |
+| 2026-07-06 | Iteration 4: TrailDiv default 1/8; Trails max half-life 5→20 s, default 0.25; UI labels Vrtices/BncDiv/GeoMode (keys unchanged); GeoMode knob non-wrapping; planner kMax uses floor(8/Speed) so Speed max plans exactly one BounceDiv per bounce, with the dart guard fading linearly to zero at max (full strength ≤ 1 — low-speed look preserved verbatim); replaced the hand-rolled copyToFace with the widened `SurfaceCanvas.copyTo(Surface)` from main | Live-viewing feedback: tighter stamps, longer layers, label truncation, beat-exact frenzy at max Speed |
 
 CURATE (unverified constants, gathered for the walk-through):
-- `TRAIL_HALF_LIFE_MIN_MS/MAX_MS = 50/5000`, exp-mapped from Trails knob —
-  default (0.5 → ~500 ms half-life) chosen by intuition.
+- `TRAIL_HALF_LIFE_MIN_MS/MAX_MS = 50/20000`, exp-mapped from Trails knob —
+  default (0.25 → ~224 ms half-life) chosen by intuition.
 - `TrailBlend = Xor` default — the moiré goal, but confirm it doesn't read as
   broken/flickery on real LEDs; Max is one click away.
-- `TrailDiv = QUARTER` default — line spacing vs. clutter at typical BPM.
+- `TrailDiv = EIGHTH` default — line spacing vs. clutter at typical BPM.
 - `BounceDiv = 1` default and the random-window legibility — see Tempo notes.
-- Dart guard ceiling `TRAVERSE_SEC/5 = 2.4 s/span` — fastest allowed dart.
+- Dart guard: 2.4 s/span at Speed ≤ 1, linear fade to zero at Speed max —
+  check the mid-range (Speed 2–4) transition feels continuous.
 - `wu = false` default — pick Bresenham vs. Wu on the real LEDs; check
   Wu+Xor vertex pinholes (endpoint double-plot accepted in code).
 - Planner constants `SLEW_MS/ARRIVAL_EPS_MS/MIN_HEADROOM_MS/RATE_CHANGE_FRAC/
