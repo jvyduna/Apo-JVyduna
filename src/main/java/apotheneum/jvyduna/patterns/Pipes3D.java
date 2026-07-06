@@ -18,6 +18,7 @@ import heronarts.lx.color.LXDynamicColor;
 import heronarts.lx.parameter.CompoundParameter;
 import heronarts.lx.parameter.DiscreteParameter;
 import heronarts.lx.parameter.EnumParameter;
+import heronarts.lx.parameter.LXParameter;
 import heronarts.lx.parameter.TriggerParameter;
 
 /**
@@ -57,14 +58,6 @@ public class Pipes3D extends ApotheneumPattern {
 
   // ---- Timing constants (physical intent) -----------------------------------
 
-  /**
-   * Simulation-principles cap: a full wall crossing (gx cells) must take at
-   * least this long. Enforced exactly: the effective speed is clamped to
-   * gx * period / TRAVERSAL_MIN_MS cells per beat, and run planning never
-   * schedules a run faster than that clamp.
-   */
-  private static final double TRAVERSAL_MIN_MS = 5000;
-
   /** Auto-drain when this fraction of room cells is occupied */
   private static final double FILL_LIMIT = 0.6;
 
@@ -93,7 +86,7 @@ public class Pipes3D extends ApotheneumPattern {
 
   /** Thickness parameter bounds (px); THICK_MAX also sizes the sparkle
    *  visibility tolerance in sparkleOverlay() */
-  private static final double THICK_MIN = 3, THICK_MAX = 5;
+  private static final double THICK_MIN = 1, THICK_MAX = 6;
 
   /** Elbow ball saturation / brightness boost (reads as a shiny joint) */
   private static final float BALL_SAT = 70;        // CURATE
@@ -193,15 +186,15 @@ public class Pipes3D extends ApotheneumPattern {
 
   public final TriggerParameter drain = bag.register(
     new TriggerParameter("Drain", this::startDrain)
-    .setDescription("Fade the room out, concluding exactly on a beat (0.5-1.5 beats), then restart with one pipe in the next palette color"));
+    .setDescription("Fade the room out, concluding exactly on a beat (0.5-1.5 beats), then restart with the Pipes-knob count in the next palette color"));
 
   public final TriggerParameter teleport = bag.register(
     new TriggerParameter("Teleport", this::teleportRandomPipe)
     .setDescription("A growing pipe jumps to a random free cell and continues (the classic)"));
 
-  public final TriggerParameter newPipe = bag.register(
-    new TriggerParameter("NewPipe", this::spawnAnotherPipe)
-    .setDescription("Spawn another concurrent pipe (max 3)"));
+  public final DiscreteParameter pipes =
+    new DiscreteParameter("Pipes", 1, 1, MAX_PIPES + 1)
+    .setDescription("Number of concurrent pipes; raising spawns a fresh pipe, lowering culls the oldest");
 
   public final TriggerParameter sparkle = bag.register(
     new TriggerParameter("Sparkle", this::flashSparkle)
@@ -212,12 +205,12 @@ public class Pipes3D extends ApotheneumPattern {
     .setDescription("Zero the rotation speeds and snap back to the orthogonal projection"));
 
   public final CompoundParameter speed =
-    new CompoundParameter("Speed", 1.0, 0.25, 4.0)
-    .setDescription("Growth speed in cells per beat, shared by all pipes; clamped so a full wall crossing takes at least 5 s");
+    new CompoundParameter("Speed", 1.0, 0.25, 16.0)
+    .setDescription("Growth speed in cells per beat, shared by all pipes");
 
   public final CompoundParameter thickness =
     new CompoundParameter("Thick", 3.5, THICK_MIN, THICK_MAX)
-    .setDescription("Pipe thickness in pixels (applies to newly started runs)");
+    .setDescription("Pipe thickness in pixels, applied to the whole model in realtime");
 
   public final DiscreteParameter density =
     new DiscreteParameter("Density", 10, MIN_DENSITY, MAX_DENSITY + 1)
@@ -266,17 +259,15 @@ public class Pipes3D extends ApotheneumPattern {
   private double cw, ch;
 
   // Retained geometry in lattice cell coordinates (rotated + projected each
-  // frame). Hue and thickness are captured at creation so committed geometry
-  // keeps its look, like real pipes already installed.
+  // frame). Hue is captured at creation so committed geometry keeps its
+  // color; thickness reads the live Thick knob (whole-model realtime).
   private final double[] segAx = new double[MAX_SEGMENTS], segAy = new double[MAX_SEGMENTS], segAz = new double[MAX_SEGMENTS];
   private final double[] segBx = new double[MAX_SEGMENTS], segBy = new double[MAX_SEGMENTS], segBz = new double[MAX_SEGMENTS];
   private final float[] segHue = new float[MAX_SEGMENTS];
-  private final float[] segHalfPx = new float[MAX_SEGMENTS];
   private int segCount = 0;
 
   private final double[] ballX = new double[MAX_BALLS], ballY = new double[MAX_BALLS], ballZ = new double[MAX_BALLS];
   private final float[] ballHue = new float[MAX_BALLS];
-  private final float[] ballHalfPx = new float[MAX_BALLS];
   private int ballCount = 0;
 
   // Pipe state (parallel arrays, MAX_PIPES slots). Heads are continuous cell
@@ -287,9 +278,11 @@ public class Pipes3D extends ApotheneumPattern {
   private final double[] pHeadY = new double[MAX_PIPES];
   private final double[] pHeadZ = new double[MAX_PIPES];
   private final double[] pCapBeat = new double[MAX_PIPES]; // absolute composite-basis beat of the next cap
-  private final double[] pRatio = new double[MAX_PIPES];   // run speed / speedEff at plan time
+  private final double[] pRatio = new double[MAX_PIPES];   // run speed / Speed knob at plan time
   private final int[] pSeg = new int[MAX_PIPES];           // live segment index, or -1
   private final float[] pHue = new float[MAX_PIPES];
+  private final long[] pBirth = new long[MAX_PIPES];       // spawn order, for oldest-first culls
+  private long birthCounter = 0;
 
   /** Scratch: free / in-bounds run lengths per direction */
   private final int[] freeRun = new int[6];
@@ -305,6 +298,9 @@ public class Pipes3D extends ApotheneumPattern {
   private double axDeg = 0, ayDeg = 0;
   private double sinAx, cosAx, sinAy, cosAy;
   private double cxr, cyr, czr;
+
+  /** This frame's live half-thicknesses (Thick applies to the whole model in realtime) */
+  private double frameHalfPx, frameBallHalfPx;
 
   /** Scratch result of xformPoint/xformDir */
   private double tx, ty, tz;
@@ -330,7 +326,7 @@ public class Pipes3D extends ApotheneumPattern {
 
     addParameter("drain", this.drain);
     addParameter("teleport", this.teleport);
-    addParameter("newPipe", this.newPipe);
+    addParameter("pipes", this.pipes);
     addParameter("sparkle", this.sparkle);
     addParameter("rstRot", this.rstRot);
     addParameter("speed", this.speed);
@@ -345,9 +341,11 @@ public class Pipes3D extends ApotheneumPattern {
 
     bag.jumpable(this.thickness);
     bag.jumpable(this.density);
+    // Spawn/cull as an ambient event. CURATE: do uncommanded culls read well?
+    bag.jumpable(this.pipes);
     bag.jumpable(this.hue);
-    // Musical mid-band only: below 0.5 the lattice crawls, above 2.0 the
-    // traversal clamp eats the jump at typical BPM anyway. CURATE
+    // Musical mid-band only: below 0.5 the lattice crawls; the knob itself
+    // now reaches 16, far past what a random jump should do. CURATE
     bag.jumpable(this.speed, 0.5, 2.0);
     // Exclude 3/4 (a random polyrhythm jump reads as a timing bug) and 8
     // (caps stall for many seconds). CURATE: unverified visually
@@ -361,7 +359,7 @@ public class Pipes3D extends ApotheneumPattern {
     this.epochBeats = Math.rint(this.lastBeats);
     applyDensity();
     clearRoom();
-    spawnPipe();
+    syncPipeCount();
   }
 
   @Override
@@ -447,17 +445,6 @@ public class Pipes3D extends ApotheneumPattern {
   private double nextGrid(double b) {
     final double g = gridInterval();
     return this.epochBeats + (Math.floor((b - this.epochBeats) / g + 1e-6) + 1) * g;
-  }
-
-  /**
-   * Effective shared growth speed in cells per beat: the Speed knob clamped
-   * so a full wall crossing (gx cells) takes >= TRAVERSAL_MIN_MS at the
-   * current tempo. Run planning never exceeds this, so the traversal floor
-   * holds exactly at any BPM and density.
-   */
-  private double speedEff() {
-    final double periodMs = this.lx.engine.tempo.period.getValue();
-    return Math.min(this.speed.getValue(), this.gx * periodMs / TRAVERSAL_MIN_MS);
   }
 
   private static int clampi(int v, int lo, int hi) {
@@ -564,10 +551,13 @@ public class Pipes3D extends ApotheneumPattern {
       return;
     }
 
-    // Run length: 1..maxRun cells, max-of-two for a mild long bias.
-    // CURATE: bias strength — longer runs fill space faster but turn less.
+    // Run length: uniform over 1..maxRun. Direction choice is weighted by
+    // run length and the length pick is uniform within it, so every free
+    // candidate cell is an equally likely elbow target — elbows distribute
+    // through the room volume instead of clustering at the walls (the old
+    // max-of-two long bias compounded with the direction weighting).
     final int maxRun = intersecting ? this.boundRun[dir] : this.freeRun[dir];
-    final int n = 1 + Math.max(this.random.nextInt(maxRun), this.random.nextInt(maxRun));
+    final int n = 1 + this.random.nextInt(maxRun);
 
     // Geometry bookkeeping: continuing straight extends the live segment;
     // a turn caps here (elbow ball at the head, wherever it is) and opens a
@@ -589,17 +579,19 @@ public class Pipes3D extends ApotheneumPattern {
       this.segAz[s] = this.segBz[s] = this.pHeadZ[i];
       this.pHue[i] = pipeHue(i);
       this.segHue[s] = this.pHue[i];
-      this.segHalfPx[s] = (float) (thicknessPx() / 2);
       this.pSeg[i] = s;
     }
 
     // Cap scheduling: the run covers dist cells (target = the corner n cells
     // from the anchor along dir; only the run-axis coordinate is targeted).
     // Pick the number of grid intervals k nearest the nominal duration at
-    // speedEff, never allowing the run to move faster than speedEff, and
+    // the Speed knob, never allowing the run to move faster than it, and
     // store the trim as a ratio so the live Speed knob still scales mid-run.
+    // NB: once runs fit in one interval (k = 1), pace saturates at
+    // dist/OnBeats — the top of the knob mostly guarantees single-interval
+    // runs; OnBeats and density then set the visible speed.
     final double g = gridInterval();
-    final double sEff = speedEff();
+    final double sEff = this.speed.getValue();
     final double d0 = nextGrid(now) - now; // (0, g]
     double dist;
     if (DX[dir] != 0) {
@@ -664,6 +656,9 @@ public class Pipes3D extends ApotheneumPattern {
     for (int i = 0; i < MAX_PIPES; ++i) {
       if (!this.pAlive[i]) {
         if (findFreeCell()) {
+          // Fresh birth (teleports keep their original stamp — a teleported
+          // pipe is still the same, old pipe for oldest-first culls)
+          this.pBirth[i] = this.birthCounter++;
           placePipe(i, this.rlX, this.rlY, this.rlZ);
         } else {
           LX.log("Pipes3D: no free cell to spawn a pipe; draining");
@@ -674,10 +669,43 @@ public class Pipes3D extends ApotheneumPattern {
     }
   }
 
-  // Trigger: spawn another concurrent pipe (max 3)
-  private void spawnAnotherPipe() {
-    if (!this.draining) {
-      spawnPipe();
+  /**
+   * Reconcile the number of live pipes to the Pipes knob: spawn fresh pipes
+   * when below, cull the oldest when above (capped with a ball wherever its
+   * head stopped; its geometry stays). Idempotent — safe from the parameter
+   * callback, construction, and drain end.
+   */
+  private void syncPipeCount() {
+    final int target = this.pipes.getValuei();
+    int alive = 0;
+    for (int i = 0; i < MAX_PIPES; ++i) {
+      if (this.pAlive[i]) {
+        ++alive;
+      }
+    }
+    while (!this.draining && (alive < target)) {
+      spawnPipe(); // fills exactly one slot, or starts a drain when the room is full
+      ++alive;
+    }
+    while (alive > target) {
+      int oldest = -1;
+      for (int i = 0; i < MAX_PIPES; ++i) {
+        if (this.pAlive[i] && ((oldest < 0) || (this.pBirth[i] < this.pBirth[oldest]))) {
+          oldest = i;
+        }
+      }
+      addBall(this.pHeadX[oldest], this.pHeadY[oldest], this.pHeadZ[oldest], this.pHue[oldest]);
+      this.pAlive[oldest] = false;
+      --alive;
+    }
+  }
+
+  @Override
+  public void onParameterChanged(LXParameter parameter) {
+    super.onParameterChanged(parameter);
+    if ((parameter == this.pipes) && !this.draining) {
+      // While draining, pipes are already dead; finishDrain() reconciles
+      syncPipeCount();
     }
   }
 
@@ -747,7 +775,8 @@ public class Pipes3D extends ApotheneumPattern {
 
   /**
    * Drain finished (on a beat): fresh room at the (possibly jumped) density,
-   * next palette color, exactly ONE pipe, and a fresh cap-grid epoch.
+   * next palette color, the Pipes-knob count of pipes (the knob never moves
+   * on its own), and a fresh cap-grid epoch.
    */
   private void finishDrain() {
     this.draining = false;
@@ -760,7 +789,7 @@ public class Pipes3D extends ApotheneumPattern {
     // The drain concluded on an engine beat by construction; rint absorbs
     // the <= 1-frame countdown overshoot. Caps re-count from here.
     this.epochBeats = Math.rint(this.lastBeats);
-    spawnPipe();
+    syncPipeCount();
     LX.log("Pipes3D: drain complete; density " + this.gx + "x" + this.gy + "x" + this.gz);
   }
 
@@ -768,13 +797,13 @@ public class Pipes3D extends ApotheneumPattern {
 
   /**
    * Integrate every live pipe's head up to (exactly) its cap time, then
-   * replan at caps. Heads move only along pDir at ratio * speedEff cells per
+   * replan at caps. Heads move only along pDir at ratio * Speed cells per
    * beat — the live Speed knob and BPM changes flow through immediately; the
    * beat-aligned cap then fires wherever the head is, and the next plan
    * re-anchors to the lattice (self-healing, no snapping).
    */
   private void updatePipes(double now, double dBeats) {
-    final double sEff = speedEff();
+    final double sEff = this.speed.getValue();
     final double bPrev = now - dBeats;
     for (int i = 0; i < MAX_PIPES; ++i) {
       if (!this.pAlive[i]) {
@@ -827,7 +856,6 @@ public class Pipes3D extends ApotheneumPattern {
     this.ballY[b] = y;
     this.ballZ[b] = z;
     this.ballHue[b] = hueDeg;
-    this.ballHalfPx[b] = (float) (thicknessPx() / 2 + BALL_EXTRA_PX);
   }
 
   // ---- Rasterization -------------------------------------------------------------
@@ -845,9 +873,9 @@ public class Pipes3D extends ApotheneumPattern {
   // and clamps — rotated content may stick out of the viewport/depth range,
   // which simply clips.
 
-  /** Current pipe thickness in px, clamped to the cell size so lattice cells stay distinct */
+  /** Current pipe thickness in px (unclamped: 6 px at high density deliberately merges cells) */
   private double thicknessPx() {
-    return Math.min(this.thickness.getValue(), Math.min(this.cw, this.ch));
+    return this.thickness.getValue();
   }
 
   /** Rotate a lattice point about the room center into world coordinates (tx/ty/tz) */
@@ -917,7 +945,7 @@ public class Pipes3D extends ApotheneumPattern {
     final double axn = ddx / len3, ayn = ddy / len3, azn = ddz / len3;
 
     final float hueDeg = this.segHue[s];
-    final double halfPx = this.segHalfPx[s];
+    final double halfPx = this.frameHalfPx;
     final int span = Math.max(1, (int) Math.round(2 * halfPx));
 
     for (int w = 0; w < WALLS; ++w) {
@@ -932,8 +960,8 @@ public class Pipes3D extends ApotheneumPattern {
       final float[] dBuf = this.depthBuf[w];
 
       if (screenLen < 0.5) {
-        // Seen end-on: a small square at the near depth
-        stampSquare(cBuf, dBuf, (u0 + u1) / 2, (v0 + v1) / 2, halfPx,
+        // Seen end-on: a circular cross-section at the near depth
+        stampDisc(cBuf, dBuf, (u0 + u1) / 2, (v0 + v1) / 2, halfPx,
           Math.min(dn0, dn1), hueDeg, 100f, 1f);
         continue;
       }
@@ -1023,21 +1051,27 @@ public class Pipes3D extends ApotheneumPattern {
     }
   }
 
-  /** Rasterize one joint/cap ball: a bright desaturated square stamp per wall */
+  /** Rasterize one joint/cap ball: a bright desaturated disc per wall */
   private void rasterBall(int b) {
     xformPoint(this.ballX[b], this.ballY[b], this.ballZ[b]);
     final double wx = this.tx, wy = this.ty, wz = this.tz;
-    final double half = this.ballHalfPx[b];
+    final double half = this.frameBallHalfPx;
     for (int w = 0; w < WALLS; ++w) {
       final float dn = (float) clamp(wallDepth(w, wx, wz) / this.gz, 0, 1);
-      stampSquare(this.colorBuf[w], this.depthBuf[w],
+      stampDisc(this.colorBuf[w], this.depthBuf[w],
         wallU(w, wx, wz), wy * this.ch, half, dn, this.ballHue[b], BALL_SAT, BALL_BOOST);
     }
   }
 
-  /** Depth-tested square stamp centered at (cu, cv) px with half-extent half px */
-  private void stampSquare(int[] cBuf, float[] dBuf, double cu, double cv,
-                           double half, float dn, float hueDeg, float sat, float boost) {
+  /**
+   * Depth-tested disc stamp centered at (cu, cv) px with radius ~half px.
+   * A disc, not a square: joints are spheres and end-on pipes are circular
+   * cross-sections, and a sphere's orthographic projection is a circle from
+   * any viewing angle — so joints stay correct as the lattice rotates (a
+   * screen-aligned square betrays the projection under rotation).
+   */
+  private void stampDisc(int[] cBuf, float[] dBuf, double cu, double cv,
+                         double half, float dn, float hueDeg, float sat, float boost) {
     final int iu0 = Math.max(0, (int) Math.floor(cu - half));
     final int iu1 = Math.min(W - 1, (int) Math.ceil(cu + half) - 1);
     final int iv0 = Math.max(0, (int) Math.floor(cv - half));
@@ -1045,11 +1079,18 @@ public class Pipes3D extends ApotheneumPattern {
     if (iu1 < iu0 || iv1 < iv0) {
       return;
     }
+    // +0.25 px so small radii don't decimate to a plus sign
+    final double r2 = (half + 0.25) * (half + 0.25);
     final float bf = 1 - DEPTH_DIM * dn;
     final int col = LXColor.hsb(hueDeg, sat, Math.min(100f, 100f * bf * boost));
     for (int v = iv0; v <= iv1; ++v) {
       final int rowBase = v * W;
+      final double dy = v + 0.5 - cv;
       for (int u = iu0; u <= iu1; ++u) {
+        final double dx = u + 0.5 - cu;
+        if (dx * dx + dy * dy > r2) {
+          continue;
+        }
         final int idx = rowBase + u;
         if (dn <= dBuf[idx]) {
           dBuf[idx] = dn;
@@ -1088,6 +1129,8 @@ public class Pipes3D extends ApotheneumPattern {
     this.sinAx = Math.sin(axr); this.cosAx = Math.cos(axr);
     this.sinAy = Math.sin(ayr); this.cosAy = Math.cos(ayr);
     this.cxr = this.gx * 0.5; this.cyr = this.gy * 0.5; this.czr = this.gz * 0.5;
+    this.frameHalfPx = thicknessPx() / 2;
+    this.frameBallHalfPx = this.frameHalfPx + BALL_EXTRA_PX;
 
     double outputScale = 1;
     if (this.draining) {
