@@ -7,17 +7,13 @@ import apotheneum.Apotheneum;
 import apotheneum.ApotheneumPattern;
 import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.PerceptualHue;
-import apotheneum.jvyduna.util.Ranges;
-import apotheneum.jvyduna.util.TempoLock;
 import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
-import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
 import heronarts.lx.color.LXDynamicColor;
 import heronarts.lx.model.LXPoint;
-import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundDiscreteParameter;
 import heronarts.lx.parameter.CompoundParameter;
 import heronarts.lx.parameter.EnumParameter;
@@ -29,7 +25,7 @@ import heronarts.lx.parameter.TriggerParameter;
  *
  * A static scalar phase field is precomputed once over every exterior point
  * (cube ring 200x45 + cylinder 120x43, normalized to [0,1] per surface). Each
- * frame the color of a point is simply LUT[frac(field * spread + t)], so the
+ * frame the color of a point is simply LUT[frac(field * cycles + t)], so the
  * geometry cost of motion is zero: all apparent movement is the classic
  * palette-rotation trick, inherently smooth and slow. The LUT is built from
  * the project palette swatch (or a perceptual rainbow when the swatch is
@@ -37,8 +33,8 @@ import heronarts.lx.parameter.TriggerParameter;
  * at sculpture scale.
  *
  * Audio reactivity is gated by the standard Audio depth knob (default 0 =
- * pure screensaver). With Sync on, the band-advance period is quantized to
- * the tempo grid and a radial breath pulse fires on each TempoDiv boundary.
+ * pure screensaver): a slow level tap boosts the cycle rate, bass hits fire
+ * the radial phase pulse, and treble lerps the LUT toward white.
  *
  * See Satori.md (beside this file) for the full design note.
  */
@@ -64,35 +60,23 @@ public class Satori extends ApotheneumPattern {
 
   // ---- Timing / shape constants ---------------------------------------------
 
-  /** One full color cycle takes 16s at ambient energy; worst-case ambient drift period is 16/(1.5 audio x 1.4 sync) = 7.6s */
-  private static final double CYCLE_SEC_AMBIENT = 16;
+  /** One full color cycle takes 8s at Speed 100%; Speed 200% halves it to 4s */
+  private static final double CYCLE_SEC = 8;
 
-  /** One full color cycle takes 8s at peak energy — the sync cap budget below pins worst-case traversal to exactly 5.0s */
-  private static final double CYCLE_SEC_PEAK = 8;
-
-  /** Series cap: sustained motion must take >= 5s to traverse the sculpture; sync retiming is budgeted against this */
-  private static final double TRAVERSAL_CAP_SEC = 5;
-
-  /** Radial phase pulse (bass hit / grid breath / manual trigger) relaxes over 2s (event visual life >= 1.5s) */
+  /** Radial phase pulse (bass hit / manual trigger) relaxes over 2s (event visual life >= 1.5s) */
   private static final double PULSE_RELAX_MS = 2000;
 
-  /** Radial pulse wavefront depth in LUT cycles at ambient energy */
-  private static final double PULSE_DEPTH_AMBIENT = 0.15;
+  /** Radial pulse wavefront depth in LUT cycles (CURATE: 6x the old default-energy 0.22) */
+  private static final double PULSE_DEPTH = 1.3;
 
-  /** Radial pulse wavefront depth in LUT cycles at peak energy */
-  private static final double PULSE_DEPTH_PEAK = 0.35;
-
-  /** Slow-smoothed audio level modulates cycle speed by up to +/-50% */
-  private static final double AUDIO_SPEED_DEPTH = 0.5;
+  /** Slow-smoothed audio level boosts cycle speed by up to +300% (CURATE: 6x the old +50% max boost) */
+  private static final double AUDIO_SPEED_DEPTH = 3.0;
 
   /** Time constant (ms) of the extra-slow level smoothing that drives speed modulation */
   private static final double SLOW_LEVEL_MS = 1200;
 
-  /** Max lerp toward white of the whole LUT under treble shimmer */
-  private static final double SHIMMER_MAX = 0.30;
-
-  /** Energy below which treble shimmer is fully gated off */
-  private static final double SHIMMER_GATE = 0.6;
+  /** Max lerp toward white of the whole LUT under treble shimmer (CURATE: 6x the old 0.30, clamped at full white) */
+  private static final double SHIMMER_MAX = 1.0;
 
   /** Color LUT resolution; power of two for cheap index masking */
   private static final int LUT_SIZE = 256;
@@ -119,40 +103,33 @@ public class Satori extends ApotheneumPattern {
     new TriggerParameter("Pulse", this::firePulse)
     .setDescription("Launch the radial phase pulse manually: bands warp outward from the seeded center, relaxing over 2s"));
 
-  public final CompoundParameter energy = new CompoundParameter("Energy", 0.35)
-    .setDescription("Master energy: 0-0.4 soothing ambient, 0.6-1.0 high-energy (cycle rate, pulse depth, treble shimmer)");
-
   public final EnumParameter<FieldMode> fieldMode =
     new EnumParameter<FieldMode>("Field", FieldMode.INTERFERENCE)
     .setDescription("Static phase-field variant the colors rotate through");
 
-  public final CompoundParameter speed = new CompoundParameter("Speed", 1, 0.25, 1)
-    .setDescription("Trim on the energy-set cycle rate; can only slow it (1 = full rate, keeps the traversal cap)");
+  public final CompoundParameter speed = new CompoundParameter("Speed", 1, 0, 2)
+    .setUnits(CompoundParameter.Units.PERCENT_NORMALIZED)
+    .setDescription("Color cycle rate: 0% pauses, 100% = 8s per cycle, 200% = 4s");
 
-  public final CompoundParameter spread = new CompoundParameter("Spread", 2, 1, 6)
-    .setDescription("How many full color cycles span each surface (higher = more, thinner bands)");
+  public final CompoundParameter width = new CompoundParameter("Width", 5, 1, 6)
+    .setDescription("Band width: higher = wider bands, fewer repeats across each surface");
 
   public final CompoundDiscreteParameter posterize =
     new CompoundDiscreteParameter("Bands", 6, 2, 17)
     .setDescription("Posterize the color LUT into N bold bands; smooth gradients read as mud through LED gaps");
 
+  public final CompoundParameter smooth = new CompoundParameter("Smooth", 0)
+    .setDescription("Color interpolation between bands: 0 = hard band edges, 1 = each pixel smoothsteps from one color to the next");
+
   public final CompoundParameter audioDepth = new CompoundParameter("Audio", 0)
     .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
 
-  public final BooleanParameter sync = new BooleanParameter("Sync", true)
-    .setDescription("Lock motion events to the tempo grid; off restores free-running timing");
-
-  public final EnumParameter<Tempo.Division> tempoDiv =
-    new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.WHOLE)
-    .setDescription("Tempo division that motion events land on when Sync is enabled");
-
-  public final TriggerParameter meta = new TriggerParameter("Meta", bag::fire)
+  public final TriggerParameter rndTrig = new TriggerParameter("RndTrig", bag::fire)
     .setDescription("Randomly fire a trigger or jump a parameter");
 
   // ---- State ------------------------------------------------------------------
 
   private final AudioReactive audio;
-  private final TempoLock tempoLock;
   private final Random random = new Random();
 
   // Phase field over all model points; only exterior indices are filled, the
@@ -187,25 +164,22 @@ public class Satori extends ApotheneumPattern {
   public Satori(LX lx) {
     super(lx);
     this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
-    this.tempoLock = new TempoLock(lx);
 
     addParameter("newField", this.newField);
     addParameter("reverse", this.reverse);
     addParameter("pulse", this.pulse);
-    addParameter("energy", this.energy);
     addParameter("fieldMode", this.fieldMode);
     addParameter("speed", this.speed);
-    addParameter("spread", this.spread);
+    addParameter("width", this.width);
     addParameter("posterize", this.posterize);
+    addParameter("smooth", this.smooth);
     addParameter("audio", this.audioDepth);
-    addParameter("sync", this.sync);
-    addParameter("tempoDiv", this.tempoDiv);
-    addParameter("meta", this.meta);
+    addParameter("rndTrig", this.rndTrig);
 
-    // Meta jump candidates — mirrored 1:1 in the Satori.md table
+    // RndTrig jump candidates — mirrored 1:1 in the Satori.md table
     this.bag.jumpable(this.fieldMode);
-    this.bag.jumpable(this.speed, 0.4, 1.0);
-    this.bag.jumpable(this.spread);
+    this.bag.jumpable(this.speed, 0.5, 1.5);
+    this.bag.jumpable(this.width);
     this.bag.jumpable(this.posterize);
   }
 
@@ -295,9 +269,8 @@ public class Satori extends ApotheneumPattern {
         if (pd > maxPulse) maxPulse = pd;
       }
     }
-    // Normalize the field to span exactly [0,1] per surface: Spread then means
-    // exactly N color cycles across the surface, and the traversal-cap math
-    // (traversal time = spread * cyclePeriod) is exact for every variant.
+    // Normalize the field to span exactly [0,1] per surface: Width then maps
+    // to exactly N color cycles across the surface for every variant.
     final float scale = (max > min) ? (1f / (max - min)) : 0f;
     final float pulseScale = 1f / maxPulse;
     for (int x = 0; x < w; ++x) {
@@ -414,64 +387,35 @@ public class Satori extends ApotheneumPattern {
     }
     updateLut();
 
-    final double e = this.energy.getValue();
     final int bands = this.posterize.getValuei();
 
-    // Slow-smoothed level modulates cycle speed +/-50%; silence floors at 0.5x
-    // (slower than base = still cycling, never frozen, never faster). At audio
-    // depth 0 the level tap reads 0, so the default is the 0.5x floor.
+    // Slow-smoothed level boosts cycle speed (boost-only: silence and audio
+    // depth 0 both read level 0 => exactly 1x, so the Speed knob alone owns
+    // the base rate; loud music at full depth boosts up to 4x).
     this.slowLevel += (this.audio.level - this.slowLevel) * (1 - Math.exp(-deltaMs / SLOW_LEVEL_MS));
-    final double speedMul = 1 + AUDIO_SPEED_DEPTH * (2 * this.slowLevel - 1);
+    final double speedMul = 1 + AUDIO_SPEED_DEPTH * this.slowLevel;
 
-    final double cycleSec = Ranges.exp(e, CYCLE_SEC_AMBIENT, CYCLE_SEC_PEAK) / this.speed.getValue();
-
-    // Tempo lock (sustained): quantize the band-advance period — the visible
-    // rhythm; each point flips to its next posterized band once per band
-    // period — to the nearest whole multiple (or unit fraction) of the sync
-    // division, via TempoLock.quantizePeriod(). Its internal harmonic latch
-    // only re-quantizes when the required rate scale leaves the [0.7, 1.4]
-    // window, so audio speed wobble near a rounding boundary cannot
-    // flip-flop the rate. Palette rotation has no globally-simultaneous
-    // event to phase-align (band flips are staggered across points by the
-    // field), so period quantization is the whole lock; the grid-breath
-    // pulse below carries the downbeat.
-    double syncScale = 1;
-    if (this.sync.isOn()) {
-      final double bandMs = 1000 * cycleSec / (speedMul * bands);
-      final double s = this.tempoLock.quantizePeriod(bandMs, this.tempoDiv.getEnum());
-      // Cap budget: speedMul * syncScale <= cycleSec / TRAVERSAL_CAP_SEC keeps
-      // worst-case traversal (spread = 1, e = 1, full audio boost) at >= 5.0s.
-      // cycleSec >= 8 and speedMul <= 1.5, so capMax >= 1.067 > minScale.
-      final double capMax = Math.min(TempoLock.DEFAULT_MAX_SCALE,
-        cycleSec / (TRAVERSAL_CAP_SEC * speedMul));
-      syncScale = Math.min(s, capMax);
-    }
-
-    this.phase += this.cycleDirection * speedMul * syncScale * deltaMs / (cycleSec * 1000);
+    // Speed multiplies the phase rate (never divides), so 0 is a clean pause
+    this.phase += this.cycleDirection * speedMul * this.speed.getValue() * deltaMs / (CYCLE_SEC * 1000);
     this.phase -= Math.floor(this.phase);
 
     // Radial phase pulse: wavefront offset proportional to distance from the
-    // pulse center, relaxing over ~2s. Sources: the tempo-grid breath (full
-    // strength — it is a tempo feature, alive even at audio depth 0), bass
-    // hits (scaled by depth so a barely-open Audio knob pulses gently), and
-    // the manual Pulse trigger (sets pulseEnv directly at event rate).
-    // crossed() runs unconditionally so its counter never goes stale while
-    // Sync is off — re-enabling Sync must not fire a phantom pulse.
-    final boolean gridCross = this.tempoLock.crossed(this.tempoDiv.getEnum());
-    double pulseFire = (this.sync.isOn() && gridCross) ? 1 : 0;
+    // pulse center, relaxing over ~2s. Sources: bass hits (scaled by depth so
+    // a barely-open Audio knob pulses gently) and the manual Pulse trigger
+    // (sets pulseEnv directly at event rate).
+    double pulseFire = 0;
     if (this.audio.bassHit()) {
-      pulseFire = Math.max(pulseFire, this.audio.depth());
+      pulseFire = this.audio.depth();
     }
     if (pulseFire > 0) {
       this.pulseEnv = Math.max(this.pulseEnv, pulseFire);
     } else {
       this.pulseEnv = Math.max(0, this.pulseEnv - deltaMs / PULSE_RELAX_MS);
     }
-    final double pulseDepth = this.pulseEnv * Ranges.lin(e, PULSE_DEPTH_AMBIENT, PULSE_DEPTH_PEAK);
+    final double pulseDepth = this.pulseEnv * PULSE_DEPTH;
 
-    // Treble shimmer, gated to the high-energy regime only
-    final double shimmerGate = Math.max(0, (e - SHIMMER_GATE) / (1 - SHIMMER_GATE));
-    final double shimmer = SHIMMER_MAX * shimmerGate * Math.min(1, this.audio.treble);
+    // Treble shimmer (depth-scaled inside AudioReactive's treble tap)
+    final double shimmer = SHIMMER_MAX * Math.min(1, this.audio.treble);
     int[] lut = this.baseLut;
     if (shimmer > 0.005) {
       for (int j = 0; j < LUT_SIZE; ++j) {
@@ -480,25 +424,40 @@ public class Satori extends ApotheneumPattern {
       lut = this.frameLut;
     }
 
-    final double spreadAmt = this.spread.getValue();
-    paint(Apotheneum.cube.exterior.columns, lut, spreadAmt, bands, pulseDepth);
-    paint(Apotheneum.cylinder.exterior.columns, lut, spreadAmt, bands, pulseDepth);
+    // Width is inverted into cycles-per-surface: wide bands = few repeats
+    final double cycles = 7 - this.width.getValue();
+    final double smoothAmt = this.smooth.getValue();
+    paint(Apotheneum.cube.exterior.columns, lut, cycles, bands, smoothAmt, pulseDepth);
+    paint(Apotheneum.cylinder.exterior.columns, lut, cycles, bands, smoothAmt, pulseDepth);
 
     copyCubeExterior();
     copyCylinderExterior();
   }
 
-  private void paint(Apotheneum.Column[] columns, int[] lut, double spreadAmt, int bands, double pulseDepth) {
+  private void paint(Apotheneum.Column[] columns, int[] lut, double cycles, int bands, double smooth, double pulseDepth) {
     final double phase = this.phase;
     for (int x = 0; x < columns.length; ++x) {
       final LXPoint[] points = columns[x].points; // door columns bound by length
       for (int y = 0; y < points.length; ++y) {
         final int idx = points[y].index;
-        double pos = this.field[idx] * spreadAmt + phase + pulseDepth * this.pulseDist[idx];
+        double pos = this.field[idx] * cycles + phase + pulseDepth * this.pulseDist[idx];
         pos -= Math.floor(pos);
         // Posterize: quantize to band centers => N bold bands whose edges
-        // still sweep smoothly through space as the phase drifts
-        pos = (Math.floor(pos * bands) + 0.5) / bands;
+        // still sweep smoothly through space as the phase drifts. Smooth
+        // widens each edge into a smoothstep ramp over the trailing fraction
+        // of the band: 0 = hard edges, 1 = a continuous gradient from each
+        // band's center color to the next. The cyclic LUT index mask below
+        // handles the wrap from the last band back to the first.
+        final double b = pos * bands;
+        final double i = Math.floor(b);
+        double w = 0;
+        if (smooth > 0) {
+          final double t = (b - i - (1 - smooth)) / smooth;
+          if (t > 0) {
+            w = t * t * (3 - 2 * t);
+          }
+        }
+        pos = (i + 0.5 + w) / bands;
         this.colors[idx] = lut[((int) (pos * LUT_SIZE)) & (LUT_SIZE - 1)];
       }
     }
