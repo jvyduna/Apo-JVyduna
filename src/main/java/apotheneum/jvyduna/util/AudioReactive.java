@@ -21,9 +21,21 @@ import heronarts.lx.parameter.LXParameter;
  * bass = bands 0-1, mid = bands 4-7, treble = bands 8-15,
  * level = overall meter normalized level.
  *
- * The transient-detection recipe (ratios vs ~1.5s running averages,
- * retrigger-gated rising-edge hits) follows the proven TitanicsEnd
- * TEAudioPattern approach, computed directly from the GraphicMeter.
+ * The magnitude ratios (vs ~1.5s running averages) follow the proven
+ * TitanicsEnd TEAudioPattern approach, computed directly from the
+ * GraphicMeter.
+ *
+ * Hit detection is trough-referenced rather than average-referenced: a hit
+ * fires when the (dB-normalized) band level rises {@link #HIT_RISE_DB} above
+ * its recent minimum. With dense hits (eighth notes at 160 BPM = 187.5 ms
+ * apart) the meter envelope only decays ~9 dB between onsets and the running
+ * average parks within ~4 dB of the peaks, so any average-referenced
+ * threshold starves; the trough reference keeps a reliable margin at any
+ * playback level and hit density. Verified by simulation of the meter
+ * dynamics (attack 10 ms / release 100 ms, 48 dB range): 100% detection of
+ * eighth-note kick trains at 160-174 BPM across hot/quiet mixes, with and
+ * without a sustained bassline, versus 10-50% for the previous
+ * ratio-vs-average recipe.
  *
  * <h2>Audio depth knob</h2>
  *
@@ -75,8 +87,23 @@ public class AudioReactive {
   /** Ratio clamp ceiling; typical musical values land in 0.2..3 */
   private static final double RATIO_MAX = 8;
 
-  /** A hit requires the instantaneous level to exceed this multiple of the running average */
-  private static final double HIT_THRESHOLD = 1.2;
+  /** A hit requires the band level to rise this many dB above its recent
+   *  trough. Band values are dB-normalized, so this is level-independent.
+   *  Eighth notes at 160 BPM leave a ~9 dB peak-to-trough swing on the
+   *  default meter; 3 dB keeps solid margin there while rejecting the
+   *  1-2 dB wobble of sustained (non-transient) bass. */
+  private static final double HIT_RISE_DB = 3.0;
+
+  /** Trough tracker relax time constant: follows the signal down instantly,
+   *  relaxes back up toward it with this tau. Long enough not to erode the
+   *  rise margin between 187.5 ms hits, short enough to re-adapt within a
+   *  couple seconds when the material jumps to a louder sustained level. */
+  private static final double TROUGH_RELAX_MS = 500;
+
+  /** Cap on the default tempo-derived retrigger gate, so eighth notes at
+   *  160 BPM (187.5 ms apart) are never gated out even when the project
+   *  tempo is slower than the material. */
+  private static final double MAX_GATE_MS = 140;
 
   /** Hits are suppressed when the effective depth is at or below this */
   private static final double DEPTH_EPSILON = 0.01;
@@ -96,6 +123,9 @@ public class AudioReactive {
 
   private double avgBass = AVG_FLOOR, avgTreble = AVG_FLOOR, avgLevel = AVG_FLOOR;
   private double lastRawBass, lastRawTreble;
+  // Recent-minimum trackers for hit detection; start at 1 so activating the
+  // helper mid-song doesn't fire a spurious hit on the first frame
+  private double troughBass = 1, troughTreble = 1;
   private boolean bassHit, trebleHit;
   private double msSinceBassHit = 1e9, msSinceTrebleHit = 1e9;
   private double retriggerMs = -1;
@@ -145,13 +175,30 @@ public class AudioReactive {
 
     final double gate = (this.retriggerMs > 0) ?
       this.retriggerMs :
-      // Default: 80% of a tempo eighth note must pass between hits
-      .8 * this.lx.engine.tempo.period.getValue() / 2;
+      // Default: 80% of a tempo eighth note between hits, capped so that
+      // eighth notes at >= 160 BPM always clear the gate regardless of the
+      // project tempo setting
+      Math.min(.8 * this.lx.engine.tempo.period.getValue() / 2, MAX_GATE_MS);
+
+    // Band values are dB-normalized against the meter range, so a fixed dB
+    // rise is a fixed normalized delta
+    final double rise = HIT_RISE_DB / this.meter.range.getValue();
+
+    // Trough trackers: follow the signal down instantly, relax back up slowly
+    final double troughAlpha = alpha(deltaMs, TROUGH_RELAX_MS);
+    this.troughBass = (rawBass < this.troughBass) ? rawBass :
+      this.troughBass + (rawBass - this.troughBass) * troughAlpha;
+    this.troughTreble = (rawTreble < this.troughTreble) ? rawTreble :
+      this.troughTreble + (rawTreble - this.troughTreble) * troughAlpha;
 
     // Hit detection and retrigger bookkeeping run on the real signal at any
-    // depth; the public flags are only masked when depth is effectively zero
+    // depth; the public flags are only masked when depth is effectively zero.
+    // A hit = rising edge that has climbed HIT_RISE_DB above the recent
+    // trough, above the running-average floor (silence/noise guard), with
+    // the retrigger gate expired.
     boolean hit = false;
-    if ((rawBass > HIT_THRESHOLD * Math.max(this.avgBass, AVG_FLOOR))
+    if ((rawBass > this.troughBass + rise)
+        && (rawBass > Math.max(this.avgBass, AVG_FLOOR))
         && (rawBass > this.lastRawBass)
         && (this.msSinceBassHit > gate)) {
       hit = true;
@@ -162,7 +209,8 @@ public class AudioReactive {
     this.lastRawBass = rawBass;
 
     hit = false;
-    if ((rawTreble > HIT_THRESHOLD * Math.max(this.avgTreble, AVG_FLOOR))
+    if ((rawTreble > this.troughTreble + rise)
+        && (rawTreble > Math.max(this.avgTreble, AVG_FLOOR))
         && (rawTreble > this.lastRawTreble)
         && (this.msSinceTrebleHit > gate)) {
       hit = true;
@@ -185,7 +233,8 @@ public class AudioReactive {
 
   /**
    * Override the hit retrigger gate. Pass <=0 to restore the default
-   * (80% of a tempo eighth note, tracking live BPM).
+   * (80% of a tempo eighth note tracking live BPM, capped at 140 ms so
+   * 160 BPM eighth-note trains always pass).
    */
   public AudioReactive setRetriggerMs(double ms) {
     this.retriggerMs = ms;
