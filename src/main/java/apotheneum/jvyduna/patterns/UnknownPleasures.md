@@ -8,104 +8,127 @@ Peter Saville's cover for Joy Division's *Unknown Pleasures* (1979), itself a
 stacked-ridgeline plot of successive radio pulses from pulsar CP 1919 (Harold
 Craft's PhD data). The signature look: thin white ridgelines on true black,
 each line's silhouette blacking out the lines behind it, peaks concentrated in
-the center with the edges pinned flat to the baseline. Here the "pulses" are
-born from the live FFT — the music literally draws each line — with
-synthesized CP 1919-style pulses taking over in silence (and, by default,
-whenever the Audio depth knob sits at 0).
+the center with the edges pinned flat to the baseline — and crucially, tall
+peaks freely overlapping the ground and peak levels of the lines behind them.
+Line profiles are synthesized CP 1919-style pulses (or a 3D noise field in
+Simplex mode); the Audio knob live-mixes the spectrum into every displayed
+line. Strokes are always white — colorize with an external effect or a color
+multiply channel.
 
 ## Rendering approach
 
 - Base class: `ApotheneumPattern` (needs the cylinder, so no raster base).
-- One 50×45 field (`int[] raster`) is computed per frame and shown everywhere:
-  blitted to the cube's front exterior face, replicated to all 8 cube faces
-  (exterior + interior) via `copyCubeFace(front)`, and sampled onto the
-  cylinder with `x = cx * 50 / 120`; cylinder interior via
-  `copyCylinderExterior()`. All four walls show the identical image. (The
-  cylinder's 43 rows show the top 43 of the 45-row field.)
-- Line pool: `MAX_LINES = 48` preallocated `Line` slots (baseline, gain,
-  `float[50]` shape), recycled — zero allocation in the render path. Shape
-  generation is event-rate (at line birth) and uses preallocated scratch
-  arrays only.
-- Painter's algorithm: lines sorted back-to-front by baseline row (insertion
-  sort into a preallocated `int[] order`); each line black-fills from just
-  under its contour down to its baseline (the occlusion), then strokes the
-  contour anti-aliased across two rows by its fractional height, so sub-pixel
-  scrolling stays smooth at ambient speed.
-- Scroll: continuous fractional row accumulator; lines are born just off the
-  entry edge (a full `MAX_RIDGE_ROWS = 25` margin on the bottom-entry side so
-  even the tallest ridge never pops in) and killed only once fully off-field.
-  Reseed pre-fills that bottom margin too when scrolling upward, so the reset
-  never causes a one-frame contour pop-in.
+- **Slot rasters.** Up to four 50×45 fields (`cubeRaster[4]`), one per cube
+  wall; in Dup mode only slot 0 is painted and all walls share it. Each
+  exterior face is blitted from its slot (`blitFace`), then one
+  `copyCubeExterior()` arraycopy mirrors exterior → interior per-face. The
+  cylinder is divided into `CylWavs` equal segments (120 divisible by 1–4);
+  each segment resamples one slot raster to its arc. The blit is rotated
+  `CYL_ROTATION = 15` columns (45°) so the center of a flat inter-waveform
+  interface faces a cube corner (`CURATE:` verify against the physical bearing
+  of cylinder column 0; adjust sign/offset). Helix mode with CylWavs ≠ 4
+  paints separate cylinder rasters (`cylHelixRaster`) because segment phase
+  lags depend on the segment count.
+- **Line store: ring buffer keyed by integer birth index `k`** (`RING = 64`
+  entries: gain, max-sample, and a `float[4][50]` shape — plane 0 only except
+  Simplex). A line's position is a pure function of `k` and division-time
+  (below); there is no per-frame position mutation, no kill logic (entries
+  outside the window are simply not painted and get overwritten on ring wrap),
+  and no sorting (painter order is monotone in `k`). Shape generation is
+  event-rate; the render path allocates nothing.
+- **Painter's algorithm, unclamped peaks.** Back-to-front by baseline: each
+  line black-fills from just under its contour down to its own baseline (the
+  occlusion), then strokes the contour anti-aliased across two rows by its
+  fractional height. Shapes are constrained only by a sanity ceiling
+  (`SHAPE_MAX = 2`, i.e. up to 2× the Amp height); there is no per-line height
+  clamp, so peaks overlap the lines behind them exactly as on the cover, and
+  the fill handles the layering. `RIDGE_MARGIN = 44` rows (SHAPE_MAX × Amp max
+  × pulse gain) is only an existence-window margin so ridges never pop in/out
+  at the field edges.
 - Door columns: bounded by `column.points.length` in both blit loops.
 
-## Audio mapping
+## Tempo mapping (division-locked scrolling)
 
-Audio depth knob: `CompoundParameter("Audio", 0)` (key `audio`), attached via
-`audio.setDepth(audioDepth)`. **Default 0 = pure screensaver**: `level` reads
-0, so every newborn line is a synthesized CP 1919 pulse, and `bassHit()` never
-fires, so no boosts — the silence behavior below is exactly the default
-behavior. Raising the knob restores, continuously:
+TempoDiv **is** the speed. One line emerges from the entry edge on every
+division; the scroll rate is `Spacing` rows per division period, so Spacing is
+a pure zoom about the entry edge — changing it never disturbs emergence
+timing. There is no Sync toggle and no retiming: positions are absolute.
 
-- `level` crossfades newborn line shapes between the synthesized pulse and the
-  live spectrum: fully FFT-driven at (depth-scaled) level ≥ 0.15
-  (`FFT_CROSSFADE_LEVEL`, `CURATE:` knee vs typical music level). Because the
-  `level` tap scales linearly with depth, partial depth effectively raises the
-  crossfade knee: at depth d, full-FFT shapes require raw level ≥ 0.15/d, and
-  below that the FFT contribution mixes in proportionally. The band resample
-  itself is raw (not depth-attenuated) so FFT-drawn lines keep full stature;
-  depth controls *how often/how much* the FFT wins the crossfade, not the
-  height of the drawn spectrum. (`CURATE:` verify partial-depth crossfade
-  feels continuous with real music.)
-- Live shape: the 16 `GraphicMeter` bands lerp-resampled to 50 samples, then
-  multiplied by a center-heavy Hann^1.5 window (`WINDOW_POWER`, `CURATE:`)
-  so edges pin to the baseline like the cover.
-- `bassHit()` arms a one-shot boost for the next-born line, scaled by depth:
-  gain = 1 + 0.5×depth, i.e. the full 1.5× (`BASS_BOOST`) at depth 1 fading to
-  no boost near 0. With Sync on, births land on the tempo grid, so boosted
-  lines appear on division boundaries; the boosted line's *peak* still takes
-  a few rows of scroll to clear the entry edge (`CURATE:` boost-to-visible
-  latency, worst when scrolling up through the 25-row bottom margin).
-- Silence (or depth 0): shapes are pure CP 1919-style synth (sums of 2–3
-  random Gaussians near the center; `CURATE:` center spread and width ranges)
-  and the waterfall keeps scrolling — the pattern is designed to look great
-  with zero audio.
+- Division-time `U = tempo.getCycleCount(div) + tempo.getBasis(div)` is
+  continuous through BPM changes. Discontinuities (division change, transport
+  jump: `dU < 0` or `> 4`) are folded out by an **integer** shift (`kBase +=
+  round(dU)`), which preserves fractional phase — emergence stays exactly
+  on-division; lines nudge at most half a division at the fold.
+- Line `k`'s baseline: down-scroll `(E − k) · spacing`, up-scroll
+  `HEIGHT − (E − k) · spacing`, where `E = U − kBase`. The baseline crosses
+  the entry edge exactly when `E` crosses `k`, i.e. on the division.
+- Existence window: down-scroll `k ∈ [ceil(E − (45+44)/sp) − 1, floor(E) + 1]`
+  (one future line for AA fade-in); up-scroll pre-births below the bottom by
+  the full ridge margin so tall contours never pop in. The −1 slack covers
+  helix phase lags; Shift mode generates shapes 3 indices ahead.
+- **No speed cap by design.** The old 5 s traversal floor is retired; pacing
+  is operator-owned (TempoDiv × Spacing × BPM). 1/16 at high BPM with wide
+  spacing is intentionally extreme.
 
-## Tempo mapping
+## WavMode / CylWavs (wall variation)
 
-Default division: `QUARTER`. With Sync on (default):
+`WavMode` selects how the four walls relate; `CylWavs` (1–4) sets how many
+distinct waveforms wrap the cylinder (segments use the first CylWavs slots;
+every waveform is pinned flat at both ends by the window, so segment
+interfaces are seamless flats).
 
-- **Line births land on the tempo grid.** Births are driven by scroll
-  position (one per `spacing` rows), so at each birth the time to the next
-  one (`spacing / nominalRate`) is passed to `TempoLock.retime()` and the
-  returned scale is applied to the scroll rate until that next birth. The
-  scale *replaces* the previous one (never compounds), so the rate always
-  stays within the clamp of the nominal energy-derived rate. Each new
-  ridgeline therefore enters on a division boundary; the visible effect is a
-  gentle speed "breathing" of the waterfall, never a jump — the undulation
-  stays continuous. (`CURATE:` at large Spacing the inter-birth interval is
-  seconds long and the breathing may read as slow surging.)
-- **Clamp override:** the upper retime clamp is
-  `min(1.4, (45 rows / 5 s) / nominalRate)` — derived from the series 5 s
-  traversal cap, so retiming can never make the scroll faster than a 5 s
-  full-field traversal (at e=1 the effective clamp is 1.2). Lower clamp is
-  the default 0.7.
-- **Pulse launch is quantized.** While Sync is on, the Pulse trigger arms a
-  pending pulse that fires on the next `TempoDiv` boundary
-  (`TempoLock.crossed()`, evaluated every frame so the gate stays fresh).
-- Sync off: the retime multiplier resets to 1 and Pulse fires immediately —
-  bit-identical to the free-running pre-sync behavior at all energies.
+- **Dup** — all walls identical (the original behavior). One raster painted.
+- **Shift** — wall *s* shows the series shifted by *s* lines: adjacent walls
+  replicate the waveform of the falling series one ahead/behind. A Pulse
+  therefore appears on wall 3 first and reaches wall 0 three divisions later.
+- **Simplex** — profiles are samples of an underlying 3D noise field
+  (`LXUtils.noise` / `noiseFBM` — LX's stb-perlin port; CP 1919 synth shapes
+  are discarded except for the explicit Pulse trigger, which spikes all walls
+  at once). The four slots trace the four sides of a square in the field's
+  X-Z plane — adjacent walls share corners, so the walls read as one volume
+  wrapped by the architecture; the field advances in Y per line. Params:
+  `NzScl` (X-Z scale), `NzTurb` (fBm octaves 1–4). Shapes are baked at birth
+  (event-rate, ~200 noise samples per division) rather than live-sampled —
+  static per-line profiles match the cover, and the render loop stays pure
+  array math. Jag's baked-noise term does not apply here (turbulence covers
+  roughness).
+- **Helix** — all walls show the same series, each phase-lagged by ¼ division
+  (segments by 1/CylWavs), so the stack descends as a helix wrapping the
+  building; after four walls the lag totals one full line, so the winding is
+  continuous around the corner.
 
-## Energy mapping
+WavMode changes clear the ring (reseed semantics — Simplex needs planes 1–3,
+Shift needs lookahead); CylWavs changes are blit-time only, no invalidation.
 
-| Quantity | Ambient (e=0) | Peak (e=1) | Curve |
-|---|---|---|---|
-| Full-field scroll (45 rows) | 12 s | 6 s | lin |
-| Ridge amplitude multiplier | ×0.85 | ×1.15 | lin (`CURATE:` swing may be too subtle) |
+## Audio mapping (live per-frame mix)
 
-Line birth rate follows scroll speed automatically (one line per `spacing`
-rows), so energy also raises the event rate without a separate knob. Sync
-retiming modulates the scroll rate by at most [0.7, min(1.4, cap)] around
-these nominal values.
+The pattern owns its **own `GraphicMeter`** on `lx.engine.audio.input.mix`
+(registered via `startModulator`), so the **Decay** knob can own the band
+release time (propagated to `meter.release` each frame; the meter's parameter
+is parented to the meter and can't be registered on the pattern).
+
+- **Audio depth is a live mix into every displayed line, every frame**:
+  `h(x) = lerp(shape[x], fftShape[x], depth)`. 0 = pure synthesized/simplex
+  screensaver; 1 = 100% FFT — every line in the stack pulses with the music
+  simultaneously (dramatic by design). There is no birth-time crossfade
+  anymore.
+- **Mirrored layout**: `fftShape` puts band 0 (bass) at the line center
+  (columns 24/25) and replicates successively higher bands bidirectionally
+  outward — band 15 at columns 0/49 — then applies the Hann^1.5 window, so
+  the highest bands at the edges are nearly deadened and every line keeps the
+  cover's center-heavy silhouette. Column map:
+  `band(x) = round((|x − 24.5| − 0.5) × 15 / 24)`.
+- **Jag doubles as bin smoothing**: `fftShape` is smoothed with
+  `1 + round((1−jag)×5)` passes of a 3-tap [¼ ½ ¼] kernel. Jag = 1 → one pass:
+  the 16 mirrored bins (32 half-bands across the line) are just barely
+  smoothed, nearly stair-stepped; Jag = 0 → 6 passes, wide soft interpolation.
+  (`CURATE:` pass-count range.) Jag keeps its baked-noise role for synth
+  shapes.
+- Cylinder segments inherit the mix implicitly (they resample the painted
+  rasters).
+- **Silence behavior**: with no audio the bands decay to 0, so at Audio = 1
+  the field flattens to scrolling baselines. Intentional — no gating; the
+  operator owns the knob. At Audio = 0 the pattern is a pure screensaver.
 
 ## Parameters
 
@@ -113,68 +136,69 @@ these nominal values.
 |---|---|---|---|---|---|
 | reseed | Reseed | Trigger | — | — | Clear and refill the whole stack |
 | flip | Flip | Trigger | — | — | Reverse scroll direction |
-| pulse | Pulse | Trigger | — | — | Inject one oversized synth pulse line (grid-quantized when Sync on) |
-| energy | Energy | Compound | 0.35 | 0–1 | Ambient ↔ 160 BPM master |
-| spacing | Spacing | Compound | 2 | 2–8 | Rows between adjacent baselines |
-| amplitude | Amp | Compound | 7 | 2–12 | Peak ridge height in rows |
-| jaggedness | Jag | Compound | 0.15 | 0–1 | Noise baked into newborn profiles (`CURATE:` scale/smoothing) |
-| tintHue | Tint | Compound | 0 | 0–360 | Stroke hue when TintAmt > 0 |
-| tintAmount | TintAmt | Compound | 0 | 0–1 | 0 = classic white strokes, 1 = full tint |
-| audio | Audio | Compound | 0 | 0–1 | Audio reactivity depth: 0 = pure screensaver, 1 = full FFT shapes + bass boosts |
-| sync | Sync | Boolean | true | — | Lock line births / pulse launches to the tempo grid |
-| tempoDiv | TempoDiv | Enum | QUARTER | Tempo.Division | Division that births and pulse launches land on |
+| pulse | Pulse | Trigger | — | — | Inject one oversized synth pulse line at the next division |
+| spacing | Spacing | Compound | 2 | 2–16 | Rows between baselines = scroll rows per division (zoom) |
+| amplitude | Amp | Compound | 7 | 2–12 | Peak ridge height in rows (peaks may reach 2× via SHAPE_MAX) |
+| jaggedness | Jag | Compound | 0.15 | 0–1 | Baked profile noise; at full Audio, FFT bin smoothing amount |
+| wavMode | WavMode | Enum | Dup | Dup/Shift/Simplex/Helix | How the four walls relate |
+| cylWavs | CylWavs | Discrete | 4 | 1–4 | Distinct waveforms around the cylinder |
+| nzScale | NzScl | Compound | 0.5 | 0.05–2 | Simplex: X-Z field scale |
+| nzTurb | NzTurb | Compound | 0.3 | 0–1 | Simplex: turbulence (fBm octaves) |
+| audio | Audio | Compound | 0 | 0–1 | Live FFT mix into all lines: 0 = screensaver, 1 = 100% FFT |
+| decay | Decay | Compound | 100 ms | 0–1000 ms (exp 2) | Release of the pattern's own FFT analysis |
+| tempoDiv | TempoDiv | Enum | QUARTER | Tempo.Division | Division lines emerge on (with Spacing, the speed) |
 | meta | Meta | Trigger | — | — | Random trigger or parameter jump |
+
+Removed in the 2026-07-06 rework: `energy` (speed is TempoDiv × Spacing now),
+`tintHue`/`tintAmount` (colorize externally), `sync` (locking is structural).
 
 ## Triggers
 
 Roster spans small → large: pulse (one new line), flip (behavior reversal),
 reseed (full scene reset).
 
-- `pulse` (small) — births one 1.8× amplitude (`PULSE_GAIN`) synthesized line
-  at the entry edge, spacing-safe; a single dramatic "pulsar spike" that then
-  rides the waterfall for its full traversal (≥6 s visible life). Launch is
-  quantized to the next `TempoDiv` boundary while Sync is on. When scrolling
-  *up*, the spike is born below the 25-row bottom margin and takes several
-  seconds of scroll to enter view (`CURATE:` acceptable latency vs kill the
-  margin line and insert closer?); scrolling down it appears within ~a second.
-- `flip` (medium) — reverses scroll direction; existing lines retreat and new
-  lines enter from the opposite edge. Direction change is instant, motion
-  stays within the speed cap.
-- `reseed` (large) — kills every line and refills the visible field (plus the
-  bottom entry margin when scrolling up) at current spacing; reads as an
-  instant scene reset (new shapes appear at once).
+- `pulse` (small) — arms one 1.8× amplitude (`PULSE_GAIN`) synthesized line,
+  consumed by the next entry-edge birth — i.e. inherently quantized to the
+  division, no separate grid logic. In Simplex mode the spike appears on all
+  walls at once; in Shift mode it enters on wall 3 and propagates. When
+  scrolling up, the spike is born below the 44-row bottom margin and takes
+  `44/spacing` divisions of scroll to enter view (`CURATE:` latency).
+- `flip` (medium) — toggles direction; the field mirrors vertically at the
+  flip instant (line at `b` jumps to `HEIGHT − b`) and scrolls the other way,
+  still grid-exact. Instant-event semantics, consistent with the roster.
+- `reseed` (large) — clears the ring; the next frame refills every grid-locked
+  position with fresh shapes. Instant scene reset with unchanged timing.
 
 ## Jump candidates
 
 | Param | Jump range | Status | Notes |
 |---|---|---|---|
-| spacing | [2, 6] | candidate | Density jump; 2 = dense classic stack |
+| spacing | [2, 8] | candidate | Density jump; kept below the new 16 max — a jump to 16 is a violent zoom |
 | amplitude | [4, 12] | candidate | Tall spikes vs calm ripples |
-| tintHue | full (0–360) | candidate | Only visible when TintAmt > 0 |
 | jaggedness | [0, 0.5] | candidate | Above ~0.5 lines may read as static (`CURATE:`) |
+| wavMode | full | candidate | Scene change (clears the ring) |
+| cylWavs | full (1–4) | candidate | Cylinder-only re-segmentation, seamless |
 
 ## Simulation-principles compliance
 
-- Scroll traversal of the 45-row field: 12 s at e=0; at default e=0.35,
-  rate = lin(0.35, 3.75, 7.5) ≈ 5.06 rows/s → **8.9 s**; at e=1 exactly
-  **6 s** — always above the 5 s floor.
-- Tempo retiming cannot break the floor: its upper clamp is computed per call
-  as `min(1.4, 9 rows/s ÷ nominal)`, so the retimed rate never exceeds
-  9 rows/s = exactly a 5.0 s traversal (at e=1: 7.5 × 1.2 = 9.0; at e=0:
-  3.75 × 1.4 = 5.25 rows/s → 8.6 s).
+- Pacing is tempo-derived: at the QUARTER default and 120 BPM, spacing 2 →
+  4 rows/s → an 11.3 s full-field traversal (ambient-like); spacing and
+  division scale it linearly. The old 5 s series cap is **retired by design**
+  — extreme combos (1/16 × 16 × high BPM) are operator-owned choices.
 - Contours render at full brightness on true black (maximum contrast); the
   two-row anti-aliased stroke is the only gradient, used for motion
   smoothness, not texture.
 - Minimum spacing of 2 rows keeps adjacent ridgelines separate at LED-gap
-  scale; `MAX_RIDGE_ROWS` caps silhouettes so a single line can never fill
-  the field.
-- Event motion (pulse/reseed) changes content instantly but every line then
-  develops over its full ≥6 s traversal.
+  scale. Peaks are intentionally unclamped (up to `SHAPE_MAX = 2` × Amp): a
+  pulse line can momentarily dominate the field — that is the cover's drama.
+- Event motion (pulse/reseed/flip/mode change) changes content instantly but
+  every line then develops over its full multi-second traversal.
 
 ## Curation log
 
 | Date | Change | Why |
 |---|---|---|
 | 2026-07-04 | Initial implementation | Wave 1 build (sidecar completed by coordinator; worker session ended at spend limit) |
-| 2026-07-05 | Review + upgrade: added Audio depth knob (`audio`, default 0 = pure synth, gates FFT crossfade and depth-scales bass boost to 1+0.5d); added `sync`/`tempoDiv` — line births grid-locked via per-birth `TempoLock.retime()` with 5 s-cap-derived upper clamp, Pulse launch quantized via `crossed()`; fixed reseed-while-scrolling-up leaving the bottom entry margin empty (one-frame contour pop-in); documented pulse-visibility latency when scrolling up | Series-wide audio-depth/tempo-sync pass + bug hunt |
-| 2026-07-05 | Adversarial review fix: `crossed()` now evaluated every frame regardless of Sync, not only on sync frames — a Sync-off interval left the cycle-count gate stale, so the first sync frame back returned a spurious boundary and could fire a just-armed Pulse off-grid | Match the documented "evaluated every frame" behavior |
+| 2026-07-05 | Review + upgrade: added Audio depth knob (birth-time FFT crossfade), Sync/tempoDiv grid-locked births via TempoLock, reseed pop-in fix | Series-wide audio-depth/tempo-sync pass + bug hunt |
+| 2026-07-05 | Adversarial review fix: `crossed()` evaluated every frame so the cycle-count gate never goes stale across a Sync-off interval | Match the documented behavior |
+| 2026-07-06 | Curation rework: unclamped peaks (removed [0,1] shape clamp and `MAX_RIDGE_ROWS`; overlap via painter's fill); removed Tint/TintAmt/Energy/Sync; Spacing max 2→16; division-locked absolute positioning (TempoDiv is the speed, Spacing is zoom, ring-buffer line store replaces the pool, TempoLock dropped); new WavMode (Dup/Shift/Simplex/Helix) + CylWavs with 45° cylinder rotation; Audio reworked to live per-frame mirrored-FFT mix with pattern-owned GraphicMeter + Decay knob, Jag doubling as bin smoothing | User curation session: restore the cover's overlapping-peak look, make walls distinct, make audio dramatic and tempo the timebase |
