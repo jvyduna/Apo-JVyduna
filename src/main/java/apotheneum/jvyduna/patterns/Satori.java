@@ -168,13 +168,13 @@ public class Satori extends ApotheneumPattern {
     addParameter("newField", this.newField);
     addParameter("reverse", this.reverse);
     addParameter("pulse", this.pulse);
+    addParameter("rndTrig", this.rndTrig);
     addParameter("fieldMode", this.fieldMode);
     addParameter("speed", this.speed);
     addParameter("width", this.width);
     addParameter("posterize", this.posterize);
     addParameter("smooth", this.smooth);
     addParameter("audio", this.audioDepth);
-    addParameter("rndTrig", this.rndTrig);
 
     // RndTrig jump candidates — mirrored 1:1 in the Satori.md table
     this.bag.jumpable(this.fieldMode);

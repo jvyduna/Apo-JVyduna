@@ -215,9 +215,11 @@ under a second. `CURATE:` where the usable band sits live.
 
 ## Parameters
 
-UI/registration order: triggers, Speed, pattern params, rotation, Audio,
-OnBeats, Meta last (14 total — over the ~12 series guideline; nothing was
-obviously droppable given the rotation feature).
+UI/registration order (2026-07-06 series convention): triggers with RndTrig
+immediately after the last of them (drain, teleport, pipes, sparkle, rstRot,
+rndTrig), then Speed, pattern params, rotation, Audio, OnBeats (14 total —
+over the ~12 series guideline; nothing was obviously droppable given the
+rotation feature).
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
@@ -226,6 +228,7 @@ obviously droppable given the rotation feature).
 | `pipes` | Pipes | DiscreteParameter | 1 | 1..3 | concurrent pipe count; raising spawns a fresh pipe, lowering culls the oldest (capped where it stopped) |
 | `sparkle` | Sparkle | TriggerParameter | — | — | flash the recent elbow joints white at full brightness (manual bass sparkle) |
 | `rstRot` | RstRot | TriggerParameter | — | — | zero RotX/RotY and snap back to the orthogonal projection (jump-cut) |
+| `rndTrig` | RndTrig | TriggerParameter | — | — | randomly fire one trigger or jump one parameter (`TriggerBag`) |
 | `speed` | Speed | CompoundParameter | 1.0 | 0.25..16 | growth speed in cells per beat, shared by all pipes; unclamped |
 | `thickness` | Thick | CompoundParameter | 3.5 | 1..6 | pipe thickness in px, whole model in realtime (unclamped; 6 px at high density merges cells) |
 | `density` | Density | DiscreteParameter | 10 | 6..12 | room grid cells per axis; **takes effect at the next drain** |
@@ -234,8 +237,9 @@ obviously droppable given the rotation feature).
 | `rotY` | RotY | CompoundParameter | 0 | 0..1 | lattice rotation speed about the vertical y axis; 100% = 90°/beat |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth: 0 = pure screensaver, 1 = full bass-sparkle response |
 | `onBeats` | OnBeats | EnumParameter&lt;Beats&gt; | 1 | 3/4, 1, 2, 4, 8 | beat-grid interval every cap lands on, counted from load or drain end |
-| `meta` | Meta | TriggerParameter | — | — | randomly fire one trigger or jump one parameter (`TriggerBag`) |
 
+Series RndTrig pass (2026-07-06): `meta` → `rndTrig` (label Meta → RndTrig),
+moved up to sit immediately after `rstRot`.
 Removed 2026-07-06: `energy`, `sync`, `tempoDiv` — superseded by the
 beat-planned `speed`/`onBeats` pair (same precedent as the earlier `growthDiv`
 removal) — and, in the second pass, `newPipe` (superseded by the `pipes`
@@ -353,3 +357,4 @@ performance tempos.
 | 2026-07-05 | Integration pass: `TriggerBag.jumpable(DiscreteParameter, lo, hi)` subrange overload added; `tempoDiv` in the meta pool over SIXTEENTH..HALF; fixed a stale-gate nit (`crossed()` polled every frame) | Pipes3D agent's util request + series `crossed()` idiom |
 | 2026-07-06 (2nd pass) | Live-curation feedback round. **Elbow distribution**: run length now uniform over 1..maxRun (was max-of-two long-biased, which compounded with the length-weighted direction pick and pushed all corners to the walls) — every free candidate cell is now an equally likely elbow target. **Disc joints**: square stamps → discs (`stampDisc`, +0.25 px rounding margin) for balls and end-on cross-sections — a sphere projects as a circle from any angle, so joints stay correct under rotation. **Thick**: range 1–6 px, cell-size clamp removed, and thickness reads the live knob at raster time (whole-model realtime; `segHalfPx`/`ballHalfPx` capture arrays deleted). **Pipes knob**: `newPipe` trigger → `pipes` DiscreteParameter (1–3) reconciled by `syncPipeCount()` via `onParameterChanged` — raising births a fresh pipe, lowering culls the oldest (birth-stamped in `spawnPipe`; teleports keep their stamp), capped where it stopped; drain now respawns the knob count (knob never moves on its own — supersedes round-1 "one pipe"). **Speed**: clamp removed (`speedEff()`/`TRAVERSAL_MIN_MS` deleted), range 0.25–16 cells/beat — the ≥5 s growth floor is explicitly retired; pace saturates at roomSize/OnBeats once runs fit one interval. Meta pool: −newPipe, +pipes(1..3) | User live-curation notes (2nd round) + decisions: drain respawns knob count; thickness unclamped |
 | 2026-07-06 | Curation rework per user notes. **Drain**: duration now measured at trigger to conclude exactly on a beat (0.5–1.5 beats, via new `TempoLock.msUntilNext`); respawns exactly ONE pipe; resets the cap-grid epoch. **Audio**: bassHit → sparkle is the only mapping; level→growth boost, bass gate-release removed; trebleHit unused. **Beat planning**: `energy`/`sync`/`tempoDiv` removed, replaced by `speed` (cells/beat, traversal-clamped) + `onBeats` (3/4–8, custom `Beats` enum); runs are integer-cell with bounded per-run speed trim so caps land exactly on the OnBeats grid AND lattice corners; boxed-in pipes now intersect (weighted, no reversal) instead of teleporting; speed/BPM changes self-heal via nearest-corner re-anchoring. **Rotation**: `rotX`/`rotY` speed knobs (100% = 90°/beat, tempo-locked accumulation) + `rstRot` jump-cut reset; rendering rebuilt from incremental persistent buffers to retained segment/ball lists with full per-frame re-raster through a rotate-then-project transform (zero-angle output verified identical to the old table). **Shading**: axis-aligned stripe replaced by a world-fixed sun-at-infinity Blinn-Phong specular (upper-corner light; highlights slide around pipes as the lattice turns). Jump pool: −tempoDiv, +speed[0.5..2], +onBeats[1..4], +rotX/rotY[0..0.25], +rstRot (registered trigger). All new CURATE: flags — sun direction/exponent, drain minimum at fast tempos, run-length bias, rotation-rate ceiling, fill pacing | User curation notes 2026-07-06 (+ AskUserQuestion decisions: any-multiple caps, spatial-lattice recovery, replace-all params, cells/beat speed, bounded trim, sun-specular request) |
+| 2026-07-06 | Series RndTrig ordering: `meta` → `rndTrig` (label RndTrig), moved from last to immediately after `rstRot`; `.lxp` values on the old `meta` path are dropped on load | Series convention: TriggerBag meta trigger sits right after the other trigger params |

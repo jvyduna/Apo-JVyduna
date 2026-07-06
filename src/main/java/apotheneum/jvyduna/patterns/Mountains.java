@@ -14,7 +14,6 @@ import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
 import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
-import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundParameter;
 import heronarts.lx.parameter.EnumParameter;
 import heronarts.lx.parameter.TriggerParameter;
@@ -55,12 +54,6 @@ public class Mountains extends ApotheneumPattern {
   private static final double SPAWN_IDLE_SECONDS_AMBIENT = 14;
   private static final double SPAWN_IDLE_SECONDS_PEAK = 2.5;
 
-  /** Above this energy, ridge spawns wait for a bass transient (beat-locked feel) */
-  private static final double BASS_GATE_ENERGY = 0.55;
-
-  /** ... but never wait longer than this for a hit (silence safety) */
-  private static final double BASS_GATE_FALLBACK_MS = 3000;
-
   /**
    * Seconds for the restart wipe (full field fades to black). Event-like: it
    * happens once per multi-minute cycle and has 2 s of visual life (>= 1.5 s
@@ -78,7 +71,7 @@ public class Mountains extends ApotheneumPattern {
   private static final double GLINT_SECONDS = 2;
 
   /**
-   * Sync retime clamp for the reveal wipe: [0.7, 1.0]. The upper bound is 1
+   * Retime clamp for the reveal wipe: [0.7, 1.0]. The upper bound is 1
    * (never faster than nominal) because REVEAL_SECONDS_PEAK sits exactly at
    * the >= 5 s full-traversal cap — any speed-up at Energy = 1 would break it.
    * Slowing by up to 30% stretches a reveal to at most 1.43x nominal.
@@ -186,16 +179,12 @@ public class Mountains extends ApotheneumPattern {
     new CompoundParameter("Audio", 0)
     .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
 
-  public final BooleanParameter sync =
-    new BooleanParameter("Sync", true)
-    .setDescription("Lock ridge spawns and reveal completions to the tempo grid; off restores free-running timing");
-
   public final EnumParameter<Tempo.Division> tempoDiv =
     new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.QUARTER)
-    .setDescription("Tempo division that ridge spawns and reveal completions land on when Sync is enabled");
+    .setDescription("Tempo division that ridge spawns and reveal completions land on");
 
-  public final TriggerParameter meta =
-    new TriggerParameter("Meta", bag::fire)
+  public final TriggerParameter rndTrig =
+    new TriggerParameter("RndTrig", bag::fire)
     .setDescription("Randomly fire a trigger or jump a parameter");
 
   // ---- State ------------------------------------------------------------------
@@ -216,9 +205,6 @@ public class Mountains extends ApotheneumPattern {
   // guards 0 by returning 1, which would silently leave that reveal unsynced).
   private double frameRevealMs = 1000 * REVEAL_SECONDS_AMBIENT;
   private double frameSpawnIdleMs = 1000 * SPAWN_IDLE_SECONDS_AMBIENT;
-  private boolean frameBassGated;
-  private boolean frameBassHit;
-  private boolean frameSyncOn;
   private boolean frameGridCross;
 
   private final Field cubeField = new Field("cube", 4 * Apotheneum.GRID_WIDTH, Apotheneum.GRID_HEIGHT);
@@ -233,6 +219,7 @@ public class Mountains extends ApotheneumPattern {
     addParameter("newRidge", this.newRidge);
     addParameter("invert", this.invert);
     addParameter("glint", this.glint);
+    addParameter("rndTrig", this.rndTrig);
     addParameter("energy", this.energy);
     addParameter("roughness", this.roughness);
     addParameter("relief", this.relief);
@@ -240,9 +227,7 @@ public class Mountains extends ApotheneumPattern {
     addParameter("hueShift", this.hueShift);
     addParameter("spawnRate", this.spawnRate);
     addParameter("audio", this.audioDepth);
-    addParameter("sync", this.sync);
     addParameter("tempoDiv", this.tempoDiv);
-    addParameter("meta", this.meta);
 
     // Jump candidates — mirrored 1:1 in the Mountains.md table
     bag.jumpable(this.roughness, 0.2, 0.9);
@@ -280,9 +265,6 @@ public class Mountains extends ApotheneumPattern {
     /** Time spent idle since the last reveal finished (starts huge: spawn on frame 1) */
     private double idleMs = 1e12;
 
-    /** Time spent waiting for a bass hit once the idle interval has elapsed */
-    private double bassWaitMs = 0;
-
     private double fadeMs = 0;
 
     // Current revealing ridge
@@ -291,9 +273,9 @@ public class Mountains extends ApotheneumPattern {
     private int wipeStart = 0;  // ring column where this ridge's wipe began
 
     /**
-     * Reveal duration fixed at spawn when Sync is on, retimed so the wipe
-     * completes on a tempo-grid boundary; 0 = none (free-running: follow the
-     * live per-frame energy value, exactly the Sync-off behavior).
+     * Reveal duration fixed at spawn, retimed so the wipe completes on a
+     * tempo-grid boundary; 0 = not yet retimed (follow the live per-frame
+     * energy value).
      */
     private double syncedRevealMs = 0;
     private int reliefRows = 0;
@@ -318,15 +300,14 @@ public class Mountains extends ApotheneumPattern {
           this.canvas.fill(LXColor.BLACK);
           this.baseline = -1;
           this.state = IDLE;
-          this.idleMs = 1e12; // restart immediately (still subject to bass/grid gating)
-          this.bassWaitMs = 0;
+          this.idleMs = 1e12; // restart immediately (still subject to grid gating)
         }
         break;
 
       case REVEALING:
-        // Sync on: per-ridge duration fixed at spawn (retimed onto the grid);
-        // Sync off (or spawned while off): live energy-driven duration
-        final double revealMs = (frameSyncOn && (this.syncedRevealMs > 0))
+        // Per-ridge duration fixed at spawn (retimed onto the grid);
+        // pre-retime spawns (trigger-fired) fall back to the live duration
+        final double revealMs = (this.syncedRevealMs > 0)
           ? this.syncedRevealMs : frameRevealMs;
         this.front += this.width * deltaMs / revealMs;
         final int target = (int) Math.min(this.front, this.width);
@@ -338,30 +319,18 @@ public class Mountains extends ApotheneumPattern {
           this.baseline += BASELINE_STEP_ROWS;
           this.state = IDLE;
           this.idleMs = 0;
-          this.bassWaitMs = 0;
         }
         break;
 
       default: // IDLE
         this.idleMs = Math.min(this.idleMs + deltaMs, 1e12);
-        if (this.idleMs >= frameSpawnIdleMs) {
-          if (frameSyncOn) {
-            // Grid-locked regime: once due, spawn (or start the restart fade)
-            // exactly on the next TempoDiv boundary. This supersedes the
-            // bass-hit gate — the grid is the beat anchor when Sync is on.
-            if (frameGridCross) {
-              if (isFull()) {
-                startFade("field full");
-              } else {
-                spawn();
-              }
-            }
-          } else if (isFull()) {
+        // Grid-locked: once due, spawn (or start the restart fade) exactly on
+        // the next TempoDiv boundary — the grid is the beat anchor.
+        if ((this.idleMs >= frameSpawnIdleMs) && frameGridCross) {
+          if (isFull()) {
             startFade("field full");
-          } else if (!frameBassGated || frameBassHit || this.bassWaitMs >= BASS_GATE_FALLBACK_MS) {
-            spawn();
           } else {
-            this.bassWaitMs += deltaMs;
+            spawn();
           }
         }
         break;
@@ -415,16 +384,13 @@ public class Mountains extends ApotheneumPattern {
       this.wipeStart = this.random.nextInt(this.width);
       this.front = 0;
       this.painted = 0;
-      // Sync: fix this ridge's reveal duration now, stretched (never
-      // compressed — see REVEAL_RETIME_MAX) so the wipe closes the loop on a
-      // TempoDiv boundary. Spawns themselves land on a boundary when gated
-      // through advance(), so the whole reveal is grid-aligned end to end.
-      this.syncedRevealMs = 0;
-      if (sync.isOn()) {
-        final double s = tempoLock.retime(frameRevealMs, tempoDiv.getEnum(),
-          TempoLock.DEFAULT_MIN_SCALE, REVEAL_RETIME_MAX);
-        this.syncedRevealMs = frameRevealMs / s;
-      }
+      // Fix this ridge's reveal duration now, stretched (never compressed —
+      // see REVEAL_RETIME_MAX) so the wipe closes the loop on a TempoDiv
+      // boundary. Spawns themselves land on a boundary when gated through
+      // advance(), so the whole reveal is grid-aligned end to end.
+      final double s = tempoLock.retime(frameRevealMs, tempoDiv.getEnum(),
+        TempoLock.DEFAULT_MIN_SCALE, REVEAL_RETIME_MAX);
+      this.syncedRevealMs = frameRevealMs / s;
       this.state = REVEALING;
       LX.log("Mountains[" + this.name + "]: ridge baseline=" + this.baseline
         + " relief=" + this.reliefRows + " roughness=" + String.format("%.2f", effRoughness));
@@ -532,12 +498,9 @@ public class Mountains extends ApotheneumPattern {
     this.frameSpawnIdleMs =
       1000 * Ranges.exp(e, SPAWN_IDLE_SECONDS_AMBIENT, SPAWN_IDLE_SECONDS_PEAK)
       / this.spawnRate.getValue();
-    this.frameBassGated = (e >= BASS_GATE_ENERGY);
-    this.frameBassHit = this.audio.bassHit();
-    this.frameSyncOn = this.sync.isOn();
-    // crossed() must tick every frame, even with Sync off, so re-enabling
-    // Sync doesn't misread a stale cycle count as an instant off-grid crossing
-    this.frameGridCross = this.tempoLock.crossed(this.tempoDiv.getEnum()) && this.frameSyncOn;
+    // crossed() must tick every frame so the gate never misreads a stale
+    // cycle count as an instant off-grid crossing
+    this.frameGridCross = this.tempoLock.crossed(this.tempoDiv.getEnum());
 
     this.cubeField.advance(deltaMs);
     this.cylinderField.advance(deltaMs);

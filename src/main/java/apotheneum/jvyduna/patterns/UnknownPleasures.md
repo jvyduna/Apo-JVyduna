@@ -137,6 +137,7 @@ is parented to the meter and can't be registered on the pattern).
 | reseed | Reseed | Trigger | — | — | Clear and refill the whole stack |
 | flip | Flip | Trigger | — | — | Reverse scroll direction |
 | pulse | Pulse | Trigger | — | — | Inject one oversized synth pulse line at the next division |
+| rndTrig | RndTrig | Trigger | — | — | Random trigger or parameter jump |
 | spacing | Spacing | Compound | 2 | 2–16 | Rows between baselines = scroll rows per division (zoom) |
 | amplitude | Amp | Compound | 7 | 2–12 | Peak ridge height in rows (peaks may reach 2× via SHAPE_MAX) |
 | jaggedness | Jag | Compound | 0.15 | 0–1 | Baked profile noise; at full Audio, FFT bin smoothing amount |
@@ -147,10 +148,11 @@ is parented to the meter and can't be registered on the pattern).
 | audio | Audio | Compound | 0 | 0–1 | Live FFT mix into all lines: 0 = screensaver, 1 = 100% FFT |
 | decay | Decay | Compound | 100 ms | 0–1000 ms (exp 2) | Release of the pattern's own FFT analysis |
 | tempoDiv | TempoDiv | Enum | QUARTER | Tempo.Division | Division lines emerge on (with Spacing, the speed) |
-| meta | Meta | Trigger | — | — | Random trigger or parameter jump |
 
 Removed in the 2026-07-06 rework: `energy` (speed is TempoDiv × Spacing now),
 `tintHue`/`tintAmount` (colorize externally), `sync` (locking is structural).
+Series RndTrig pass (2026-07-06): `meta` → `rndTrig` (label Meta → RndTrig),
+moved up to 4th, immediately after the triggers.
 
 ## Triggers
 
@@ -202,3 +204,4 @@ reseed (full scene reset).
 | 2026-07-05 | Review + upgrade: added Audio depth knob (birth-time FFT crossfade), Sync/tempoDiv grid-locked births via TempoLock, reseed pop-in fix | Series-wide audio-depth/tempo-sync pass + bug hunt |
 | 2026-07-05 | Adversarial review fix: `crossed()` evaluated every frame so the cycle-count gate never goes stale across a Sync-off interval | Match the documented behavior |
 | 2026-07-06 | Curation rework: unclamped peaks (removed [0,1] shape clamp and `MAX_RIDGE_ROWS`; overlap via painter's fill); removed Tint/TintAmt/Energy/Sync; Spacing max 2→16; division-locked absolute positioning (TempoDiv is the speed, Spacing is zoom, ring-buffer line store replaces the pool, TempoLock dropped); new WavMode (Dup/Shift/Simplex/Helix) + CylWavs with 45° cylinder rotation; Audio reworked to live per-frame mirrored-FFT mix with pattern-owned GraphicMeter + Decay knob, Jag doubling as bin smoothing | User curation session: restore the cover's overlapping-peak look, make walls distinct, make audio dramatic and tempo the timebase |
+| 2026-07-06 | Series RndTrig ordering: `meta` → `rndTrig` (label RndTrig), moved from last to 4th, immediately after the triggers; `.lxp` values on the old `meta` path are dropped on load | Series convention: TriggerBag meta trigger sits right after the other trigger params |

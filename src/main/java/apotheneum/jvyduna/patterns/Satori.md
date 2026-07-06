@@ -130,20 +130,21 @@ inline).
 
 ## Parameters
 
-UI order: triggers first, pattern parameters, Audio, RndTrig last.
+UI order (2026-07-06 series convention): triggers first with RndTrig
+immediately after them, then pattern parameters, Audio last.
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
 | `newField` | NewField | TriggerParameter | — | — | reseed centers/seeds, keep the current variant |
 | `reverse` | Reverse | TriggerParameter | — | — | flip the color-cycle direction |
 | `pulse` | Pulse | TriggerParameter | — | — | launch the radial phase pulse manually (full strength) |
+| `rndTrig` | RndTrig | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
 | `fieldMode` | Field | EnumParameter&lt;FieldMode&gt; | INTERFERENCE | 4 variants | static phase-field variant |
 | `speed` | Speed | CompoundParameter (%) | 1 (100%) | 0..2 | cycle rate: 0% pauses, 100% = 8s/cycle, 200% = 4s |
 | `width` | Width | CompoundParameter | 5 | 1..6 | band width: higher = wider bands, fewer repeats (`cycles = 7 − width`) |
 | `posterize` | Bands | CompoundDiscreteParameter | 6 | 2..16 | quantize the LUT into N bold bands |
 | `smooth` | Smooth | CompoundParameter | 0 | 0..1 | band-edge interpolation: 0 = hard edges, 1 = full smoothstep gradient |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth: 0 = pure screensaver, 1 = full |
-| `rndTrig` | RndTrig | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
 
 Renames/removals (2026-07-06): `energy`, `sync`, `tempoDiv` removed;
 `spread` → `width` (action reversed); `meta` → `rndTrig`. Any `.lxp`
@@ -222,3 +223,5 @@ trim on the physical LEDs is still unverified.
 | 2026-07-05 | Review/upgrade session: fixed ANGULAR `arms` no-op (amplitude scale was absorbed by field normalization; now folds the azimuth into 1–3 real mirrored arms); added `Audio` depth knob (default 0) via `AudioReactive.setDepth` — depth-0 now the documented baseline, bass-pulse response scaled by `depth()`; added `Sync`/`TempoDiv` (default WHOLE) — band-period quantized to the grid with latch hysteresis and a cap-safe clamp (worst traversal pinned to 5.0s), grid breath pulse on each division boundary; added third non-meta trigger `Pulse` (manual radial pulse); doc corrections (compliance math incl. sync, removed unfounded "≥8s ambient requirement" phrasing) | Series-wide audio-depth/tempo-sync upgrade + bug hunt |
 | 2026-07-05 | Integration pass: hand-rolled band-period latch (`syncTargetMs`/`syncDivMs`) extracted verbatim into shared `TempoLock.quantizePeriod(periodMs, division[, minScale, maxScale])`; Satori now calls the helper with the default `[0.7, 1.4]` window and keeps its pattern-local `capMax` traversal clamp on top (behavior-identical: helper output ≥ 0.7 and `capMax` ≥ 1.067 > 0.7, so `min(s, capMax)` reproduces the old three-way clamp) | Satori agent requested a shared period-quantization helper so other rotation/plasma-style patterns don't re-hand-roll the latch |
 | 2026-07-06 | Curation pass from sculpture review: removed `Energy` (targets now fixed constants: `CYCLE_SEC = 8`, `PULSE_DEPTH = 1.3`, `SHIMMER_MAX = 1.0`, shimmer energy-gate deleted); removed tempo locking entirely (`Sync`, `TempoDiv`, `TempoLock` usage, grid breath, traversal-cap budget); `Speed` re-ranged 0..2 (%, multiplies rate: 0% pauses, 100% = old max 8s/cycle, 200% = 4s); `Spread` → `Width` with action reversed (`cycles = 7 − width`); added `Smooth` (smoothstep band-edge interpolation, 0 = old hard bands); Audio max effect ×6 (speed boost now boost-only `1 + 3·level`, old 0.5× silence floor removed); `Meta` → `RndTrig`; speed jump range 0.5..1.5 | Jeff's curation notes: Energy/Sync not earning their space, Audio imperceptible, Spread direction backwards, wanted pause + faster ceiling on Speed and optional smooth color interpolation |
+| 2026-07-06 | Series RndTrig ordering: `rndTrig` moved from last to 4th, immediately after the three triggers (no rename needed — already RndTrig) | Jeff 2026-07-06: TriggerBag meta trigger sits right after the other trigger params in every pattern |
+| 2026-07-06 | Series RndTrig ordering: `rndTrig` moved from last to 4th, immediately after the three triggers (already named RndTrig) | Series convention: TriggerBag meta trigger sits right after the other trigger params |

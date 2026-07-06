@@ -227,8 +227,8 @@ public class Zot extends ApotheneumPattern {
     new DiscreteParameter("EMADur", 3, 0, 17)
     .setDescription("EMA / refractory window in beats: a strike usually won't re-fire within this many beats (0 = no EMA gate)");
 
-  public final TriggerParameter meta =
-    new TriggerParameter("Meta", bag::fire)
+  public final TriggerParameter rndTrig =
+    new TriggerParameter("RndTrig", bag::fire)
     .setDescription("Randomly fire a trigger or jump a parameter");
 
   // ---- Surfaces (10 total: external[0..4], internal[0..4]) ------------------
@@ -331,6 +331,7 @@ public class Zot extends ApotheneumPattern {
     addParameter("strike", this.strike);
     addParameter("storm", this.storm);
     addParameter("nextAlgo", this.nextAlgo);
+    addParameter("rndTrig", this.rndTrig);
     addParameter("algorithm", this.algorithm);
     addParameter("eSurfs", this.eSurfs);
     addParameter("iSurfs", this.iSurfs);
@@ -344,7 +345,6 @@ public class Zot extends ApotheneumPattern {
     addParameter("audio", this.audioFloor);
     addParameter("audFreq", this.audFreq);
     addParameter("emaDur", this.emaDur);
-    addParameter("meta", this.meta);
 
     // Jump candidates — mirrored 1:1 in the Zot.md "Jump candidates" table
     bag.jumpable(this.algorithm);

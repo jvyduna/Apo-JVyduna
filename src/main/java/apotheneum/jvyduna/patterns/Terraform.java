@@ -81,9 +81,6 @@ public class Terraform extends ApotheneumPattern {
   /** Terrain subsidence (slump) time constant at peak drive (s) */
   private static final double SUBSIDE_TAU_PEAK_SEC = 30;
 
-  /** Uplift envelope rise time when Sync is off (~today's default feel) */
-  private static final double UPLIFT_FREE_RISE_MS = 1400;
-
   // ---- Rates and thresholds --------------------------------------------------
 
   /** Spontaneous (timer) uplifts per second per surface at ambient (~1 per 17 s) */
@@ -206,13 +203,10 @@ public class Terraform extends ApotheneumPattern {
   public final CompoundParameter audioDepth = new CompoundParameter("Audio", 0)
     .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
 
-  public final BooleanParameter sync = new BooleanParameter("Sync", true)
-    .setDescription("Lock motion events to the tempo grid; off restores free-running timing");
-
   public final EnumParameter<Tempo.Division> tempoDiv = new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.QUARTER)
-    .setDescription("Tempo division that motion events land on when Sync is enabled");
+    .setDescription("Tempo division that motion events land on");
 
-  public final TriggerParameter meta = new TriggerParameter("Meta", bag::fire)
+  public final TriggerParameter rndTrig = new TriggerParameter("RndTrig", bag::fire)
     .setDescription("Randomly fire a trigger or jump a parameter");
 
   // ---- State (all preallocated; zero allocation in the render path) -----------
@@ -269,7 +263,7 @@ public class Terraform extends ApotheneumPattern {
   private int floodPhase = FLOOD_NONE;
   private double floodHoldMs = 0;
 
-  /** Sea rise rate (fraction/s) while FLOOD_RISING; retimed at trigger when Sync is on */
+  /** Sea rise rate (fraction/s) while FLOOD_RISING; retimed onto the grid at trigger */
   private double floodRate = 1 / FLOOD_RAMP_SEC;
 
   private double shakeMs = 0;
@@ -295,6 +289,7 @@ public class Terraform extends ApotheneumPattern {
     addParameter("flood", this.flood);
     addParameter("reseed", this.reseed);
     addParameter("erupt", this.erupt);
+    addParameter("rndTrig", this.rndTrig);
     addParameter("upliftSize", this.upliftSize);
     addParameter("erosion", this.erosion);
     addParameter("rough", this.rough);
@@ -303,9 +298,7 @@ public class Terraform extends ApotheneumPattern {
     addParameter("whiteCaps", this.whiteCaps);
     addParameter("trbSprk", this.trbSprk);
     addParameter("audio", this.audioDepth);
-    addParameter("sync", this.sync);
     addParameter("tempoDiv", this.tempoDiv);
-    addParameter("meta", this.meta);
 
     // Jump candidates — mirrored 1:1 in Terraform.md "Jump candidates"
     this.bag.jumpable(this.erosion, 0.15, 3);
@@ -335,13 +328,11 @@ public class Terraform extends ApotheneumPattern {
     LX.log("Terraform: flood");
     this.floodPhase = FLOOD_RISING;
     this.floodRate = 1 / FLOOD_RAMP_SEC;
-    if (this.sync.isOn()) {
-      // Retime the ramp so the sea tops out on a tempo-grid boundary.
-      // Slow-down only (max scale 1): FLOOD_RAMP_SEC already sits at the 5 s
-      // full-traversal cap, so the ramp may stretch to ~7.1 s but never quicken.
-      final double msUntilFull = (SEA_FLOOD - this.seaFrac) * FLOOD_RAMP_SEC * 1000;
-      this.floodRate *= this.tempoLock.retime(msUntilFull, this.tempoDiv.getEnum(), TempoLock.DEFAULT_MIN_SCALE, 1);
-    }
+    // Retime the ramp so the sea tops out on a tempo-grid boundary.
+    // Slow-down only (max scale 1): FLOOD_RAMP_SEC already sits at the 5 s
+    // full-traversal cap, so the ramp may stretch to ~7.1 s but never quicken.
+    final double msUntilFull = (SEA_FLOOD - this.seaFrac) * FLOOD_RAMP_SEC * 1000;
+    this.floodRate *= this.tempoLock.retime(msUntilFull, this.tempoDiv.getEnum(), TempoLock.DEFAULT_MIN_SCALE, 1);
   }
 
   private void erupt() {
@@ -436,18 +427,14 @@ public class Terraform extends ApotheneumPattern {
     advanceUplifts(this.cylinderUplifts, this.cylinderTarget, this.cylinderHeight, Apotheneum.CYLINDER_HEIGHT, deltaMs);
 
     // -- Uplift: spontaneous births always run (silence-safe); bass adds when
-    // the music drives hard. Free-running: a Poisson timer. Sync on: births
-    // land on the tempo grid, firing on grid crossings with a probability
-    // that preserves the same expected rate (capped at one birth per division).
+    // the music drives hard. Births land on the tempo grid, firing on grid
+    // crossings with a probability that preserves the Poisson expected rate
+    // (capped at one birth per division).
     final double upliftRate = Ranges.exp(this.drive, UPLIFT_RATE_AMBIENT_HZ, UPLIFT_RATE_PEAK_HZ);
-    // crossed() polls every frame, even with Sync off (result unused), so the
-    // gate never goes stale — a lapsed gate would report a boundary that
-    // elapsed while Sync was off and fire one spurious birth on re-enable
+    // crossed() polls every frame so the gate never goes stale
     final boolean gridCross = this.tempoLock.crossed(this.tempoDiv.getEnum());
-    final boolean timerUplift = this.sync.isOn() ?
-      gridCross
-        && (this.random.nextDouble() < upliftRate * this.tempoLock.divisionMs(this.tempoDiv.getEnum()) * 0.001) :
-      this.random.nextDouble() < upliftRate * dt;
+    final boolean timerUplift = gridCross
+      && (this.random.nextDouble() < upliftRate * this.tempoLock.divisionMs(this.tempoDiv.getEnum()) * 0.001);
     // Gate scaled by depth() so it reads the depth-independent smoothed level:
     // drive tops out at the Audio knob value, and a fixed gate would silently
     // disable bass uplifts for any knob setting below it
@@ -629,8 +616,7 @@ public class Terraform extends ApotheneumPattern {
   /**
    * Book one new mountain on each surface (random independent centers),
    * sized by drive and the Uplift knob, optionally scaled by ampScale. The
-   * rise is an eased envelope completing exactly on the tempo grid (Sync on)
-   * or in UPLIFT_FREE_RISE_MS (Sync off).
+   * rise is an eased envelope completing exactly on the tempo grid.
    * Zero-allocation; called from the render path and from the Erupt trigger.
    */
   private void spawnUplift(double ampScale) {
@@ -642,15 +628,12 @@ public class Terraform extends ApotheneumPattern {
   }
 
   /**
-   * Rise time for a new uplift. Sync on: finish exactly on the next tempoDiv
-   * boundary, unless it is less than half a division away — then target the
-   * boundary after (grid-strict; durations land in [0.5, 1.5) divisions, and
-   * on-grid timer births get exactly 1.0). Sync off: fixed free rise.
+   * Rise time for a new uplift: finish exactly on the next tempoDiv boundary,
+   * unless it is less than half a division away — then target the boundary
+   * after (grid-strict; durations land in [0.5, 1.5) divisions, and on-grid
+   * timer births get exactly 1.0).
    */
   private double upliftDurationMs() {
-    if (!this.sync.isOn()) {
-      return UPLIFT_FREE_RISE_MS;
-    }
     final Tempo.Division div = this.tempoDiv.getEnum();
     final double divMs = this.tempoLock.divisionMs(div);
     double untilNext = (1 - this.lx.engine.tempo.getBasis(div)) * divMs;
