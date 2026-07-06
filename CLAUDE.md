@@ -121,3 +121,40 @@ Iteration loop (the important part):
 - Keep this pom's `<lx.version>` matching the arrange host (currently
   `1.2.2-SNAPSHOT`). `lx.package`'s `lxVersion` is filtered from it; a stale
   value triggers a "built for an older version" warning at load.
+
+## LX serialization gotchas (hard-won, verified on `arrange`)
+
+Learned building the MIR-verify template generator in the Claude-MIR-pipeline
+repo; the LX source is easy to misread on these.
+
+- **LinearMaskEffect polarity**: a NON-inverted mask **shows** the band and
+  blacks out everything else (empirically verified — reading
+  `LXColor.multiply` in the FADE mask function suggests the opposite; the
+  alpha there is a *darkening* amount). Band geometry: `ABS` mode is
+  **centered** on `offset` with ±`size` half-width (total width 2·size);
+  `POS` shows position ≤ offset+size (bottom-anchored bars, since normalized
+  yn=0 is the model bottom); `NEG` shows position ≥ offset−size. `offset` and
+  `size` are CompoundParameters — valid clip-lane and modulation targets.
+- **Composition lane visibility**: the arrange timeline groups a parameter
+  clip lane under `p.getAncestor(LXBus.class)` of the target parameter
+  (`LXComposition.getParameterLaneBus`). A lane targeting a **global**
+  modulator's parameter has no bus ancestor and silently appears under no
+  channel row. Scope modulators inside the pattern (or channel) they serve.
+- **Scoped modulation JSON** (pattern-level `children.modulation`): paths are
+  RELATIVE to the host component — source
+  `{"id": <modId>, "path": "/modulation/modulator/1"}`, target
+  `{"componentId": <patternId>, "parameterPath": "compositeLevel", "path":
+  "/compositeLevel"}` (`LXParameterModulation.save` uses
+  `getCanonicalPath(scope.getParent())`). A clip lane targeting that
+  modulator uses the full root path:
+  `/lx/mixer/channel/N/pattern/M/modulation/modulator/K/<param>`.
+- **Clip-lane events**: all `ParameterClipLane$*` subtypes (Normalized,
+  Discrete, Boolean, Trigger) share the event shape
+  `{"cursor": {millis, beatCount, beatBasis}, "normalized": <0-1>}` — key is
+  `normalized`, trigger events use 1.0. The loader picks the lane subtype
+  from the resolved parameter's runtime type, not the `class` string.
+- **Cube-face views**: model views `left/right/front/back` (channel `view`
+  7/8/9/10, 1-based, 0 = whole model) select both LED layers of one cube
+  wall with RELATIVE normalization. Horizontal axis within a face is world
+  **X on Front/Back** but **Z on Left/Right** — masks and patterns need a
+  per-face axis choice (compare `model.xRange` vs `zRange` at runtime).
