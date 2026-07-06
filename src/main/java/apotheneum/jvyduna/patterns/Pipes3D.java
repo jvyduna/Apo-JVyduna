@@ -27,15 +27,15 @@ import heronarts.lx.parameter.TriggerParameter;
  * lattice grows through a single ~10x9x10-cell room volume; the cube's four
  * walls are the four walls of that room, each showing an orthographic
  * projection of the SAME shared 3D object. Per-wall depth buffers resolve
- * overlap (nearer pipe wins) and drive depth-cued brightness; a world-fixed
- * sun at infinity puts a specular highlight stripe on each pipe.
+ * overlap (nearer pipe wins); a Phong lighting rig (sun + corner fills,
+ * rotating about Y once per 32 beats) shades the pipes as round tubes and
+ * antialiases the projection — three coordinate systems: the walls (fixed),
+ * the lattice (RotX/RotY), and the lighting rig.
  *
- * Growth is beat-planned: every cap (turn/elbow) lands on a multiple of the
- * OnBeats grid counted from pattern load or the end of a drain, and all pipes
- * grow at (near-)equal Speed in cells per beat — each run covers a whole
- * number of cells with its speed trimmed slightly so the cap lands exactly on
- * the grid AND on a lattice corner. The whole lattice can also rotate (RotX /
- * RotY, tempo-locked) with the projection re-rendered each frame.
+ * Growth is beat-planned, Mystify-style: every cap (turn/elbow) lands on the
+ * CapDiv grid phase-aligned to the global tempo, with per-frame velocity
+ * derived from remaining-distance / time-to-cap (exact arrival, BPM-robust).
+ * The Speed knob steers how many divisions each run spans.
  *
  * Cube-only in v1; the cylinder stays dark (follow-up curation item). See
  * Pipes3D.md (beside this file) for the full design note.
@@ -70,16 +70,27 @@ public class Pipes3D extends ApotheneumPattern {
   /** Chance of continuing straight when the straight-ahead run is free */
   private static final double P_STRAIGHT = 0.55; // CURATE: NT pipes turn often; higher = longer runs
 
-  /** Sun-specular stripe: saturation floor at full specular intensity (lower = whiter) */
-  private static final float STRIPE_SAT = 35;      // CURATE
-  /** Sun-specular stripe: brightness boost at full specular intensity */
-  private static final float STRIPE_BOOST = 1.15f;
-  /** Base gain on the Blinn-Phong lobe; scaled by the Hglht knob and audio */
+  /** Specular: saturation floor at full intensity (lower = whiter) */
+  private static final float SPEC_SAT_FLOOR = 35;  // CURATE
+  /** Base gain on the Blinn-Phong lobe; scaled by the Shaded knob and audio */
   private static final double SPEC_GAIN = 1.4; // CURATE: highlight visibility
   /** How much loud music inflates the highlights (rides audio.level, depth-scaled) */
   private static final double AUDIO_SPEC_BOOST = 1.5; // CURATE
-  /** Skip the stripe below this intensity (invisible anyway) */
-  private static final double SPEC_MIN = 0.05;
+
+  // ---- Lighting rig (rotates about Y, independent of the lattice) -----------
+
+  /** Beats per full revolution of the lighting rig about the y axis */
+  private static final double RIG_ROT_BEATS = 32;
+  /** Ambient floor: the dark side of a pipe never goes fully black */
+  private static final double AMBIENT = 0.15; // CURATE
+  /** Diffuse weight of the sun (key light, directional) */
+  private static final double KD_SUN = 0.65; // CURATE
+  /** Diffuse weight of each corner fill point light */
+  private static final double KD_FILL = 0.30; // CURATE
+  /** Fill distance in room half-extents from the center (direction only, no falloff) */
+  private static final double FILL_DIST = 3.0; // CURATE
+  /** Fill corner directions (unit-box corners; -y is up, so both sit above the room) */
+  private static final double[][] FILL_CORNERS = { { -1, -1, 1 }, { 1, -1, -1 } }; // CURATE
 
   /** How fast loudness widens the flashed-cap set on a bass hit (1 = at full level) */
   private static final double SPARKLE_BREADTH = 2; // CURATE
@@ -132,28 +143,19 @@ public class Pipes3D extends ApotheneumPattern {
    */
   private static final double[][] VIEW = { { 0, 0, -1 }, { 1, 0, 0 }, { 0, 0, 1 }, { -1, 0, 0 } };
 
-  /** Sun direction (toward the light) and per-wall Blinn-Phong half vectors */
+  /** Base sun direction (toward the light) at rig angle 0; rotated per frame */
   private static final double[] SUN;
-  private static final double[][] HALF_VEC;
   static {
     // Sun at infinity toward an upper corner. Rows index top-down on the
     // walls (column.points[0] is the top row), so "up" is -y in room
-    // coordinates. CURATE: corner choice / elevation; flip signs if the
-    // highlight reads as lit from below on the sculpture.
+    // coordinates. CURATE: elevation.
     final double sx = 0.35, sy = -0.85, sz = 0.35;
     final double sl = Math.sqrt(sx * sx + sy * sy + sz * sz);
     SUN = new double[] { sx / sl, sy / sl, sz / sl };
-    HALF_VEC = new double[WALLS][3];
-    for (int w = 0; w < WALLS; ++w) {
-      final double hx = SUN[0] + VIEW[w][0];
-      final double hy = SUN[1] + VIEW[w][1];
-      final double hz = SUN[2] + VIEW[w][2];
-      final double hl = Math.sqrt(hx * hx + hy * hy + hz * hz);
-      HALF_VEC[w][0] = hx / hl;
-      HALF_VEC[w][1] = hy / hl;
-      HALF_VEC[w][2] = hz / hl;
-    }
   }
+
+  /** Per-wall screen-u directions in room coordinates (for sphere normals) */
+  private static final double[][] UDIR = { { 1, 0, 0 }, { 0, 0, 1 }, { -1, 0, 0 }, { 0, 0, -1 } };
 
   // ---- OnBeats grid ----------------------------------------------------------
 
@@ -175,43 +177,6 @@ public class Pipes3D extends ApotheneumPattern {
     Beats(String label, double beats) {
       this.label = label;
       this.beats = beats;
-    }
-
-    @Override
-    public String toString() {
-      return this.label;
-    }
-  }
-
-  /**
-   * Discrete growth speeds in cells per beat: a geometric-ish ladder so live
-   * changes read as musical jumps, including 0 to PAUSE growth entirely
-   * (resuming realigns every cap to the CapDiv grid, 0.5-1.5 divisions out).
-   */
-  public enum Rate {
-    PAUSE("0", 0),
-    R1_4("0.25", 0.25),
-    R1_2("0.5", 0.5),
-    R1("1", 1),
-    R3_2("1.5", 1.5),
-    R2("2", 2),
-    R3("3", 3),
-    R4("4", 4),
-    R6("6", 6),
-    R8("8", 8),
-    R12("12", 12),
-    R16("16", 16),
-    R24("24", 24),
-    R32("32", 32),
-    R48("48", 48),
-    R64("64", 64);
-
-    public final String label;
-    public final double cellsPerBeat;
-
-    Rate(String label, double cellsPerBeat) {
-      this.label = label;
-      this.cellsPerBeat = cellsPerBeat;
     }
 
     @Override
@@ -244,9 +209,10 @@ public class Pipes3D extends ApotheneumPattern {
     new TriggerParameter("RstRot", this::resetRotation)
     .setDescription("Zero the rotation speeds and snap back to the orthogonal projection"));
 
-  public final EnumParameter<Rate> speed =
-    new EnumParameter<Rate>("Speed", Rate.R1)
-    .setDescription("Growth speed in cells per beat, shared by all pipes; 0 pauses growth and resuming realigns caps to the CapDiv grid");
+  public final CompoundParameter speed =
+    (CompoundParameter) new CompoundParameter("Speed", 1, 0, 64)
+    .setExponent(3) // CURATE: knob resolution concentrated in the musical low end
+    .setDescription("Target growth speed in cells per beat; steers how many CapDivs each run spans (caps always land on the grid); 0 pauses growth");
 
   public final CompoundParameter thickness =
     new CompoundParameter("Thick", 3.5, THICK_MIN, THICK_MAX)
@@ -256,9 +222,9 @@ public class Pipes3D extends ApotheneumPattern {
     new DiscreteParameter("Density", 10, MIN_DENSITY, MAX_DENSITY + 1)
     .setDescription("Room grid cells across each axis; takes effect at the next drain");
 
-  public final CompoundParameter hglht =
-    new CompoundParameter("Hglht", 0.5)
-    .setDescription("Amount of Phong sun-specular highlight on the pipes (audio level adds more on top)");
+  public final CompoundParameter shaded =
+    new CompoundParameter("Shaded", 0.5)
+    .setDescription("Phong shading amount: rounded-pipe lighting + edge antialiasing; 0 disables all shading (fast flat render)");
 
   public final CompoundParameter rotX =
     new CompoundParameter("RotX", 0)
@@ -274,7 +240,7 @@ public class Pipes3D extends ApotheneumPattern {
 
   public final EnumParameter<Beats> onBeats =
     new EnumParameter<Beats>("CapDiv", Beats.ONE)
-    .setDescription("Beat-grid division that every cap/turn lands on, counted from pattern load or the end of a drain");
+    .setDescription("Beat division that every cap/turn lands on, phase-aligned to the global tempo grid");
 
   public final TriggerParameter rndTrig =
     new TriggerParameter("RndTrig", bag::fire)
@@ -322,7 +288,6 @@ public class Pipes3D extends ApotheneumPattern {
   private final double[] pHeadY = new double[MAX_PIPES];
   private final double[] pHeadZ = new double[MAX_PIPES];
   private final double[] pCapBeat = new double[MAX_PIPES]; // absolute composite-basis beat of the next cap
-  private final double[] pRatio = new double[MAX_PIPES];   // run speed / Speed knob at plan time
   private final double[] pGoal = new double[MAX_PIPES];    // target coordinate along the run axis
   private final int[] pSeg = new int[MAX_PIPES];           // live segment index, or -1
   private final float[] pHue = new float[MAX_PIPES];
@@ -331,7 +296,7 @@ public class Pipes3D extends ApotheneumPattern {
   private final long[] pBirth = new long[MAX_PIPES];       // spawn order, for oldest-first culls
   private long birthCounter = 0;
 
-  /** Previous frame's Rate value, to catch the pause->resume transition */
+  /** Previous frame's Speed value, to catch the pause->resume transition */
   private double prevRate;
 
   // Scratch for palette-derived pipe colors (Rubik-style fill; event-rate only)
@@ -343,10 +308,9 @@ public class Pipes3D extends ApotheneumPattern {
   private final int[] freeRun = new int[6];
   private final int[] boundRun = new int[6];
 
-  // Beat clock: composite basis is monotonic fractional beats; caps land on
-  // epochBeats + m * OnBeats. The epoch is set at load/activation and at the
-  // end of each drain, snapped to a whole engine beat.
-  private double epochBeats;
+  // Beat clock: composite basis is monotonic fractional beats. Caps land on
+  // the GLOBAL tempo grid — absolute-beat multiples of CapDiv — so all pipes
+  // (and re-loads, and drains) share one phase.
   private double lastBeats;
 
   // Lattice rotation state (accumulated angles) and per-frame trig
@@ -357,8 +321,13 @@ public class Pipes3D extends ApotheneumPattern {
   /** This frame's live half-thicknesses (Thick applies to the whole model in realtime) */
   private double frameHalfPx, frameBallHalfPx;
 
-  /** This frame's specular gain: SPEC_GAIN x (Hglht knob + audio level boost) */
+  /** This frame's shading state: Shaded mix, specular gain, rig-rotated lights */
+  private double frameShadeMix;
   private double frameSpecScale;
+  private double rigDeg = 0;
+  private final double[] sunDir = new double[3];
+  private final double[][] halfVec = new double[WALLS][3];
+  private final double[][] fillPos = new double[FILL_CORNERS.length][3];
 
   /** Scratch result of xformPoint/xformDir */
   private double tx, ty, tz;
@@ -389,23 +358,24 @@ public class Pipes3D extends ApotheneumPattern {
     addParameter("sparkle", this.sparkle);
     addParameter("rndTrig", this.rndTrig); // series convention: right after the plain triggers
     addParameter("speed", this.speed);
+    addParameter("onBeats", this.onBeats); // key kept for .lxp compat; UI label is CapDiv
     addParameter("thickness", this.thickness);
     addParameter("density", this.density);
-    addParameter("hglht", this.hglht);
+    addParameter("shaded", this.shaded);
     addParameter("rotX", this.rotX);
     addParameter("rotY", this.rotY);
     addParameter("rstRot", this.rstRot);
     addParameter("audio", this.audioDepth);
-    addParameter("onBeats", this.onBeats); // key kept for .lxp compat; UI label is CapDiv
 
     bag.jumpable(this.thickness);
     bag.jumpable(this.density);
     // Spawn/cull as an ambient event. CURATE: do uncommanded culls read well?
     bag.jumpable(this.pipes);
-    bag.jumpable(this.hglht); // CURATE: highlight-amount drift as ambient variation
-    // Musical mid-band only (0.5..4): excludes PAUSE — RndTrig must not
-    // silently freeze the pattern — and the blazing top of the ladder. CURATE
-    bag.jumpable(this.speed, Rate.R1_2.ordinal(), Rate.R4.ordinal());
+    // Never fully disables shading (0 = flat render). CURATE
+    bag.jumpable(this.shaded, 0.25, 1);
+    // Musical mid-band only (0.5..4): excludes 0 — RndTrig must not silently
+    // freeze the pattern — and the blazing top of the knob. CURATE
+    bag.jumpable(this.speed, 0.5, 4);
     // Exclude 3/4 (a random polyrhythm jump reads as a timing bug) and 8
     // (caps stall for many seconds). CURATE: unverified visually
     bag.jumpable(this.onBeats, Beats.ONE.ordinal(), Beats.FOUR.ordinal());
@@ -415,8 +385,7 @@ public class Pipes3D extends ApotheneumPattern {
     bag.jumpable(this.rotY, 0, 0.25);
 
     this.lastBeats = lx.engine.tempo.getCompositeBasis();
-    this.epochBeats = Math.rint(this.lastBeats);
-    this.prevRate = this.speed.getEnum().cellsPerBeat;
+    this.prevRate = this.speed.getValue();
     applyDensity();
     clearRoom();
     syncPipeCount();
@@ -425,11 +394,10 @@ public class Pipes3D extends ApotheneumPattern {
   @Override
   protected void onActive() {
     super.onActive();
-    // The composite basis kept running while inactive: rebase the clock and
-    // epoch. Live pipes' pCapBeat values are now in the past, so each replans
-    // on the first frame, re-aligning every cap to the fresh epoch.
+    // The composite basis kept running while inactive: rebase the frame
+    // clock. Live pipes' pCapBeat values are now in the past, so each snaps
+    // to its goal and replans on the global grid on the first frame.
     this.lastBeats = this.lx.engine.tempo.getCompositeBasis();
-    this.epochBeats = Math.rint(this.lastBeats);
   }
 
   // ---- Room / lifecycle -------------------------------------------------------
@@ -523,13 +491,45 @@ public class Pipes3D extends ApotheneumPattern {
   }
 
   /**
-   * First grid point strictly after beat b (grid = epochBeats + m * OnBeats).
-   * The epsilon means "if b sits exactly on a grid point, return the next
-   * one" — so a cap planned at a cap lands one full interval later.
+   * First global grid point strictly after beat b (grid = absolute-beat
+   * multiples of CapDiv, phase-aligned to the transport). The epsilon means
+   * "if b sits exactly on a grid point, return the next one".
    */
   private double nextGrid(double b) {
     final double g = gridInterval();
-    return this.epochBeats + (Math.floor((b - this.epochBeats) / g + 1e-6) + 1) * g;
+    return (Math.floor(b / g + 1e-6) + 1) * g;
+  }
+
+  /**
+   * Schedule pipe i's next cap: dist cells remain to its target corner, and
+   * the cap must land on the global CapDiv grid (the Mystify idiom — the cap
+   * time is a hard absolute-beat target; velocity is derived from it each
+   * frame, so BPM and knob changes never push a cap off the grid). The Speed
+   * knob steers WHICH grid point: the one nearest the ideal arrival at the
+   * target speed, never sooner than half a division out — so slow speeds span
+   * many divisions, fast speeds cap every division, and congestion (short
+   * dist) degrades speed rather than grid alignment. Escape hatch: when even
+   * one whole division is far too slow for the knob, cap on a half-division
+   * (it re-aligns to the whole grid at the next plan). From off-grid starts
+   * (spawn, teleport, pause-resume, clock jumps) the first cap lands 0.5-1.5
+   * divisions out. Speed 0 parks the cap at infinity until resume.
+   */
+  private void scheduleCap(int i, double now, double dist) {
+    final double s = this.speed.getValue();
+    if (s <= 0) {
+      this.pCapBeat[i] = Double.POSITIVE_INFINITY;
+      return;
+    }
+    final double g = gridInterval();
+    final double tIdeal = dist / s;
+    // First grid point at least half a division out
+    final double firstAllowed = nextGrid(now + 0.5 * g - g * 1e-6);
+    double capBeat = Math.max(firstAllowed, Math.rint((now + tIdeal) / g) * g);
+    // CURATE: half-division escape thresholds
+    if ((tIdeal <= 0.75 * g) && (capBeat - now >= 2 * tIdeal)) {
+      capBeat = now + 0.5 * g;
+    }
+    this.pCapBeat[i] = capBeat;
   }
 
   private static int clampi(int v, int lo, int hi) {
@@ -542,9 +542,8 @@ public class Pipes3D extends ApotheneumPattern {
 
   /**
    * Plan the next run for pipe i, starting at the current (continuous) head:
-   * pick a direction and an integer cell count that fit the room, schedule
-   * the cap on the OnBeats grid, and trim the run's speed ratio so the head
-   * arrives exactly at the target corner exactly on the grid. Called at every
+   * pick a direction and an integer cell count that fit the room, then
+   * schedule the cap on the global CapDiv grid (scheduleCap). Called at every
    * cap, at spawn, and after a teleport landing.
    */
   private void planRun(int i) {
@@ -670,16 +669,9 @@ public class Pipes3D extends ApotheneumPattern {
     }
 
     // Cap scheduling: the run covers dist cells (target = the corner n cells
-    // from the anchor along dir; only the run-axis coordinate is targeted).
-    // Pick the number of grid intervals k nearest the nominal duration at
-    // the Speed knob, never allowing the run to move faster than it, and
-    // store the trim as a ratio so the live Speed knob still scales mid-run.
-    // NB: once runs fit in one interval (k = 1), pace saturates at
-    // dist/OnBeats — the top of the knob mostly guarantees single-interval
-    // runs; OnBeats and density then set the visible speed.
-    final double g = gridInterval();
-    final double sEff = this.speed.getEnum().cellsPerBeat;
-    final double d0 = nextGrid(now) - now; // (0, g]
+    // from the anchor along dir; only the run-axis coordinate is targeted);
+    // scheduleCap() picks the global grid point nearest the ideal arrival at
+    // the Speed knob (hard target; velocity is derived from it per frame).
     double dist;
     if (DX[dir] != 0) {
       this.pGoal[i] = ax + 0.5 + DX[dir] * n;
@@ -692,21 +684,7 @@ public class Pipes3D extends ApotheneumPattern {
       dist = Math.abs(this.pGoal[i] - this.pHeadZ[i]);
     }
     this.pDir[i] = dir;
-    if (sEff <= 0) {
-      // Paused (spawn/teleport while Speed = 0): freeze until the knob
-      // resumes; realignCaps() then schedules from the remaining distance
-      this.pCapBeat[i] = Double.POSITIVE_INFINITY;
-      this.pRatio[i] = 0;
-    } else {
-      long k = Math.max(1, Math.round((dist / sEff - d0) / g) + 1);
-      double t = d0 + (k - 1) * g;
-      if (dist / t > sEff) {
-        ++k;
-        t += g;
-      }
-      this.pCapBeat[i] = nextGrid(now) + (k - 1) * g;
-      this.pRatio[i] = (dist / t) / sEff;
-    }
+    scheduleCap(i, now, dist);
 
     // Occupy the swept cells (idempotent; intersecting sweeps add only the
     // newly free ones), then check the auto-drain fill limit
@@ -875,7 +853,8 @@ public class Pipes3D extends ApotheneumPattern {
   /**
    * Drain finished (on a beat): fresh room at the (possibly jumped) density,
    * next palette color, the Pipes-knob count of pipes (the knob never moves
-   * on its own), and a fresh cap-grid epoch.
+   * on its own). Caps stay phase-aligned to the global tempo grid — a drain
+   * does not reset cap phase.
    */
   private void finishDrain() {
     this.draining = false;
@@ -885,9 +864,6 @@ public class Pipes3D extends ApotheneumPattern {
     }
     applyDensity(); // density jumps take effect here
     clearRoom();
-    // The drain concluded on an engine beat by construction; rint absorbs
-    // the <= 1-frame countdown overshoot. Caps re-count from here.
-    this.epochBeats = Math.rint(this.lastBeats);
     syncPipeCount();
     LX.log("Pipes3D: drain complete; density " + this.gx + "x" + this.gy + "x" + this.gz);
   }
@@ -895,33 +871,56 @@ public class Pipes3D extends ApotheneumPattern {
   // ---- Growth ---------------------------------------------------------------------
 
   /**
-   * Integrate every live pipe's head up to (exactly) its cap time, then
-   * replan at caps. Heads move only along pDir at ratio * Speed cells per
-   * beat — the live Speed knob and BPM changes flow through immediately; the
-   * beat-aligned cap then fires wherever the head is, and the next plan
-   * re-anchors to the lattice (self-healing, no snapping).
+   * Move every live pipe's head toward its target with DERIVED velocity (the
+   * Mystify idiom): each frame the head covers the same fraction of its
+   * remaining distance as the frame covers of the remaining time to the cap
+   * beat — exact arrival on the grid, robust to live BPM changes. The Speed
+   * knob does not move in-flight heads (it steers the next plan); caps are
+   * hard absolute-beat targets.
    */
   private void updatePipes(double now, double dBeats) {
-    final double sEff = this.speed.getEnum().cellsPerBeat;
-    if (sEff <= 0) {
+    if (this.speed.getValue() <= 0) {
       return; // paused: heads and caps freeze (rotation/sparkle/drain unaffected)
     }
     final double bPrev = now - dBeats;
     for (int i = 0; i < MAX_PIPES; ++i) {
-      if (!this.pAlive[i]) {
+      if (!this.pAlive[i] || (this.pDir[i] < 0)) {
         continue;
       }
-      final double bEnd = Math.min(now, this.pCapBeat[i]);
-      final double dt = bEnd - bPrev;
-      if ((dt > 0) && (this.pDir[i] >= 0)) {
+      if (now >= this.pCapBeat[i]) {
+        // Cap: snap exactly to the target corner and plan the next run
         final int d = this.pDir[i];
-        final double step = this.pRatio[i] * sEff * dt;
-        // Clamp inside the room: a head that outruns the plan (Speed turned
-        // up mid-run) stalls at the wall until its cap beat — caps are never
-        // early, and the next plan steers back in
-        this.pHeadX[i] = clamp(this.pHeadX[i] + DX[d] * step, 0.5, this.gx - 0.5);
-        this.pHeadY[i] = clamp(this.pHeadY[i] + DY[d] * step, 0.5, this.gy - 0.5);
-        this.pHeadZ[i] = clamp(this.pHeadZ[i] + DZ[d] * step, 0.5, this.gz - 0.5);
+        if (DX[d] != 0) {
+          this.pHeadX[i] = this.pGoal[i];
+        } else if (DY[d] != 0) {
+          this.pHeadY[i] = this.pGoal[i];
+        } else {
+          this.pHeadZ[i] = this.pGoal[i];
+        }
+        final int sSnap = this.pSeg[i];
+        if (sSnap >= 0) {
+          this.segBx[sSnap] = this.pHeadX[i];
+          this.segBy[sSnap] = this.pHeadY[i];
+          this.segBz[sSnap] = this.pHeadZ[i];
+        }
+        planRun(i); // may start the drain (fill limit / list overflow)
+        if (this.draining) {
+          return;
+        }
+        continue; // the fresh run starts integrating next frame
+      }
+      final double denom = this.pCapBeat[i] - bPrev;
+      final double dt = now - bPrev;
+      if ((denom > 1e-9) && (dt > 0) && Double.isFinite(denom)) {
+        final double f = Math.min(1, dt / denom);
+        final int d = this.pDir[i];
+        if (DX[d] != 0) {
+          this.pHeadX[i] += (this.pGoal[i] - this.pHeadX[i]) * f;
+        } else if (DY[d] != 0) {
+          this.pHeadY[i] += (this.pGoal[i] - this.pHeadY[i]) * f;
+        } else {
+          this.pHeadZ[i] += (this.pGoal[i] - this.pHeadZ[i]) * f;
+        }
         final int s = this.pSeg[i];
         if (s >= 0) {
           this.segBx[s] = this.pHeadX[i];
@@ -929,37 +928,24 @@ public class Pipes3D extends ApotheneumPattern {
           this.segBz[s] = this.pHeadZ[i];
         }
       }
-      if (now >= this.pCapBeat[i]) {
-        planRun(i); // may start the drain (fill limit / list overflow)
-        if (this.draining) {
-          return;
-        }
-      }
     }
   }
 
   /**
-   * Resuming from pause (Speed 0 -> nonzero): every in-flight run's cap time
-   * is stale (frozen at infinity, or long past while the clock kept running).
-   * Re-schedule each cap on the CapDiv grid, landing 0.5-1.5 divisions from
-   * now (same flavor as the drain rule), and re-trim the speed ratio from the
-   * distance the head still has to cover to its target corner.
+   * Re-anchor stale cap schedules to the global grid: used on pause-resume
+   * (caps parked at infinity) and on backward transport jumps (the grid
+   * phase moved under the schedules). Each live pipe re-schedules from the
+   * distance its head still has to cover — landing 0.5-1.5 divisions out.
    */
-  private void realignCaps(double now, double rate) {
-    final double g = gridInterval();
+  private void realignCaps(double now) {
     for (int i = 0; i < MAX_PIPES; ++i) {
       if (!this.pAlive[i] || (this.pDir[i] < 0)) {
         continue;
       }
-      double capBeat = nextGrid(now);
-      if (capBeat - now < 0.5 * g) {
-        capBeat += g; // never sooner than half a division out
-      }
       final int d = this.pDir[i];
       final double head = (DX[d] != 0) ? this.pHeadX[i]
         : (DY[d] != 0) ? this.pHeadY[i] : this.pHeadZ[i];
-      this.pCapBeat[i] = capBeat;
-      this.pRatio[i] = (Math.abs(this.pGoal[i] - head) / (capBeat - now)) / rate;
+      scheduleCap(i, now, Math.abs(this.pGoal[i] - head));
     }
   }
 
@@ -1091,102 +1077,159 @@ public class Pipes3D extends ApotheneumPattern {
       final float[] dBuf = this.depthBuf[w];
 
       if (screenLen < 0.5) {
-        // Seen end-on: a circular cross-section at the near depth
-        stampDisc(cBuf, dBuf, (u0 + u1) / 2, (v0 + v1) / 2, halfPx,
-          Math.min(dn0, dn1), hueDeg, satPct, briPct, 1f);
+        // Seen end-on: a circular cross-section, sphere-shaded like a joint
+        stampDisc(cBuf, dBuf, w, (u0 + u1) / 2, (v0 + v1) / 2, halfPx,
+          Math.min(dn0, dn1), (wax + wbx) / 2, (way + wby) / 2, (waz + wbz) / 2,
+          hueDeg, satPct, briPct, 1f);
         continue;
       }
 
-      // Sun specular for this wall: Blinn-Phong on a cylinder. The lobe
-      // peaks where the surface normal aligns with the half vector H; in the
-      // (M, V') frame across the pipe (M = view x axis, V' = view-facing
-      // normal component, both of magnitude sqrt(1 - (V.A)^2)) the peak sits
-      // at cross-pipe offset tStar with height sqrt(a^2 + b^2) <= 1.
-      double specI = 0, tScreen = 0;
-      {
+      final boolean shading = this.frameShadeMix > 0;
+
+      // Cylinder shading frame for this wall: M̂ = cross-pipe direction on
+      // screen, V̂′ = view-facing normal component (both unit); the surface
+      // normal at cross-pipe offset t in [-1, 1] is N(t) = t·M̂ + √(1−t²)·V̂′,
+      // so every light dot reduces to a·t + b·√(1−t²) with precomputed a, b.
+      double mhx = 0, mhy = 0, mhz = 0, vpx = 0, vpy = 0, vpz = 0;
+      double aSun = 0, bSun = 0, aH = 0, bH = 0;
+      boolean lit = false;
+      if (shading) {
         final double[] vw = VIEW[w];
-        final double[] hw = HALF_VEC[w];
         final double dotVA = vw[0] * axn + vw[1] * ayn + vw[2] * azn;
         final double ppx = vw[0] - dotVA * axn;
         final double ppy = vw[1] - dotVA * ayn;
         final double ppz = vw[2] - dotVA * azn;
         final double plen = Math.sqrt(ppx * ppx + ppy * ppy + ppz * ppz);
-        if ((this.frameSpecScale > 0) && (plen > 1e-4)) { // Hglht up, not end-on
-          final double mx = vw[1] * azn - vw[2] * ayn;
-          final double my = vw[2] * axn - vw[0] * azn;
-          final double mz = vw[0] * ayn - vw[1] * axn;
-          final double a = (mx * hw[0] + my * hw[1] + mz * hw[2]) / plen;
-          final double b = (ppx * hw[0] + ppy * hw[1] + ppz * hw[2]) / plen;
-          if (b > 0) {
-            final double s0 = Math.sqrt(a * a + b * b);
-            final double s2 = s0 * s0;
-            // Exponent 4 (broad lobe so most orientations show a highlight),
-            // scaled by the Hglht knob and audio level. CURATE: exponent
-            specI = Math.min(1, s2 * s2 * this.frameSpecScale);
-            final double tStar = (s0 > 1e-6) ? a / s0 : 0;
-            // Orient the cross-pipe offset onto the screen minor axis
-            final double mu = wallMu(w, mx, mz), mv = my * this.ch;
-            final double orient = mu * (-dv) + mv * du;
-            tScreen = (orient >= 0) ? tStar : -tStar;
+        if (plen > 1e-4) { // not end-on
+          lit = true;
+          vpx = ppx / plen; vpy = ppy / plen; vpz = ppz / plen;
+          mhx = (vw[1] * azn - vw[2] * ayn) / plen;
+          mhy = (vw[2] * axn - vw[0] * azn) / plen;
+          mhz = (vw[0] * ayn - vw[1] * axn) / plen;
+          // Orient M̂ so +t points along the screen minor axis (+m2)
+          final double mu = wallMu(w, mhx, mhz), mv = mhy * this.ch;
+          if (mu * (-dv) + mv * du < 0) {
+            mhx = -mhx; mhy = -mhy; mhz = -mhz;
           }
+          final double[] hw = this.halfVec[w];
+          aSun = mhx * this.sunDir[0] + mhy * this.sunDir[1] + mhz * this.sunDir[2];
+          bSun = vpx * this.sunDir[0] + vpy * this.sunDir[1] + vpz * this.sunDir[2];
+          aH = mhx * hw[0] + mhy * hw[1] + mhz * hw[2];
+          bH = vpx * hw[0] + vpy * hw[1] + vpz * hw[2];
         }
       }
-      final int stripeJ = ((specI > SPEC_MIN) && (span >= 2))
-        ? clampi((int) Math.round((span - 1) * (tScreen + 1) / 2), 0, span - 1) : -1;
-      final float specIf = (float) specI;
 
       final int steps = Math.max(1, (int) Math.ceil(screenLen));
       final double m2u = -dv / screenLen, m2v = du / screenLen;
+      // Shading widens the span one pixel each side for the soft AA rim
+      final int spanPix = shading ? span + 2 : span;
+      final double tNorm = 1 / Math.max(halfPx, 0.5);
 
-      // Pass 1: body
       for (int k = 0; k <= steps; ++k) {
         final double f = (double) k / steps;
         final double cu = u0 + du * f, cv = v0 + dv * f;
         final float dnk = dn0 + (dn1 - dn0) * (float) f;
         final float bf = 1 - DEPTH_DIM * dnk;
-        final int colMain = LXColor.hsb(hueDeg, satPct, briPct * bf);
-        for (int j = 0; j < span; ++j) {
-          final double o = j - (span - 1) * 0.5;
+
+        if (!shading) {
+          // Flat fast path: exactly the pre-shading render (Shaded = 0)
+          final int colMain = LXColor.hsb(hueDeg, satPct, briPct * bf);
+          for (int j = 0; j < spanPix; ++j) {
+            final double o = j - (spanPix - 1) * 0.5;
+            final int pu = (int) Math.floor(cu + m2u * o);
+            final int pv = (int) Math.floor(cv + m2v * o);
+            if (pu < 0 || pu >= W || pv < 0 || pv >= H) {
+              continue;
+            }
+            final int idx = pv * W + pu;
+            if (dnk <= dBuf[idx]) {
+              dBuf[idx] = dnk;
+              cBuf[idx] = colMain;
+            }
+          }
+          continue;
+        }
+
+        // Fill-light dot pairs at this step's centerline point (the fills
+        // are point sources: direction varies along the pipe)
+        double aF1 = 0, bF1 = 0, aF2 = 0, bF2 = 0;
+        if (lit) {
+          final double px = wax + ddx * f, py = way + ddy * f, pz = waz + ddz * f;
+          double lx0 = this.fillPos[0][0] - px, ly0 = this.fillPos[0][1] - py, lz0 = this.fillPos[0][2] - pz;
+          double ll = Math.sqrt(lx0 * lx0 + ly0 * ly0 + lz0 * lz0);
+          if (ll > 1e-9) { lx0 /= ll; ly0 /= ll; lz0 /= ll; }
+          aF1 = mhx * lx0 + mhy * ly0 + mhz * lz0;
+          bF1 = vpx * lx0 + vpy * ly0 + vpz * lz0;
+          double lx1 = this.fillPos[1][0] - px, ly1 = this.fillPos[1][1] - py, lz1 = this.fillPos[1][2] - pz;
+          ll = Math.sqrt(lx1 * lx1 + ly1 * ly1 + lz1 * lz1);
+          if (ll > 1e-9) { lx1 /= ll; ly1 /= ll; lz1 /= ll; }
+          aF2 = mhx * lx1 + mhy * ly1 + mhz * lz1;
+          bF2 = vpx * lx1 + vpy * ly1 + vpz * lz1;
+        }
+
+        for (int j = 0; j < spanPix; ++j) {
+          final double o = j - (spanPix - 1) * 0.5;
+          final double cov = clamp(halfPx + 0.5 - Math.abs(o), 0, 1);
+          if (cov <= 0) {
+            continue;
+          }
           final int pu = (int) Math.floor(cu + m2u * o);
           final int pv = (int) Math.floor(cv + m2v * o);
           if (pu < 0 || pu >= W || pv < 0 || pv >= H) {
             continue;
           }
-          final int idx = pv * W + pu;
-          if (dnk <= dBuf[idx]) {
-            dBuf[idx] = dnk;
-            cBuf[idx] = colMain;
+          double diff, spec;
+          if (lit) {
+            final double t = clamp(o * tNorm, -1, 1);
+            final double sN = Math.sqrt(Math.max(0, 1 - t * t));
+            diff = KD_SUN * Math.max(0, aSun * t + bSun * sN)
+                 + KD_FILL * (Math.max(0, aF1 * t + bF1 * sN) + Math.max(0, aF2 * t + bF2 * sN));
+            final double nh = Math.max(0, aH * t + bH * sN);
+            final double nh2 = nh * nh;
+            // Exponent 4 (broad lobe). CURATE: exponent/gain
+            spec = Math.min(1, nh2 * nh2 * this.frameSpecScale);
+          } else {
+            diff = KD_SUN + KD_FILL; // degenerate frame: neutral fully-lit
+            spec = 0;
           }
-        }
-      }
-
-      // Pass 2: specular stripe (1 px at the lobe's cross-pipe offset),
-      // desaturating from the palette color's own saturation toward the
-      // glossy stripe floor as intensity rises
-      if (stripeJ >= 0) {
-        final double o = stripeJ - (span - 1) * 0.5;
-        final float stripeSat = satPct - (satPct - Math.min(satPct, STRIPE_SAT)) * specIf;
-        for (int k = 0; k <= steps; ++k) {
-          final double f = (double) k / steps;
-          final int pu = (int) Math.floor(u0 + du * f + m2u * o);
-          final int pv = (int) Math.floor(v0 + dv * f + m2v * o);
-          if (pu < 0 || pu >= W || pv < 0 || pv >= H) {
-            continue;
-          }
-          final int idx = pv * W + pu;
-          final float dnk = dn0 + (dn1 - dn0) * (float) f;
-          if (dnk <= dBuf[idx] + 1e-6f) {
-            final float bf = 1 - DEPTH_DIM * dnk;
-            dBuf[idx] = Math.min(dBuf[idx], dnk);
-            cBuf[idx] = LXColor.hsb(hueDeg, stripeSat,
-              Math.min(100f, briPct * bf * (1 + (STRIPE_BOOST - 1) * specIf)));
-          }
+          compositePixel(cBuf, dBuf, pv * W + pu, dnk, cov, hueDeg, satPct, briPct, bf, diff, spec);
         }
       }
     }
   }
 
-  /** Rasterize one joint/cap ball: a bright desaturated disc per wall */
+  /**
+   * Composite one shaded pixel: Phong (ambient + diffuse) blended against
+   * the flat color by the Shaded mix, specular pushed toward white
+   * (brightness up, saturation toward the glossy floor), edge coverage
+   * folded into brightness (the antialiasing). Full-coverage pixels
+   * depth-test and write; partial-coverage rim pixels blend with lightest()
+   * and leave the depth buffer alone, so soft rims can't occlude.
+   */
+  private void compositePixel(int[] cBuf, float[] dBuf, int idx, float dn, double cov,
+                              float hueDeg, float satPct, float briBase, float bf,
+                              double diff, double spec) {
+    final double mix = this.frameShadeMix;
+    final double phong = Math.min(1, AMBIENT + diff);
+    final double shadeF = (1 - mix) + mix * phong;
+    double bri = briBase * bf * shadeF;
+    float sat = satPct;
+    if (spec > 0) {
+      bri += spec * (100 - bri);
+      sat = (float) (satPct - (satPct - Math.min(satPct, SPEC_SAT_FLOOR)) * spec);
+    }
+    final int col = LXColor.hsb(hueDeg, sat, (float) (bri * cov));
+    if (cov >= 1) {
+      if (dn <= dBuf[idx]) {
+        dBuf[idx] = dn;
+        cBuf[idx] = col;
+      }
+    } else if (dn <= dBuf[idx]) {
+      cBuf[idx] = LXColor.lightest(cBuf[idx], col);
+    }
+  }
+
+  /** Rasterize one joint/cap ball: a sphere-shaded disc per wall */
   private void rasterBall(int b) {
     xformPoint(this.ballX[b], this.ballY[b], this.ballZ[b]);
     final double wx = this.tx, wy = this.ty, wz = this.tz;
@@ -1194,44 +1237,114 @@ public class Pipes3D extends ApotheneumPattern {
     final float sat = Math.min(this.ballSat[b], BALL_SAT); // glossy: never more saturated than the joint cap
     for (int w = 0; w < WALLS; ++w) {
       final float dn = (float) clamp(wallDepth(w, wx, wz) / this.gz, 0, 1);
-      stampDisc(this.colorBuf[w], this.depthBuf[w],
-        wallU(w, wx, wz), wy * this.ch, half, dn, this.ballHue[b], sat, this.ballBri[b], BALL_BOOST);
+      stampDisc(this.colorBuf[w], this.depthBuf[w], w,
+        wallU(w, wx, wz), wy * this.ch, half, dn, wx, wy, wz,
+        this.ballHue[b], sat, this.ballBri[b], BALL_BOOST);
     }
   }
 
   /**
-   * Depth-tested disc stamp centered at (cu, cv) px with radius ~half px.
-   * A disc, not a square: joints are spheres and end-on pipes are circular
-   * cross-sections, and a sphere's orthographic projection is a circle from
-   * any viewing angle — so joints stay correct as the lattice rotates (a
-   * screen-aligned square betrays the projection under rotation).
+   * Depth-tested disc stamp centered at (cu, cv) px with radius ~half px —
+   * the orthographic projection of a sphere (joints) or a pipe's circular
+   * cross-section (end-on segments), correct under rotation. With shading
+   * on, per-pixel sphere normals get the full Phong treatment plus the AA
+   * rim; at Shaded = 0 it is the flat disc of the pre-shading render.
+   * (wx, wy, wz) is the world-space center, used for the fill directions.
    */
-  private void stampDisc(int[] cBuf, float[] dBuf, double cu, double cv,
-                         double half, float dn, float hueDeg, float sat, float bri, float boost) {
-    final int iu0 = Math.max(0, (int) Math.floor(cu - half));
-    final int iu1 = Math.min(W - 1, (int) Math.ceil(cu + half) - 1);
-    final int iv0 = Math.max(0, (int) Math.floor(cv - half));
-    final int iv1 = Math.min(H - 1, (int) Math.ceil(cv + half) - 1);
+  private void stampDisc(int[] cBuf, float[] dBuf, int w, double cu, double cv,
+                         double half, float dn, double wx, double wy, double wz,
+                         float hueDeg, float sat, float bri, float boost) {
+    final boolean shading = this.frameShadeMix > 0;
+    final double pad = shading ? 1 : 0;
+    final int iu0 = Math.max(0, (int) Math.floor(cu - half - pad));
+    final int iu1 = Math.min(W - 1, (int) Math.ceil(cu + half + pad) - 1);
+    final int iv0 = Math.max(0, (int) Math.floor(cv - half - pad));
+    final int iv1 = Math.min(H - 1, (int) Math.ceil(cv + half + pad) - 1);
     if (iu1 < iu0 || iv1 < iv0) {
       return;
     }
     // +0.25 px so small radii don't decimate to a plus sign
-    final double r2 = (half + 0.25) * (half + 0.25);
+    final double r = half + 0.25;
     final float bf = 1 - DEPTH_DIM * dn;
-    final int col = LXColor.hsb(hueDeg, sat, Math.min(100f, bri * bf * boost));
+    final float briBase = Math.min(100f, bri * boost);
+
+    if (!shading) {
+      final double r2 = r * r;
+      final int col = LXColor.hsb(hueDeg, sat, Math.min(100f, bri * bf * boost));
+      for (int v = iv0; v <= iv1; ++v) {
+        final int rowBase = v * W;
+        final double dy = v + 0.5 - cv;
+        for (int u = iu0; u <= iu1; ++u) {
+          final double dx = u + 0.5 - cu;
+          if (dx * dx + dy * dy > r2) {
+            continue;
+          }
+          final int idx = rowBase + u;
+          if (dn <= dBuf[idx]) {
+            dBuf[idx] = dn;
+            cBuf[idx] = col;
+          }
+        }
+      }
+      return;
+    }
+
+    // Sphere shading: normal N = ρu·Û + ρv·Ŷ + c·V̂ in room coordinates
+    // (Û = the wall's screen-u direction, Ŷ = screen-down = room +y, V̂ =
+    // toward the viewer; c = √(1−ρ²)). Each light dot reduces to
+    // ρu·LU + ρv·LY + c·LV with the three components precomputed per stamp.
+    final double[] ud = UDIR[w];
+    final double[] vw = VIEW[w];
+    final double[] hw = this.halfVec[w];
+    final double sunU = this.sunDir[0] * ud[0] + this.sunDir[1] * ud[1] + this.sunDir[2] * ud[2];
+    final double sunY = this.sunDir[1];
+    final double sunV = this.sunDir[0] * vw[0] + this.sunDir[1] * vw[1] + this.sunDir[2] * vw[2];
+    final double hU = hw[0] * ud[0] + hw[1] * ud[1] + hw[2] * ud[2];
+    final double hY = hw[1];
+    final double hV = hw[0] * vw[0] + hw[1] * vw[1] + hw[2] * vw[2];
+    double f1U = 0, f1Y = 0, f1V = 0, f2U = 0, f2Y = 0, f2V = 0;
+    {
+      double lx = this.fillPos[0][0] - wx, ly = this.fillPos[0][1] - wy, lz = this.fillPos[0][2] - wz;
+      double ll = Math.sqrt(lx * lx + ly * ly + lz * lz);
+      if (ll > 1e-9) { lx /= ll; ly /= ll; lz /= ll; }
+      f1U = lx * ud[0] + ly * ud[1] + lz * ud[2];
+      f1Y = ly;
+      f1V = lx * vw[0] + ly * vw[1] + lz * vw[2];
+      lx = this.fillPos[1][0] - wx; ly = this.fillPos[1][1] - wy; lz = this.fillPos[1][2] - wz;
+      ll = Math.sqrt(lx * lx + ly * ly + lz * lz);
+      if (ll > 1e-9) { lx /= ll; ly /= ll; lz /= ll; }
+      f2U = lx * ud[0] + ly * ud[1] + lz * ud[2];
+      f2Y = ly;
+      f2V = lx * vw[0] + ly * vw[1] + lz * vw[2];
+    }
+
     for (int v = iv0; v <= iv1; ++v) {
-      final int rowBase = v * W;
-      final double dy = v + 0.5 - cv;
+      final double dyp = v + 0.5 - cv;
       for (int u = iu0; u <= iu1; ++u) {
-        final double dx = u + 0.5 - cu;
-        if (dx * dx + dy * dy > r2) {
+        final double dxp = u + 0.5 - cu;
+        final double dist = Math.sqrt(dxp * dxp + dyp * dyp);
+        final double cov = clamp(r + 0.5 - dist, 0, 1);
+        if (cov <= 0) {
           continue;
         }
-        final int idx = rowBase + u;
-        if (dn <= dBuf[idx]) {
-          dBuf[idx] = dn;
-          cBuf[idx] = col;
+        double ru = dxp / r, rv = dyp / r;
+        final double rho2 = ru * ru + rv * rv;
+        double c;
+        if (rho2 >= 1) {
+          final double scale = 1 / Math.sqrt(rho2); // silhouette normal
+          ru *= scale;
+          rv *= scale;
+          c = 0;
+        } else {
+          c = Math.sqrt(1 - rho2);
         }
+        final double diff = KD_SUN * Math.max(0, ru * sunU + rv * sunY + c * sunV)
+          + KD_FILL * (Math.max(0, ru * f1U + rv * f1Y + c * f1V)
+                     + Math.max(0, ru * f2U + rv * f2Y + c * f2V));
+        final double nh = Math.max(0, ru * hU + rv * hY + c * hV);
+        final double nh2 = nh * nh;
+        final double spec = Math.min(1, nh2 * nh2 * this.frameSpecScale);
+        compositePixel(cBuf, dBuf, v * W + u, dn, cov, hueDeg, sat, briBase, bf, diff, spec);
       }
     }
   }
@@ -1249,19 +1362,18 @@ public class Pipes3D extends ApotheneumPattern {
     final double now = this.lx.engine.tempo.getCompositeBasis();
     double dBeats = now - this.lastBeats;
     if (dBeats < 0) {
-      this.epochBeats += dBeats;
-      for (int i = 0; i < MAX_PIPES; ++i) {
-        this.pCapBeat[i] += dBeats;
-      }
+      // Backward transport jump (tap tempo / reset): the global grid phase
+      // moved under the schedules — re-anchor every live cap to it
       dBeats = 0;
+      realignCaps(now);
     }
     this.lastBeats = now;
 
-    // Pause/resume: resuming from Speed 0 realigns every in-flight cap to the
-    // CapDiv grid, landing 0.5-1.5 divisions out
-    final double rate = this.speed.getEnum().cellsPerBeat;
+    // Pause/resume: resuming from Speed 0 re-schedules every in-flight cap
+    // onto the global CapDiv grid, landing 0.5-1.5 divisions out
+    final double rate = this.speed.getValue();
     if ((this.prevRate == 0) && (rate > 0)) {
-      realignCaps(now, rate);
+      realignCaps(now);
     }
     this.prevRate = rate;
 
@@ -1275,10 +1387,38 @@ public class Pipes3D extends ApotheneumPattern {
     this.cxr = this.gx * 0.5; this.cyr = this.gy * 0.5; this.czr = this.gz * 0.5;
     this.frameHalfPx = thicknessPx() / 2;
     this.frameBallHalfPx = this.frameHalfPx + BALL_EXTRA_PX;
-    // Phong highlight amount: the Hglht knob (0.5 = nominal) plus an audio
-    // level boost (depth-scaled, silence-safe) — louder music, hotter shine
+    // Shading amount (0 = flat fast path) and specular gain: the Shaded knob
+    // (0.5 = nominal) plus an audio level boost (depth-scaled, silence-safe)
+    this.frameShadeMix = this.shaded.getValue();
     this.frameSpecScale = SPEC_GAIN
-      * (2 * this.hglht.getValue() + AUDIO_SPEC_BOOST * this.audio.level);
+      * (2 * this.frameShadeMix + AUDIO_SPEC_BOOST * this.audio.level);
+
+    // Lighting rig: the sun and corner fills rotate together about Y, one
+    // full revolution per RIG_ROT_BEATS beats — the third coordinate system
+    // (walls fixed; lattice on RotX/RotY; rig autonomous, untouched by RstRot)
+    this.rigDeg = (this.rigDeg + (360.0 / RIG_ROT_BEATS) * dBeats) % 360;
+    final double rigR = Math.toRadians(this.rigDeg);
+    final double sinR = Math.sin(rigR), cosR = Math.cos(rigR);
+    this.sunDir[0] = cosR * SUN[0] + sinR * SUN[2];
+    this.sunDir[1] = SUN[1];
+    this.sunDir[2] = -sinR * SUN[0] + cosR * SUN[2];
+    for (int w = 0; w < WALLS; ++w) {
+      final double hx = this.sunDir[0] + VIEW[w][0];
+      final double hy = this.sunDir[1] + VIEW[w][1];
+      final double hz = this.sunDir[2] + VIEW[w][2];
+      final double hl = Math.sqrt(hx * hx + hy * hy + hz * hz);
+      this.halfVec[w][0] = hx / hl;
+      this.halfVec[w][1] = hy / hl;
+      this.halfVec[w][2] = hz / hl;
+    }
+    for (int j = 0; j < FILL_CORNERS.length; ++j) {
+      final double fx = FILL_CORNERS[j][0] * this.cxr * FILL_DIST;
+      final double fy = FILL_CORNERS[j][1] * this.cyr * FILL_DIST;
+      final double fz = FILL_CORNERS[j][2] * this.czr * FILL_DIST;
+      this.fillPos[j][0] = this.cxr + cosR * fx + sinR * fz;
+      this.fillPos[j][1] = this.cyr + fy;
+      this.fillPos[j][2] = this.czr - sinR * fx + cosR * fz;
+    }
 
     double outputScale = 1;
     if (this.draining) {
