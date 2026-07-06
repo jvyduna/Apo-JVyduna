@@ -83,6 +83,43 @@ discrete like the original's, but fade smoothly to black instead of vanishing.
   one arraycopy.
 - **Door columns**: `SurfaceCanvas.copyTo` guards by `column.points.length`; the
   FACES blit does the same.
+- **Open-line mode** (`Vertices = 2`): the "polygon" degenerates to a single
+  open edge (v0-v1), not a closed 2-gon — `drawShapeLines` draws exactly one
+  edge instead of looping back (which would double-draw the same segment).
+  Both endpoints still get bass-flash crosses.
+
+## Mirror
+
+`Mirror` (default off) draws a same-color reflected copy of every drawn edge
+and bass-flash cross, computed in `mirrorPixelX`/`mirrorPixelXf`. The
+reflection axis is geometry-dependent and was verified against the actual
+Apotheneum fixture geometry (`generateApotheneumFixture.php`/`Apotheneum.lxf`),
+not guessed:
+
+- **FACES**: a local left-right flip across the single face's own vertical
+  centerline — `mirroredX = (width-1) - x`, width=50.
+- **CUBE_RING**: mirrors across the physical world **X=Z diagonal** — the
+  plane through the front-left and back-right corner posts, which reflects
+  front↔left and right↔back. Verified per-face column sweep directions from
+  the fixture generator (front +x, right +z, back −x, left −z) make this land
+  on exactly the same formula as FACES: `mirroredX = (width-1) - x` (=
+  `199 - x`), width=200 — a numeric coincidence, not the same reasoning (the
+  two X=Z corner posts sit exactly at the ring's column-0 seam and
+  column-~99.5 seam).
+- **CYLINDER**: mirrors across the same X=Z diagonal, but the cylinder is
+  angularly (not arc-length) parameterized (column 0 = front exactly, column
+  30 = right, 60 = back, 90 = left, confirmed from the fixture's
+  `sin(instance*3)/cos(instance*3)` generator expression), so the formula
+  differs: `mirroredX = floorMod(0.75·width - x, width)` (= `floorMod(90-x,
+  120)`), width=120.
+
+Mirror color is the same as the source edge (a faithful reflection). Since
+mirroring lives inside `drawShapeLines`/`stampFlash` themselves, both the
+TimeGap-stamped trail draw and the live scratch draw get the mirrored copy
+automatically — no separate stamping logic needed. The wraparound "short way
+around the ring" adjustment (±width shift for whichever direction is
+shorter) is re-derived independently for the mirrored copy, since mirroring
+can flip which direction is short.
 
 ## Audio mapping
 
@@ -184,11 +221,12 @@ UI/registration order: triggers, Energy, pattern parameters, Audio, Meta last.
 | `energy` | Energy | CompoundParameter | 0.35 | 0..1 | master energy (base traversal rate, flash intensity) |
 | `geometry` | Geometry | EnumParameter&lt;Geometry&gt; | CUBE_RING | FACES / CUBE_RING / CYLINDER | sim topology / target surface |
 | `shapes` | Shapes | DiscreteParameter | 2 | 1..2 | number of polylines |
-| `vertices` | Vertices | DiscreteParameter | 4 | 3..5 | vertices per polyline |
+| `vertices` | Vertices | DiscreteParameter | 4 | 2..5 | vertices per polyline (2 = a single open line, no closing edge) |
 | `speed` | Speed | CompoundParameter | 1 | 0..5 (exp 2) | target speed multiple of the energy rate; 0 = pause; planner quantizes arrivals to the bounce grid |
 | `trails` | Trails | CompoundParameter | 0.5 | 0..1 | leftover-line decay (exp half-life 50..2500 ms) |
 | `timeGap` | TimeGap | EnumParameter&lt;Tempo.Division&gt; | QUARTER | all divisions | division on whose crossings a leftover line is stamped |
 | `wu` | Wu | BooleanParameter | false | — | Xiaolin Wu antialiased lines instead of Bresenham |
+| `mirror` | Mirror | BooleanParameter | false | — | draw a same-color mirrored copy of every line/flash across the geometry's reflection axis |
 | `bounceOnBeats` | BounceOnBeats | EnumParameter&lt;BounceGrid&gt; | 1 | 1 / 2 / 4 / 8 | beat grid (quarter notes) every wall bounce lands on |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth: 0 = pure screensaver, 1 = full reactivity |
 | `meta` | Meta | TriggerParameter | — | — | randomly fire one trigger or jump one parameter |
@@ -220,7 +258,7 @@ updated during curation.
 | Param | Jump range | Status | Notes |
 |---|---|---|---|
 | `trails` | [0.25, 0.85] | candidate | CURATE: full range excluded — 0 looks bare, 1 can smear; verify subrange |
-| `vertices` | 3..5 (full) | candidate | count changes are seamless (all 5 always simulated) |
+| `vertices` | 2..5 (full) | candidate | count changes are seamless (all 5 always simulated); 2 is the open-line mode |
 | `geometry` | all 3 values | candidate | hard visual cut (canvases cleared); most dramatic jump |
 | `speed` | [0.4, 1.5] | candidate | CURATE: re-ranged from [0.4, 1.0] when the knob grew to 0..5 — full-range jumps to 5× would jar; below 0.4 may read as stalled |
 | `shapes` | 1..2 (full) | candidate | second-polyline on/off, exposed as a DiscreteParameter per series convention (TriggerBag has no boolean jump) |
@@ -282,6 +320,7 @@ better default (`wu` currently ships false = crisp Bresenham).
 | 2026-07-04 | Initial implementation | — |
 | 2026-07-05 | Review pass: added `audio` depth knob (default 0, gates all reactivity; flash now armed to depth); added `sync`/`tempoDiv` — per-vertex-axis retiming lands wall bounces on the tempo grid via `TempoLock.retime` with cap-safe clamp `min(1.4, 1/|vel|)`; fixed FACES-mode flash cross wrapping around face edges; corrected flash-decay code comment (envelope re-arms on fast hits, doesn't clear first) | Series audio/tempo conventions + bug hunt |
 | 2026-07-06 | Curation rework: trail/scratch canvas split with TimeGap-stamped leftover lines (restores the gapped moiré — the old draw-every-frame smear belongs to a blur effect, not this pattern); Trails is now purely the leftover decay constant; removed the audio speed-breath; Speed re-ranged 0..5 (0 = pause) and redefined as a planner target; replaced Sync/TempoDiv retime nudging with the BounceOnBeats hard grid planner (absolute-beat targets, derived velocity, 250 ms slew on knob moves, Scatter re-anchors); added Wu antialiasing toggle; all line/flash drawing switched to per-channel max (lighten) compositing | Recreate the original's distinct-gap moiré look; tempo-exact bounces |
+| 2026-07-06 | Added `Vertices = 2` open-line mode (single edge, no closing side); added `Mirror` toggle (reflected same-color copy of every line/flash, axis verified against the actual fixture geometry: local centerline on Faces, the X=Z world diagonal — front↔left, right↔back — on CubeRing/Cylinder) | Round out the shape vocabulary; add a kaleidoscope-style symmetry option |
 
 CURATE (unverified constants, gathered for the walk-through):
 - `TRAIL_HALF_LIFE_MIN_MS/MAX_MS = 50/2500`, exp-mapped from Trails knob —
