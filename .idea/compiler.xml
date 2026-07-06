@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="CompilerConfiguration">
+    <annotationProcessing>
+      <profile name="Maven default annotation processors profile" enabled="true">
+        <sourceOutputDir name="target/generated-sources/annotations" />
+        <sourceTestOutputDir name="target/generated-test-sources/test-annotations" />
+        <outputRelativeToContentRoot value="true" />
+        <module name="glx" />
+        <module name="glxstudio" />
+        <module name="apotheneum" />
+        <module name="lx" />
+        <module name="apotheneum (1) (apotheneum)" />
+      </profile>
+    </annotationProcessing>
+  </component>
+  <component name="JavacSettings">
+    <option name="ADDITIONAL_OPTIONS_OVERRIDE">
+      <module name="apotheneum" options="-Xlint -Xpkginfo:always" />
+      <module name="apotheneum (1) (apotheneum)" options="-Xlint -Xpkginfo:always" />
+      <module name="glx" options="-Xlint:all,-this-escape -Xpkginfo:always" />
+      <module name="glxstudio" options="-Xlint:all,-this-escape -Xpkginfo:always" />
+      <module name="lx" options="-Xlint:all,-this-escape -Xpkginfo:always" />
+    </option>
+  </component>
+</project>
