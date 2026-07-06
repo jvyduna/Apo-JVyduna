@@ -119,6 +119,22 @@ public class TempoLock {
   }
 
   /**
+   * Milliseconds from now until the next boundary of the given division,
+   * phase-aligned to the engine beat via {@link Tempo#getBasis(Tempo.Division)}.
+   * In (0, divisionMs]; returns exactly divisionMs when the engine is exactly
+   * on a boundary. Useful for scheduling a one-shot ramp (e.g. a fade) to
+   * conclude on the grid: measure once at trigger time and count down in ms
+   * (a subsequent BPM change then drifts the conclusion — re-measure if that
+   * matters).
+   *
+   * @param division Tempo division whose next boundary to measure
+   * @return Ms until the next boundary of the division
+   */
+  public double msUntilNext(Tempo.Division division) {
+    return (1 - this.tempo.getBasis(division)) * divisionMs(division);
+  }
+
+  /**
    * retime() with the default scale clamp
    * [{@value #DEFAULT_MIN_SCALE}, {@value #DEFAULT_MAX_SCALE}].
    *
