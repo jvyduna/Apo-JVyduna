@@ -7,6 +7,7 @@ import java.util.Random;
 import apotheneum.Apotheneum;
 import apotheneum.ApotheneumPattern;
 import apotheneum.jvyduna.util.AudioReactive;
+import apotheneum.jvyduna.util.PerceptualHue;
 import apotheneum.jvyduna.util.TempoLock;
 import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
@@ -69,17 +70,19 @@ public class Pipes3D extends ApotheneumPattern {
   /** Chance of continuing straight when the straight-ahead run is free */
   private static final double P_STRAIGHT = 0.55; // CURATE: NT pipes turn often; higher = longer runs
 
-  /** Hue offset between concurrent pipes, degrees */
-  private static final float PIPE_HUE_SPREAD = 40; // CURATE: separation of simultaneous pipe colors
-
-  /** Sun-specular stripe: saturation at full specular intensity (lower = whiter) */
+  /** Sun-specular stripe: saturation floor at full specular intensity (lower = whiter) */
   private static final float STRIPE_SAT = 35;      // CURATE
   /** Sun-specular stripe: brightness boost at full specular intensity */
   private static final float STRIPE_BOOST = 1.15f;
-  /** Gain applied to the Blinn-Phong lobe before clamping to 1 */
+  /** Base gain on the Blinn-Phong lobe; scaled by the Hglht knob and audio */
   private static final double SPEC_GAIN = 1.4; // CURATE: highlight visibility
+  /** How much loud music inflates the highlights (rides audio.level, depth-scaled) */
+  private static final double AUDIO_SPEC_BOOST = 1.5; // CURATE
   /** Skip the stripe below this intensity (invisible anyway) */
   private static final double SPEC_MIN = 0.05;
+
+  /** How fast loudness widens the flashed-cap set on a bass hit (1 = at full level) */
+  private static final double SPARKLE_BREADTH = 2; // CURATE
 
   /** Elbow ball: extra radius in px beyond the pipe half-thickness */
   private static final double BALL_EXTRA_PX = 1;
@@ -103,8 +106,8 @@ public class Pipes3D extends ApotheneumPattern {
   /** Attempts to find a free relocation cell before giving up and draining */
   private static final int RELOCATE_TRIES = 60;
 
-  /** Recent elbows retained for the bass sparkle overlay */
-  private static final int ELBOW_HISTORY = 16;
+  /** Recent elbows retained for the bass sparkle overlay (loud hits flash more of them) */
+  private static final int ELBOW_HISTORY = 48;
 
   /**
    * Retained geometry bounds. Normal growth is bounded by occupancy
@@ -180,6 +183,43 @@ public class Pipes3D extends ApotheneumPattern {
     }
   }
 
+  /**
+   * Discrete growth speeds in cells per beat: a geometric-ish ladder so live
+   * changes read as musical jumps, including 0 to PAUSE growth entirely
+   * (resuming realigns every cap to the CapDiv grid, 0.5-1.5 divisions out).
+   */
+  public enum Rate {
+    PAUSE("0", 0),
+    R1_4("0.25", 0.25),
+    R1_2("0.5", 0.5),
+    R1("1", 1),
+    R3_2("1.5", 1.5),
+    R2("2", 2),
+    R3("3", 3),
+    R4("4", 4),
+    R6("6", 6),
+    R8("8", 8),
+    R12("12", 12),
+    R16("16", 16),
+    R24("24", 24),
+    R32("32", 32),
+    R48("48", 48),
+    R64("64", 64);
+
+    public final String label;
+    public final double cellsPerBeat;
+
+    Rate(String label, double cellsPerBeat) {
+      this.label = label;
+      this.cellsPerBeat = cellsPerBeat;
+    }
+
+    @Override
+    public String toString() {
+      return this.label;
+    }
+  }
+
   // ---- Parameters -----------------------------------------------------------
 
   private final TriggerBag bag = new TriggerBag("Pipes3D");
@@ -204,9 +244,9 @@ public class Pipes3D extends ApotheneumPattern {
     new TriggerParameter("RstRot", this::resetRotation)
     .setDescription("Zero the rotation speeds and snap back to the orthogonal projection"));
 
-  public final CompoundParameter speed =
-    new CompoundParameter("Speed", 1.0, 0.25, 16.0)
-    .setDescription("Growth speed in cells per beat, shared by all pipes");
+  public final EnumParameter<Rate> speed =
+    new EnumParameter<Rate>("Speed", Rate.R1)
+    .setDescription("Growth speed in cells per beat, shared by all pipes; 0 pauses growth and resuming realigns caps to the CapDiv grid");
 
   public final CompoundParameter thickness =
     new CompoundParameter("Thick", 3.5, THICK_MIN, THICK_MAX)
@@ -216,9 +256,9 @@ public class Pipes3D extends ApotheneumPattern {
     new DiscreteParameter("Density", 10, MIN_DENSITY, MAX_DENSITY + 1)
     .setDescription("Room grid cells across each axis; takes effect at the next drain");
 
-  public final CompoundParameter hue =
-    new CompoundParameter("Hue", 0, 0, 360)
-    .setDescription("Hue offset in degrees added to the palette-derived pipe color");
+  public final CompoundParameter hglht =
+    new CompoundParameter("Hglht", 0.5)
+    .setDescription("Amount of Phong sun-specular highlight on the pipes (audio level adds more on top)");
 
   public final CompoundParameter rotX =
     new CompoundParameter("RotX", 0)
@@ -233,8 +273,8 @@ public class Pipes3D extends ApotheneumPattern {
     .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full bass-sparkle response");
 
   public final EnumParameter<Beats> onBeats =
-    new EnumParameter<Beats>("OnBeats", Beats.ONE)
-    .setDescription("Beat-grid interval that every cap/turn lands on, counted from pattern load or the end of a drain");
+    new EnumParameter<Beats>("CapDiv", Beats.ONE)
+    .setDescription("Beat-grid division that every cap/turn lands on, counted from pattern load or the end of a drain");
 
   public final TriggerParameter rndTrig =
     new TriggerParameter("RndTrig", bag::fire)
@@ -264,10 +304,14 @@ public class Pipes3D extends ApotheneumPattern {
   private final double[] segAx = new double[MAX_SEGMENTS], segAy = new double[MAX_SEGMENTS], segAz = new double[MAX_SEGMENTS];
   private final double[] segBx = new double[MAX_SEGMENTS], segBy = new double[MAX_SEGMENTS], segBz = new double[MAX_SEGMENTS];
   private final float[] segHue = new float[MAX_SEGMENTS];
+  private final float[] segSat = new float[MAX_SEGMENTS];
+  private final float[] segBri = new float[MAX_SEGMENTS];
   private int segCount = 0;
 
   private final double[] ballX = new double[MAX_BALLS], ballY = new double[MAX_BALLS], ballZ = new double[MAX_BALLS];
   private final float[] ballHue = new float[MAX_BALLS];
+  private final float[] ballSat = new float[MAX_BALLS];
+  private final float[] ballBri = new float[MAX_BALLS];
   private int ballCount = 0;
 
   // Pipe state (parallel arrays, MAX_PIPES slots). Heads are continuous cell
@@ -279,10 +323,21 @@ public class Pipes3D extends ApotheneumPattern {
   private final double[] pHeadZ = new double[MAX_PIPES];
   private final double[] pCapBeat = new double[MAX_PIPES]; // absolute composite-basis beat of the next cap
   private final double[] pRatio = new double[MAX_PIPES];   // run speed / Speed knob at plan time
+  private final double[] pGoal = new double[MAX_PIPES];    // target coordinate along the run axis
   private final int[] pSeg = new int[MAX_PIPES];           // live segment index, or -1
   private final float[] pHue = new float[MAX_PIPES];
+  private final float[] pSat = new float[MAX_PIPES];
+  private final float[] pBri = new float[MAX_PIPES];
   private final long[] pBirth = new long[MAX_PIPES];       // spawn order, for oldest-first culls
   private long birthCounter = 0;
+
+  /** Previous frame's Rate value, to catch the pause->resume transition */
+  private double prevRate;
+
+  // Scratch for palette-derived pipe colors (Rubik-style fill; event-rate only)
+  private final int[] pipeColors = new int[MAX_PIPES];
+  private final float[] hueWork = new float[MAX_PIPES * 2];
+  private final float[] hueOut = new float[MAX_PIPES];
 
   /** Scratch: free / in-bounds run lengths per direction */
   private final int[] freeRun = new int[6];
@@ -302,6 +357,9 @@ public class Pipes3D extends ApotheneumPattern {
   /** This frame's live half-thicknesses (Thick applies to the whole model in realtime) */
   private double frameHalfPx, frameBallHalfPx;
 
+  /** This frame's specular gain: SPEC_GAIN x (Hglht knob + audio level boost) */
+  private double frameSpecScale;
+
   /** Scratch result of xformPoint/xformDir */
   private double tx, ty, tz;
 
@@ -312,6 +370,7 @@ public class Pipes3D extends ApotheneumPattern {
   private final float[] elbowZ = new float[ELBOW_HISTORY];
   private int elbowCount = 0, elbowNext = 0;
   private double sparkleLevel = 0;
+  private int sparkleCount = 0; // how many recent caps the overlay flashes
 
   // Drain state
   private boolean draining = false;
@@ -328,35 +387,36 @@ public class Pipes3D extends ApotheneumPattern {
     addParameter("teleport", this.teleport);
     addParameter("pipes", this.pipes);
     addParameter("sparkle", this.sparkle);
-    addParameter("rstRot", this.rstRot);
-    addParameter("rndTrig", this.rndTrig);
+    addParameter("rndTrig", this.rndTrig); // series convention: right after the plain triggers
     addParameter("speed", this.speed);
     addParameter("thickness", this.thickness);
     addParameter("density", this.density);
-    addParameter("hue", this.hue);
+    addParameter("hglht", this.hglht);
     addParameter("rotX", this.rotX);
     addParameter("rotY", this.rotY);
+    addParameter("rstRot", this.rstRot);
     addParameter("audio", this.audioDepth);
-    addParameter("onBeats", this.onBeats);
+    addParameter("onBeats", this.onBeats); // key kept for .lxp compat; UI label is CapDiv
 
     bag.jumpable(this.thickness);
     bag.jumpable(this.density);
     // Spawn/cull as an ambient event. CURATE: do uncommanded culls read well?
     bag.jumpable(this.pipes);
-    bag.jumpable(this.hue);
-    // Musical mid-band only: below 0.5 the lattice crawls; the knob itself
-    // now reaches 16, far past what a random jump should do. CURATE
-    bag.jumpable(this.speed, 0.5, 2.0);
+    bag.jumpable(this.hglht); // CURATE: highlight-amount drift as ambient variation
+    // Musical mid-band only (0.5..4): excludes PAUSE — RndTrig must not
+    // silently freeze the pattern — and the blazing top of the ladder. CURATE
+    bag.jumpable(this.speed, Rate.R1_2.ordinal(), Rate.R4.ordinal());
     // Exclude 3/4 (a random polyrhythm jump reads as a timing bug) and 8
     // (caps stall for many seconds). CURATE: unverified visually
     bag.jumpable(this.onBeats, Beats.ONE.ordinal(), Beats.FOUR.ordinal());
     // Slow ambient drift only (<= 22.5 deg/beat); a jump to full rate is
-    // disorienting. RstRot is registered too, so meta can snap back. CURATE
+    // disorienting. RstRot is registered too, so RndTrig can snap back. CURATE
     bag.jumpable(this.rotX, 0, 0.25);
     bag.jumpable(this.rotY, 0, 0.25);
 
     this.lastBeats = lx.engine.tempo.getCompositeBasis();
     this.epochBeats = Math.rint(this.lastBeats);
+    this.prevRate = this.speed.getEnum().cellsPerBeat;
     applyDensity();
     clearRoom();
     syncPipeCount();
@@ -396,6 +456,7 @@ public class Pipes3D extends ApotheneumPattern {
     this.elbowCount = 0;
     this.elbowNext = 0;
     this.sparkleLevel = 0;
+    this.sparkleCount = 0;
   }
 
   private boolean inBounds(int x, int y, int z) {
@@ -419,15 +480,39 @@ public class Pipes3D extends ApotheneumPattern {
     }
   }
 
-  /** Pipe color at run start: palette color (advanced per drain) + hue offset. */
-  private float pipeHue(int i) {
-    float base = 0;
+  /**
+   * Pipe color at run start, straight from the project palette (series house
+   * rules: full H/S/B from the swatch, no hue knob). With enough swatch
+   * entries, pipe i takes slot (drainCount + i) so each drain advances the
+   * rotation and concurrent pipes get distinct entries. A short swatch keeps
+   * its defined colors and fills the remainder with perceptually-even
+   * fully-saturated hues (the Rubik computeFaceColors template); an empty
+   * swatch degenerates to an even perceptual spread. Event-rate only.
+   */
+  private int pipeColor(int i) {
     final List<LXDynamicColor> swatch = this.lx.engine.palette.swatch.colors;
-    if (!swatch.isEmpty()) {
-      base = LXColor.h(swatch.get(this.drainCount % swatch.size()).getColor());
+    final int n = swatch.size();
+    if (n >= MAX_PIPES) {
+      return swatch.get((this.drainCount + i) % n).getColor();
     }
-    float h = (float) ((base + this.hue.getValue() + i * PIPE_HUE_SPREAD) % 360);
-    return (h < 0) ? h + 360 : h;
+    for (int d = 0; d < n; ++d) {
+      final int c = swatch.get(d).getColor();
+      this.pipeColors[d] = c;
+      this.hueWork[d] = PerceptualHue.toPerceptualPosition(LXColor.h(c));
+    }
+    PerceptualHue.fillCircle(this.hueWork, n, MAX_PIPES - n, this.hueOut);
+    for (int j = 0; j < MAX_PIPES - n; ++j) {
+      this.pipeColors[n + j] = PerceptualHue.color(this.hueOut[j]);
+    }
+    return this.pipeColors[(this.drainCount + i) % MAX_PIPES];
+  }
+
+  /** Capture a full palette color into pipe i's H/S/B slots */
+  private void assignPipeColor(int i) {
+    final int c = pipeColor(i);
+    this.pHue[i] = LXColor.h(c);
+    this.pSat[i] = LXColor.s(c);
+    this.pBri[i] = LXColor.b(c);
   }
 
   // ---- Beat planning ------------------------------------------------------------
@@ -565,7 +650,7 @@ public class Pipes3D extends ApotheneumPattern {
     // marks the start, no elbow.
     if ((dir != straight) || (this.pSeg[i] < 0)) {
       if (straight >= 0) {
-        addBall(this.pHeadX[i], this.pHeadY[i], this.pHeadZ[i], this.pHue[i]);
+        addBall(this.pHeadX[i], this.pHeadY[i], this.pHeadZ[i], this.pHue[i], this.pSat[i], this.pBri[i]);
         recordElbow((float) this.pHeadX[i], (float) this.pHeadY[i], (float) this.pHeadZ[i]);
       }
       if (this.segCount >= MAX_SEGMENTS) {
@@ -577,8 +662,10 @@ public class Pipes3D extends ApotheneumPattern {
       this.segAx[s] = this.segBx[s] = this.pHeadX[i];
       this.segAy[s] = this.segBy[s] = this.pHeadY[i];
       this.segAz[s] = this.segBz[s] = this.pHeadZ[i];
-      this.pHue[i] = pipeHue(i);
+      assignPipeColor(i);
       this.segHue[s] = this.pHue[i];
+      this.segSat[s] = this.pSat[i];
+      this.segBri[s] = this.pBri[i];
       this.pSeg[i] = s;
     }
 
@@ -591,25 +678,35 @@ public class Pipes3D extends ApotheneumPattern {
     // dist/OnBeats — the top of the knob mostly guarantees single-interval
     // runs; OnBeats and density then set the visible speed.
     final double g = gridInterval();
-    final double sEff = this.speed.getValue();
+    final double sEff = this.speed.getEnum().cellsPerBeat;
     final double d0 = nextGrid(now) - now; // (0, g]
     double dist;
     if (DX[dir] != 0) {
-      dist = Math.abs((ax + 0.5 + DX[dir] * n) - this.pHeadX[i]);
+      this.pGoal[i] = ax + 0.5 + DX[dir] * n;
+      dist = Math.abs(this.pGoal[i] - this.pHeadX[i]);
     } else if (DY[dir] != 0) {
-      dist = Math.abs((ay + 0.5 + DY[dir] * n) - this.pHeadY[i]);
+      this.pGoal[i] = ay + 0.5 + DY[dir] * n;
+      dist = Math.abs(this.pGoal[i] - this.pHeadY[i]);
     } else {
-      dist = Math.abs((az + 0.5 + DZ[dir] * n) - this.pHeadZ[i]);
-    }
-    long k = Math.max(1, Math.round((dist / sEff - d0) / g) + 1);
-    double t = d0 + (k - 1) * g;
-    if (dist / t > sEff) {
-      ++k;
-      t += g;
+      this.pGoal[i] = az + 0.5 + DZ[dir] * n;
+      dist = Math.abs(this.pGoal[i] - this.pHeadZ[i]);
     }
     this.pDir[i] = dir;
-    this.pCapBeat[i] = nextGrid(now) + (k - 1) * g;
-    this.pRatio[i] = (dist / t) / sEff;
+    if (sEff <= 0) {
+      // Paused (spawn/teleport while Speed = 0): freeze until the knob
+      // resumes; realignCaps() then schedules from the remaining distance
+      this.pCapBeat[i] = Double.POSITIVE_INFINITY;
+      this.pRatio[i] = 0;
+    } else {
+      long k = Math.max(1, Math.round((dist / sEff - d0) / g) + 1);
+      double t = d0 + (k - 1) * g;
+      if (dist / t > sEff) {
+        ++k;
+        t += g;
+      }
+      this.pCapBeat[i] = nextGrid(now) + (k - 1) * g;
+      this.pRatio[i] = (dist / t) / sEff;
+    }
 
     // Occupy the swept cells (idempotent; intersecting sweeps add only the
     // newly free ones), then check the auto-drain fill limit
@@ -632,8 +729,8 @@ public class Pipes3D extends ApotheneumPattern {
     this.pHeadZ[i] = z + 0.5;
     this.pDir[i] = -1;
     this.pSeg[i] = -1;
-    this.pHue[i] = pipeHue(i);
-    addBall(this.pHeadX[i], this.pHeadY[i], this.pHeadZ[i], this.pHue[i]);
+    assignPipeColor(i);
+    addBall(this.pHeadX[i], this.pHeadY[i], this.pHeadZ[i], this.pHue[i], this.pSat[i], this.pBri[i]);
     planRun(i);
   }
 
@@ -694,7 +791,8 @@ public class Pipes3D extends ApotheneumPattern {
           oldest = i;
         }
       }
-      addBall(this.pHeadX[oldest], this.pHeadY[oldest], this.pHeadZ[oldest], this.pHue[oldest]);
+      addBall(this.pHeadX[oldest], this.pHeadY[oldest], this.pHeadZ[oldest],
+        this.pHue[oldest], this.pSat[oldest], this.pBri[oldest]);
       this.pAlive[oldest] = false;
       --alive;
     }
@@ -709,9 +807,10 @@ public class Pipes3D extends ApotheneumPattern {
     }
   }
 
-  // Trigger: manually fire the elbow sparkle flash at full brightness
+  // Trigger: manually fire the elbow sparkle flash at full brightness, all caps
   private void flashSparkle() {
     this.sparkleLevel = 1;
+    this.sparkleCount = ELBOW_HISTORY;
   }
 
   // Trigger: zero the rotation speeds and snap the projection orthogonal
@@ -749,7 +848,7 @@ public class Pipes3D extends ApotheneumPattern {
   private void teleportPipe(int i) {
     // Cap ball at the disconnect point (the continuous head — off-corner
     // positions after a speed change are capped as-is)
-    addBall(this.pHeadX[i], this.pHeadY[i], this.pHeadZ[i], this.pHue[i]);
+    addBall(this.pHeadX[i], this.pHeadY[i], this.pHeadZ[i], this.pHue[i], this.pSat[i], this.pBri[i]);
     if (findFreeCell()) {
       placePipe(i, this.rlX, this.rlY, this.rlZ);
     } else {
@@ -803,7 +902,10 @@ public class Pipes3D extends ApotheneumPattern {
    * re-anchors to the lattice (self-healing, no snapping).
    */
   private void updatePipes(double now, double dBeats) {
-    final double sEff = this.speed.getValue();
+    final double sEff = this.speed.getEnum().cellsPerBeat;
+    if (sEff <= 0) {
+      return; // paused: heads and caps freeze (rotation/sparkle/drain unaffected)
+    }
     final double bPrev = now - dBeats;
     for (int i = 0; i < MAX_PIPES; ++i) {
       if (!this.pAlive[i]) {
@@ -836,6 +938,31 @@ public class Pipes3D extends ApotheneumPattern {
     }
   }
 
+  /**
+   * Resuming from pause (Speed 0 -> nonzero): every in-flight run's cap time
+   * is stale (frozen at infinity, or long past while the clock kept running).
+   * Re-schedule each cap on the CapDiv grid, landing 0.5-1.5 divisions from
+   * now (same flavor as the drain rule), and re-trim the speed ratio from the
+   * distance the head still has to cover to its target corner.
+   */
+  private void realignCaps(double now, double rate) {
+    final double g = gridInterval();
+    for (int i = 0; i < MAX_PIPES; ++i) {
+      if (!this.pAlive[i] || (this.pDir[i] < 0)) {
+        continue;
+      }
+      double capBeat = nextGrid(now);
+      if (capBeat - now < 0.5 * g) {
+        capBeat += g; // never sooner than half a division out
+      }
+      final int d = this.pDir[i];
+      final double head = (DX[d] != 0) ? this.pHeadX[i]
+        : (DY[d] != 0) ? this.pHeadY[i] : this.pHeadZ[i];
+      this.pCapBeat[i] = capBeat;
+      this.pRatio[i] = (Math.abs(this.pGoal[i] - head) / (capBeat - now)) / rate;
+    }
+  }
+
   private void recordElbow(float x, float y, float z) {
     this.elbowX[this.elbowNext] = x;
     this.elbowY[this.elbowNext] = y;
@@ -845,7 +972,7 @@ public class Pipes3D extends ApotheneumPattern {
   }
 
   /** Append a joint/cap ball at a (continuous) lattice position */
-  private void addBall(double x, double y, double z, float hueDeg) {
+  private void addBall(double x, double y, double z, float hueDeg, float satPct, float briPct) {
     if (this.ballCount >= MAX_BALLS) {
       LX.log("Pipes3D: ball list full; draining");
       startDrain();
@@ -856,6 +983,8 @@ public class Pipes3D extends ApotheneumPattern {
     this.ballY[b] = y;
     this.ballZ[b] = z;
     this.ballHue[b] = hueDeg;
+    this.ballSat[b] = satPct;
+    this.ballBri[b] = briPct;
   }
 
   // ---- Rasterization -------------------------------------------------------------
@@ -945,6 +1074,8 @@ public class Pipes3D extends ApotheneumPattern {
     final double axn = ddx / len3, ayn = ddy / len3, azn = ddz / len3;
 
     final float hueDeg = this.segHue[s];
+    final float satPct = this.segSat[s];
+    final float briPct = this.segBri[s];
     final double halfPx = this.frameHalfPx;
     final int span = Math.max(1, (int) Math.round(2 * halfPx));
 
@@ -962,7 +1093,7 @@ public class Pipes3D extends ApotheneumPattern {
       if (screenLen < 0.5) {
         // Seen end-on: a circular cross-section at the near depth
         stampDisc(cBuf, dBuf, (u0 + u1) / 2, (v0 + v1) / 2, halfPx,
-          Math.min(dn0, dn1), hueDeg, 100f, 1f);
+          Math.min(dn0, dn1), hueDeg, satPct, briPct, 1f);
         continue;
       }
 
@@ -980,7 +1111,7 @@ public class Pipes3D extends ApotheneumPattern {
         final double ppy = vw[1] - dotVA * ayn;
         final double ppz = vw[2] - dotVA * azn;
         final double plen = Math.sqrt(ppx * ppx + ppy * ppy + ppz * ppz);
-        if (plen > 1e-4) { // not end-on
+        if ((this.frameSpecScale > 0) && (plen > 1e-4)) { // Hglht up, not end-on
           final double mx = vw[1] * azn - vw[2] * ayn;
           final double my = vw[2] * axn - vw[0] * azn;
           final double mz = vw[0] * ayn - vw[1] * axn;
@@ -988,8 +1119,10 @@ public class Pipes3D extends ApotheneumPattern {
           final double b = (ppx * hw[0] + ppy * hw[1] + ppz * hw[2]) / plen;
           if (b > 0) {
             final double s0 = Math.sqrt(a * a + b * b);
-            final double s2 = s0 * s0, s4 = s2 * s2;
-            specI = Math.min(1, s4 * s4 * SPEC_GAIN); // exponent 8; CURATE
+            final double s2 = s0 * s0;
+            // Exponent 4 (broad lobe so most orientations show a highlight),
+            // scaled by the Hglht knob and audio level. CURATE: exponent
+            specI = Math.min(1, s2 * s2 * this.frameSpecScale);
             final double tStar = (s0 > 1e-6) ? a / s0 : 0;
             // Orient the cross-pipe offset onto the screen minor axis
             final double mu = wallMu(w, mx, mz), mv = my * this.ch;
@@ -1011,7 +1144,7 @@ public class Pipes3D extends ApotheneumPattern {
         final double cu = u0 + du * f, cv = v0 + dv * f;
         final float dnk = dn0 + (dn1 - dn0) * (float) f;
         final float bf = 1 - DEPTH_DIM * dnk;
-        final int colMain = LXColor.hsb(hueDeg, 100f, 100f * bf);
+        final int colMain = LXColor.hsb(hueDeg, satPct, briPct * bf);
         for (int j = 0; j < span; ++j) {
           final double o = j - (span - 1) * 0.5;
           final int pu = (int) Math.floor(cu + m2u * o);
@@ -1027,10 +1160,12 @@ public class Pipes3D extends ApotheneumPattern {
         }
       }
 
-      // Pass 2: specular stripe (1 px at the lobe's cross-pipe offset)
+      // Pass 2: specular stripe (1 px at the lobe's cross-pipe offset),
+      // desaturating from the palette color's own saturation toward the
+      // glossy stripe floor as intensity rises
       if (stripeJ >= 0) {
         final double o = stripeJ - (span - 1) * 0.5;
-        final float stripeSat = 100 - (100 - STRIPE_SAT) * specIf;
+        final float stripeSat = satPct - (satPct - Math.min(satPct, STRIPE_SAT)) * specIf;
         for (int k = 0; k <= steps; ++k) {
           final double f = (double) k / steps;
           final int pu = (int) Math.floor(u0 + du * f + m2u * o);
@@ -1044,7 +1179,7 @@ public class Pipes3D extends ApotheneumPattern {
             final float bf = 1 - DEPTH_DIM * dnk;
             dBuf[idx] = Math.min(dBuf[idx], dnk);
             cBuf[idx] = LXColor.hsb(hueDeg, stripeSat,
-              Math.min(100f, 100f * bf * (1 + (STRIPE_BOOST - 1) * specIf)));
+              Math.min(100f, briPct * bf * (1 + (STRIPE_BOOST - 1) * specIf)));
           }
         }
       }
@@ -1056,10 +1191,11 @@ public class Pipes3D extends ApotheneumPattern {
     xformPoint(this.ballX[b], this.ballY[b], this.ballZ[b]);
     final double wx = this.tx, wy = this.ty, wz = this.tz;
     final double half = this.frameBallHalfPx;
+    final float sat = Math.min(this.ballSat[b], BALL_SAT); // glossy: never more saturated than the joint cap
     for (int w = 0; w < WALLS; ++w) {
       final float dn = (float) clamp(wallDepth(w, wx, wz) / this.gz, 0, 1);
       stampDisc(this.colorBuf[w], this.depthBuf[w],
-        wallU(w, wx, wz), wy * this.ch, half, dn, this.ballHue[b], BALL_SAT, BALL_BOOST);
+        wallU(w, wx, wz), wy * this.ch, half, dn, this.ballHue[b], sat, this.ballBri[b], BALL_BOOST);
     }
   }
 
@@ -1071,7 +1207,7 @@ public class Pipes3D extends ApotheneumPattern {
    * screen-aligned square betrays the projection under rotation).
    */
   private void stampDisc(int[] cBuf, float[] dBuf, double cu, double cv,
-                         double half, float dn, float hueDeg, float sat, float boost) {
+                         double half, float dn, float hueDeg, float sat, float bri, float boost) {
     final int iu0 = Math.max(0, (int) Math.floor(cu - half));
     final int iu1 = Math.min(W - 1, (int) Math.ceil(cu + half) - 1);
     final int iv0 = Math.max(0, (int) Math.floor(cv - half));
@@ -1082,7 +1218,7 @@ public class Pipes3D extends ApotheneumPattern {
     // +0.25 px so small radii don't decimate to a plus sign
     final double r2 = (half + 0.25) * (half + 0.25);
     final float bf = 1 - DEPTH_DIM * dn;
-    final int col = LXColor.hsb(hueDeg, sat, Math.min(100f, 100f * bf * boost));
+    final int col = LXColor.hsb(hueDeg, sat, Math.min(100f, bri * bf * boost));
     for (int v = iv0; v <= iv1; ++v) {
       final int rowBase = v * W;
       final double dy = v + 0.5 - cv;
@@ -1121,6 +1257,14 @@ public class Pipes3D extends ApotheneumPattern {
     }
     this.lastBeats = now;
 
+    // Pause/resume: resuming from Speed 0 realigns every in-flight cap to the
+    // CapDiv grid, landing 0.5-1.5 divisions out
+    final double rate = this.speed.getEnum().cellsPerBeat;
+    if ((this.prevRate == 0) && (rate > 0)) {
+      realignCaps(now, rate);
+    }
+    this.prevRate = rate;
+
     // Rotation accumulation (tempo-locked: 100% = 90 degrees per beat) and
     // this frame's transform state
     this.axDeg = (this.axDeg + this.rotX.getValue() * 90 * dBeats) % 360;
@@ -1131,6 +1275,10 @@ public class Pipes3D extends ApotheneumPattern {
     this.cxr = this.gx * 0.5; this.cyr = this.gy * 0.5; this.czr = this.gz * 0.5;
     this.frameHalfPx = thicknessPx() / 2;
     this.frameBallHalfPx = this.frameHalfPx + BALL_EXTRA_PX;
+    // Phong highlight amount: the Hglht knob (0.5 = nominal) plus an audio
+    // level boost (depth-scaled, silence-safe) — louder music, hotter shine
+    this.frameSpecScale = SPEC_GAIN
+      * (2 * this.hglht.getValue() + AUDIO_SPEC_BOOST * this.audio.level);
 
     double outputScale = 1;
     if (this.draining) {
@@ -1145,9 +1293,12 @@ public class Pipes3D extends ApotheneumPattern {
     }
 
     // Bass sparkle envelope on recent elbows; the hit response scales with
-    // the Audio depth knob (max() so a manual Sparkle trigger is not dimmed)
+    // the Audio depth knob (max() so a manual Sparkle trigger is not dimmed),
+    // and louder music flashes MORE of the recent caps
     if (this.audio.bassHit()) {
       this.sparkleLevel = Math.max(this.sparkleLevel, this.audio.depth());
+      this.sparkleCount = 1 + (int) Math.round(
+        (ELBOW_HISTORY - 1) * Math.min(1, SPARKLE_BREADTH * this.audio.level));
     } else {
       this.sparkleLevel = Math.max(0, this.sparkleLevel - deltaMs / SPARKLE_MS);
     }
@@ -1198,7 +1349,11 @@ public class Pipes3D extends ApotheneumPattern {
     // depth tested here. Anything nearer than that margin is a genuinely
     // occluding pipe (occluders are >= 1 cell nearer).
     final float tol = (float) (((0.5 * THICK_MAX + BALL_EXTRA_PX) / this.cw + 0.05) / this.gz);
-    for (int e = 0; e < this.elbowCount; ++e) {
+    // Newest-first ring walk over the sparkleCount most recent caps (loud
+    // bass hits latch a larger count; the manual trigger flashes them all)
+    final int count = Math.min(this.sparkleCount, this.elbowCount);
+    for (int j = 0; j < count; ++j) {
+      final int e = (this.elbowNext - 1 - j + ELBOW_HISTORY) % ELBOW_HISTORY;
       // Elbows are stored untransformed; rotate through the same transform
       // as the geometry so sparkles track rotated joints
       xformPoint(this.elbowX[e], this.elbowY[e], this.elbowZ[e]);
