@@ -36,6 +36,23 @@ as an alternative to the Ableton-based workflows most artists currently use.
 - Design docs live next to the code they describe, as `<PatternName>.md` in the
   same directory as the `.java` file.
 
+## Git workflow
+
+- Claude Code sessions develop in worktrees under `.claude/worktrees/` on
+  `worktree-bridge-*` branches; the repo root stays on `main`.
+- **Minimal remote activity.** When a turn of improvements is done, merge it
+  back into the **local** `main` branch. Do not push worktree branches, create
+  remote branches, or open PRs; `git push` of main happens only when Jeff asks.
+- When a session's work is approved: commit it on the worktree branch with a
+  descriptive message summarizing the curation pass, then merge into main
+  from the repo root with a merge commit —
+  `git -C ~/Code/jvyduna/Apo-JVyduna merge --no-ff <branch> -m "Merge <what> into main"` —
+  noting in the body any file overlap with other recent sessions.
+- After merging, rebuild on main (`mvn -Pinstall clean install`) so the
+  deployed jar in `~/Chromatik/Packages` matches main.
+- Leave local `.idea/` drift in the repo root uncommitted unless asked.
+- Never `git add` audio (see Layout).
+
 ## Reference skills
 
 - **`te-patterns`** (personal skill) — idioms for writing native-Java LX/Chromatik
