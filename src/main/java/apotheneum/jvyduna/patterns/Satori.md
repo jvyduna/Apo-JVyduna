@@ -29,8 +29,8 @@ the motion is inherently smooth, slow, and full-field.
 - **Phase field**: `float[model size]` indexed by `LXPoint.index`, filled per
   surface in 2D column/row coordinates (wrap-aware distances via min-image
   `dx`). After generation each surface is **normalized to span exactly
-  [0,1]**, so `Spread` means exactly N color cycles across the surface and the
-  traversal-cap math is exact for every variant.
+  [0,1]**, so `Width` maps to exactly N color cycles across the surface
+  (inverted: `cycles = 7 − width`) for every variant.
 - **Field variants** (`Field` enum, rebuilt only on trigger/enum change, one
   O(n) pass — never per frame):
   - `INTERFERENCE` — summed wrap-aware distances from 2–3 random centers:
@@ -46,17 +46,21 @@ the motion is inherently smooth, slow, and full-field.
     normalization absorbs any constant scale (2026-07-05 fix; previously
     `arms` only nudged chevron tilt). (CURATE: pitch range ±0.5–1.5 cycles of
     tilt; CURATE: at arms=3 bands are 3× thinner locally — verify legibility
-    at high `Spread`/`Bands`.)
+    at low `Width` / high `Bands`.)
   - `KALEIDO` — per-face mirror folds: x folded about the face center (fold
     width 50 on the cube = 4-fold symmetry, 40 on the cylinder = 3 mirrored
     sectors), y folded about mid-height; mixes a radial term with a
     folded-diagonal angular term. Mirror symmetry makes sector seams and face
     edges continuous by construction (CURATE: radial/angular mix seeded
     0.35–0.65).
-- **Per-frame color**: `colors[i] = LUT[frac(field[i]·spread + phase +
+- **Per-frame color**: `colors[i] = LUT[frac(field[i]·cycles + phase +
   pulseDepth·pulseDist[i])]`, posterized to band centers. That's one
   multiply-add, a `frac`, a quantize and an array lookup per point — zero
-  allocation, no trig, no per-frame geometry.
+  allocation, no trig, no per-frame geometry. `Smooth` widens each band edge
+  into a smoothstep ramp over the trailing `smooth` fraction of the band
+  (0 = hard edges as above; 1 = every pixel smoothsteps continuously from one
+  band's center color to the next; the cyclic LUT index mask handles the
+  last-band wrap). One branch + a few multiplies per point when engaged.
 - **Color LUT**: 256-entry persistent `int[]`. Built from the project palette
   swatch (`lx.engine.palette.swatch`) when it has ≥ 2 colors — evenly spaced,
   lerped between neighbors, wrapping back to the first for cycle continuity —
@@ -81,106 +85,82 @@ behavior below. Magnitude taps scale linearly with depth; `bassHit()` fires
 once depth > 0.01 and its pulse response is multiplied by `depth()` so a
 barely-open knob pulses gently.
 
+All three taps were amplified ~6× in the 2026-07-06 curation pass — the
+knob's effect was previously imperceptible on sculpture (CURATE: all three
+gains below are unverified at the new levels):
+
 - `level` (extra-smoothed with a 1.2s time constant on top of AudioReactive's
-  smoothing) modulates cycle speed ±50%: silence/depth-0 → 0.5×, average →
-  1×, loud → 1.5×. Faster-than-base only when music is present; the cap math
-  below budgets for the full 1.5×.
+  smoothing) boosts cycle speed, boost-only: `speedMul = 1 + 3·level`.
+  Silence/depth-0 → exactly 1× (the `Speed` knob alone owns the base rate;
+  the old bipolar ±50% mapping with its 0.5× silence floor is gone), loud
+  music at full depth → up to 4×.
 - `bassHit()` raises the pulse envelope to `depth()`; the envelope decays
   linearly over 2s. While active, each point's LUT phase is offset by
-  `env · depth · pulseDist[i]` (precomputed normalized distance from a seeded
-  center) — a radial wavefront that warps the bands outward from the center,
-  then relaxes. No O(n) work on the hit itself; `pulseDist` is baked at field
-  build time. (The same envelope is shared with the tempo-grid breath and the
-  manual `Pulse` trigger — see Tempo mapping / Triggers.)
-- `treble` lerps the whole LUT toward white by up to 30% — but only in the
-  high-energy regime (fully gated off below energy 0.6). Applied as a 256-entry
-  LUT pass, not per point. Depth-scaled like all magnitude taps.
-- **Depth-0 / silence baseline**: a steady palette rotation at 0.5× the
-  energy-set rate — the core look, fully presentable. No hits, no shimmer,
-  no audio pulses (the tempo breath still runs if `Sync` is on — that is a
-  tempo feature, not an audio one). Raising the knob to 1 restores the full
-  speed modulation, bass pulses and treble shimmer described above.
+  `env · PULSE_DEPTH · pulseDist[i]` (precomputed normalized distance from a
+  seeded center) — a radial wavefront that warps the bands outward from the
+  center, then relaxes. `PULSE_DEPTH = 1.3` LUT cycles (was 0.15–0.35
+  energy-scaled). No O(n) work on the hit itself; `pulseDist` is baked at
+  field build time. (The same envelope is shared with the manual `Pulse`
+  trigger — see Triggers.)
+- `treble` lerps the whole LUT toward white by up to 100% (was 30%, and
+  gated off below energy 0.6 — the gate went away with the Energy knob).
+  Applied as a 256-entry LUT pass, not per point. Depth-scaled like all
+  magnitude taps.
+- **Depth-0 / silence baseline**: a steady palette rotation at the
+  `Speed`-set rate — the core look, fully presentable. No hits, no shimmer,
+  no audio pulses. Raising the knob to 1 restores the full speed boost, bass
+  pulses and treble shimmer described above.
 
 ## Tempo mapping
 
-Default `TempoDiv` is `WHOLE` (one bar), fitting the meditative character.
-Palette rotation has **no globally-simultaneous motion event to phase-align**
-— posterized band flips are staggered across points by the field value — so
-the lock has two parts:
-
-- **Band-period quantization (sustained)**: the band-advance period (the
-  visible rhythm — each point flips to its next posterized band once per
-  `cyclePeriod / Bands`) is quantized to the nearest whole multiple, or unit
-  fraction, of the `TempoDiv` period, implemented as a rate multiplier on the
-  phase drift via `TempoLock.quantizePeriod()` (the shared helper extracted
-  from this pattern's original hand-rolled latch). The chosen grid target is
-  *latched* and only re-quantized when the required scale leaves the default
-  `[0.7, 1.4]` window — hysteresis so the ±50% audio speed wobble near a
-  rounding boundary cannot flip-flop the rate. `retime()` is deliberately not
-  used: it targets a single phase-aligned future event, which a continuous
-  cyclic drift does not have (per-frame reapplication would jitter). At the
-  defaults (e=0.35, depth 0 → 25.1s effective cycle, 6 bands, 120 BPM) a band
-  flip lands every 2 bars (~4s). CURATE: whether the latch hysteresis window
-  feels stable under real music at high energy.
-- **Grid breath (event)**: on every `TempoDiv` boundary
-  (`TempoLock.crossed()`), the radial phase pulse fires at full strength —
-  the same 2s-relax envelope as bass pulses, alive even at Audio depth 0.
-  At 120 BPM / WHOLE this is a continuous gentle breath (2s period = 2s
-  relax). CURATE: breath every bar may be too busy at fast tempos or small
-  divisions — consider gating to HALF-or-slower if it strobes.
-
-**Cap safety**: the quantization scale is clamped to
-`min(1.4, cycleSec / (5 · speedMul))`, so `speedMul × syncScale ≤ cycleSec/5`
-— worst-case traversal is exactly 5.0s (see compliance). `crossed()` is
-called unconditionally each frame so its counter never goes stale while Sync
-is off (re-enabling cannot fire a phantom pulse).
-
-**Sync off** restores today's free-running behavior exactly: no rate
-quantization (scale 1), no grid breath; bass pulses and the manual `Pulse`
-trigger still work.
+None (as of 2026-07-06). The original build quantized the band-advance
+period to the tempo grid via `TempoLock.quantizePeriod()` and fired a
+grid-breath pulse on each `TempoDiv` boundary; both were removed along with
+the `Sync`/`TempoDiv` parameters during curation — free-running timing reads
+better for this pattern and the extra controls weren't earning their space.
+(`TempoLock` itself remains in the util package; other patterns use it.)
 
 ## Energy mapping
 
-| Quantity | Ambient (e=0) | Peak (e=1) | Curve (lin/exp) |
-|---|---|---|---|
-| Color cycle period | 16 s | 8 s | exp (`Ranges.exp`) |
-| Radial pulse depth (LUT cycles; bass/breath/trigger) | 0.15 | 0.35 | lin (`Ranges.lin`) |
-| Treble shimmer gain | 0 (gated ≤ 0.6) | 0.30 lerp-to-white | lin above gate |
-
-Energy scales rate/pulse/shimmer only; the ≥5s traversal cap holds at e=1
-(math below). CURATE: pulse depths and shimmer gain/gate are unverified on
-sculpture.
+The `Energy` master knob was removed in the 2026-07-06 curation pass; its
+three targets are now fixed constants in `Satori.java`: cycle period
+`CYCLE_SEC = 8s` (scaled by `Speed`), radial pulse depth `PULSE_DEPTH = 1.3`
+LUT cycles, treble shimmer max `SHIMMER_MAX = 1.0` (all marked CURATE
+inline).
 
 ## Parameters
 
-UI order: triggers first, Energy, pattern parameters, Audio, Sync, TempoDiv,
-Meta last.
+UI order: triggers first, pattern parameters, Audio, RndTrig last.
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
 | `newField` | NewField | TriggerParameter | — | — | reseed centers/seeds, keep the current variant |
 | `reverse` | Reverse | TriggerParameter | — | — | flip the color-cycle direction |
 | `pulse` | Pulse | TriggerParameter | — | — | launch the radial phase pulse manually (full strength) |
-| `energy` | Energy | CompoundParameter | 0.35 | 0..1 | master energy (cycle rate, pulse depth, shimmer) |
 | `fieldMode` | Field | EnumParameter&lt;FieldMode&gt; | INTERFERENCE | 4 variants | static phase-field variant |
-| `speed` | Speed | CompoundParameter | 1 | 0.25..1 | trim on the energy-set cycle rate; can only slow (cap-safe) |
-| `spread` | Spread | CompoundParameter | 2 | 1..6 | color cycles across each surface |
+| `speed` | Speed | CompoundParameter (%) | 1 (100%) | 0..2 | cycle rate: 0% pauses, 100% = 8s/cycle, 200% = 4s |
+| `width` | Width | CompoundParameter | 5 | 1..6 | band width: higher = wider bands, fewer repeats (`cycles = 7 − width`) |
 | `posterize` | Bands | CompoundDiscreteParameter | 6 | 2..16 | quantize the LUT into N bold bands |
+| `smooth` | Smooth | CompoundParameter | 0 | 0..1 | band-edge interpolation: 0 = hard edges, 1 = full smoothstep gradient |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth: 0 = pure screensaver, 1 = full |
-| `sync` | Sync | BooleanParameter | true | on/off | lock band period + breath pulse to the tempo grid |
-| `tempoDiv` | TempoDiv | EnumParameter&lt;Tempo.Division&gt; | WHOLE | all divisions | grid that band flips and the breath land on |
-| `meta` | Meta | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
+| `rndTrig` | RndTrig | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
+
+Renames/removals (2026-07-06): `energy`, `sync`, `tempoDiv` removed;
+`spread` → `width` (action reversed); `meta` → `rndTrig`. Any `.lxp`
+modulation/automation bound to the old keys must be re-bound.
 
 ## Triggers
 
-Three non-meta triggers spanning small → large:
+Three non-RndTrig triggers spanning small → large:
 
 - `reverse` (small) — band motion direction flips. Takes a few seconds to
   read at ambient rates (bands visibly change travel direction);
   instantaneous state change, no discontinuity in the image itself.
 - `pulse` (medium) — the radial phase pulse fires at full strength regardless
   of Audio depth: bands warp outward from the seeded center and relax over
-  2s (≥ 1.5s event life). Same envelope as bass hits and the grid breath.
+  2s (≥ 1.5s event life). Same envelope as bass hits. CURATE: at the new
+  `PULSE_DEPTH = 1.3` the warp is ~4× deeper than before — verify it reads
+  as a wave, not a scene change.
 - `newField` (large) — the whole field snaps to a new random layout (new
   centers, wavelengths, arms, folds) in the current variant. Reads instantly
   as a scene change; the ongoing color rotation resumes over the new
@@ -195,50 +175,44 @@ registered into the bag as triggers.)
 | Param | Jump range | Status | Notes |
 |---|---|---|---|
 | `fieldMode` | all 4 variants | candidate | variant swap without reseeding — A/B on one layout |
-| `speed` | 0.4..1.0 | candidate | curated subrange; avoids the near-frozen 0.25 floor |
-| `spread` | 1..6 (full) | candidate | CURATE: 6 with 16 bands may be too fine (see compliance) |
+| `speed` | 0.5..1.5 | candidate | curated subrange; avoids jumping to a frozen pattern |
+| `width` | 1..6 (full) | candidate | CURATE: width 1 (6 cycles) with 16 bands may be too fine (see compliance) |
 | `posterize` | 2..16 (full) | candidate | 2 = duotone slabs, 16 = near-smooth gradient |
 
 ## Simulation-principles compliance
 
 **Sustained motion.** All sustained motion is phase drift. Because each
 surface's field is normalized to exactly [0,1], an iso-color band crosses the
-*entire* sculpture in `spread × cyclePeriod / (audioBoost × syncScale)`
-seconds. Worst case is the fastest configuration: `spread = 1`, `speed = 1`,
-max audio boost 1.5×, sync retiming at its cap:
+*entire* sculpture in `cycles × CYCLE_SEC / (speed × speedMul)` seconds,
+where `cycles = 7 − width`.
 
-- Cycle period `T(e) = Ranges.exp(e, 16, 8) = 16·(0.5)^e`
-- The sync quantization scale is clamped to
-  `capMax = min(1.4, T/(5·speedMul))`, so `speedMul × syncScale ≤ T/5` always.
-- **Energy = 1**: `T = 8s`; at full boost (speedMul 1.5) the cap yields
-  `capMax = 1.067` → combined 1.6× → worst-case traversal `8 / 1.6 = 5.0s ≥
-  5s` ✓ (exactly at the cap by construction).
-- **Default energy (0.35)**: `T ≈ 12.55s` → worst-case traversal `12.55 /
-  min(1.5·1.4, 12.55/5) ≈ 12.55 / 2.1 ≈ 6.0s ≥ 5s` ✓
-- At the actual defaults (`spread = 2`, Audio depth 0 → 0.5× floor, sync
-  scale ≤ 1.4): traversal ≥ `2 × 12.55 / 0.7 ≈ 36s` — glacial, as intended.
-- Ambient (e=0) worst-case drift period under max boost + sync is `16 / 2.1
-  ≈ 7.6s` (pre-sync build: 10.7s). CURATE: verify ambient still reads
-  meditative at that corner (loud music + Sync on + e=0).
-- The `speed` trim only divides *below* 1× rate, so it can never violate the
-  cap; the meta jump subrange (0.4–1.0) respects this too.
+- At the defaults (`width = 5` → 2 cycles, `speed = 1`, Audio depth 0 →
+  speedMul 1): traversal `2 × 8 = 16s` — slow, as intended.
+- Worst case (`width = 6` → 1 cycle, `speed = 2`, full audio boost 4×):
+  traversal `8 / 8 = 1s`. This **knowingly breaks the old ≥5s series
+  traversal cap** — user-directed curation (2026-07-06): Speed's 200%
+  ceiling and the 6× audio boost take priority; the fast corner is opt-in
+  via two knobs, and the defaults remain glacial. The old sync-cap budget
+  machinery went away with tempo locking.
 
-**Event motion.** The radial pulse (bass hit, grid breath, or manual `Pulse`
-trigger) is event-like: an instantaneous radial warp relaxing over 2.0s —
-above the 1.5s minimum visual life. It offsets phase by at most 0.35 cycles,
-so it reads as a wave through the existing bands, not a strobe.
+**Event motion.** The radial pulse (bass hit or manual `Pulse` trigger) is
+event-like: an instantaneous radial warp relaxing over 2.0s — above the 1.5s
+minimum visual life. At `PULSE_DEPTH = 1.3` it offsets phase by up to 1.3
+cycles (CURATE: verify it still reads as a wave through the bands, not a
+strobe — see Triggers).
 
-**Bold forms.** The posterize default of 6 bands over `spread = 2` gives ≈17
-columns per band on the cube ring (200 / 12) — large, high-contrast slabs
-with hard edges, legible through LED gaps. Smooth gradients are opt-in only at
-high `Bands` values. CURATE: at the extremes (`spread = 6` × `Bands = 16`,
-≈2 columns/band) bands approach fine texture; if illegible on sculpture,
-re-range `spread` to 1..4 or cap `Bands`.
+**Bold forms.** The posterize default of 6 bands over 2 cycles (`width = 5`)
+gives ≈17 columns per band on the cube ring (200 / 12) — large,
+high-contrast slabs with hard edges, legible through LED gaps. Smooth
+gradients are opt-in via high `Bands` values or the `Smooth` knob. CURATE:
+at the extremes (`width = 1` → 6 cycles × `Bands = 16`, ≈2 columns/band)
+bands approach fine texture; if illegible on sculpture, re-range or cap.
 
 **Brightness.** Colors come straight from the palette swatch / PerceptualHue
-at full saturation; shimmer adds ≤30% lerp-to-white only at high energy.
-CURATE: whether full-brightness posterized fields need a global brightness
-trim on the physical LEDs.
+at full saturation; shimmer lerps toward white by up to 100% on loud treble
+at full Audio depth (CURATE: verify the white-out reads as shimmer, not a
+flash). Whether full-brightness posterized fields need a global brightness
+trim on the physical LEDs is still unverified.
 
 ## Curation log
 
@@ -247,3 +221,4 @@ trim on the physical LEDs.
 | 2026-07-04 | Initial implementation | — |
 | 2026-07-05 | Review/upgrade session: fixed ANGULAR `arms` no-op (amplitude scale was absorbed by field normalization; now folds the azimuth into 1–3 real mirrored arms); added `Audio` depth knob (default 0) via `AudioReactive.setDepth` — depth-0 now the documented baseline, bass-pulse response scaled by `depth()`; added `Sync`/`TempoDiv` (default WHOLE) — band-period quantized to the grid with latch hysteresis and a cap-safe clamp (worst traversal pinned to 5.0s), grid breath pulse on each division boundary; added third non-meta trigger `Pulse` (manual radial pulse); doc corrections (compliance math incl. sync, removed unfounded "≥8s ambient requirement" phrasing) | Series-wide audio-depth/tempo-sync upgrade + bug hunt |
 | 2026-07-05 | Integration pass: hand-rolled band-period latch (`syncTargetMs`/`syncDivMs`) extracted verbatim into shared `TempoLock.quantizePeriod(periodMs, division[, minScale, maxScale])`; Satori now calls the helper with the default `[0.7, 1.4]` window and keeps its pattern-local `capMax` traversal clamp on top (behavior-identical: helper output ≥ 0.7 and `capMax` ≥ 1.067 > 0.7, so `min(s, capMax)` reproduces the old three-way clamp) | Satori agent requested a shared period-quantization helper so other rotation/plasma-style patterns don't re-hand-roll the latch |
+| 2026-07-06 | Curation pass from sculpture review: removed `Energy` (targets now fixed constants: `CYCLE_SEC = 8`, `PULSE_DEPTH = 1.3`, `SHIMMER_MAX = 1.0`, shimmer energy-gate deleted); removed tempo locking entirely (`Sync`, `TempoDiv`, `TempoLock` usage, grid breath, traversal-cap budget); `Speed` re-ranged 0..2 (%, multiplies rate: 0% pauses, 100% = old max 8s/cycle, 200% = 4s); `Spread` → `Width` with action reversed (`cycles = 7 − width`); added `Smooth` (smoothstep band-edge interpolation, 0 = old hard bands); Audio max effect ×6 (speed boost now boost-only `1 + 3·level`, old 0.5× silence floor removed); `Meta` → `RndTrig`; speed jump range 0.5..1.5 | Jeff's curation notes: Energy/Sync not earning their space, Audio imperceptible, Spread direction backwards, wanted pause + faster ceiling on Speed and optional smooth color interpolation |
