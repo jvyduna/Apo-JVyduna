@@ -38,9 +38,13 @@ import heronarts.lx.parameter.TriggerParameter;
  * swarm visibly re-converges onto the butterfly over a few seconds.
  *
  * Audio reactivity is gated by the standard Audio depth knob (default 0 = pure
- * screensaver): bass pumps the output brightness, bass transients fire
- * mini-kicks, and the BassSpd coefficient accumulates bass energy into the
- * timebase so particles pulse forward on drumbeats. With Sync on, trigger
+ * screensaver): bass pumps the output brightness and bass transients fire
+ * mini-kicks. BassSpd is deliberately independent of the Audio knob and acts
+ * as its own depth control: it turns bass transients (depth-independent
+ * bassPulseRaw, the trough-referenced rise of the bass band) into a momentary
+ * speed surge relative to the current Speed, so particles pulse forward on
+ * drumbeats at any orbit tempo. Both knobs default to 0 = pure screensaver.
+ * With Sync on, trigger
  * moments (Kick/Reseed/Tint, including RndTrig-fired ones) are deferred to the
  * next TempoDiv grid boundary; the continuous orbit and rotation are never
  * retimed.
@@ -109,12 +113,14 @@ public class Lorre extends ApotheneumPattern {
   private static final double TINT_STEP = 0.382;
 
   /**
-   * BassSpd gain: speed units (see SIM_RATE_AT_SPEED_1) added at BassSpd = 1
-   * and full depth-scaled bass. A strong bassline (bass ~0.5) adds ~2 speed
-   * units, ~+80% over the default Speed 2.5 -- particles audibly pulse forward
-   * on kicks and basslines. CURATE.
+   * Floor on the Speed value the BassSpd pulse scales against, preserving the
+   * frozen-swarm lurch: at Speed 0 a kick still adds up to 1 speed unit. The
+   * pulse itself (AudioReactive.bassPulseRaw) is 0..1, saturating on a real
+   * kick, so at BassSpd = 1 a kick momentarily runs the sim at 2x the current
+   * Speed -- relative to Speed, so it stays perceptible at any orbit tempo,
+   * and independent of the Audio depth knob. CURATE.
    */
-  private static final double BASS_SPEED_GAIN = 4;
+  private static final double BASS_SPEED_MIN_BASE = 1;
 
   /** Output brightness pump per unit of depth-scaled bass: up to a 1.6x flash. CURATE. */
   private static final double BASS_PUMP = 0.6;
@@ -231,8 +237,8 @@ public class Lorre extends ApotheneumPattern {
     .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
 
   public final CompoundParameter bassSpd =
-    new CompoundParameter("BassSpd", 0.5)
-    .setDescription("Bass-to-speed coefficient: accumulates bass energy into the timebase so particles pulse forward on drumbeats");
+    new CompoundParameter("BassSpd", 0)
+    .setDescription("Bass transient to speed pulse, independent of the Audio knob: a kick momentarily multiplies the orbit tempo, up to 2x at full");
 
   public final BooleanParameter sync =
     new BooleanParameter("Sync", true)
@@ -522,12 +528,16 @@ public class Lorre extends ApotheneumPattern {
       perturb(MINI_KICK_MAGNITUDE * this.audio.depth());
     }
 
-    // Integration dt: Speed knob (0 = frozen moment) plus BassSpd accumulating
-    // depth-scaled bass energy into the timebase -- particles pulse forward off
-    // their baseline tempo when the low end hits. Silence-safe: bass = 0
-    // (silence, or Audio depth 0) leaves the Speed baseline untouched.
+    // Integration dt: Speed knob (0 = frozen moment) plus a BassSpd transient
+    // pulse. bassPulseRaw (trough-referenced dB rise, 0..1) saturates on a
+    // kick and decays with the raw meter before the next beat; it scales the
+    // *current* Speed, so full BassSpd reads as a ~2x surge at any orbit
+    // tempo. Independent of the Audio depth knob -- BassSpd is its own depth
+    // control for this coupling. Silence-safe: pulse ~0 with no audio input.
+    final double bassPulse = this.audio.bassPulseRaw;
+    final double speedNow = this.speed.getValue();
     final double simRate = SIM_RATE_AT_SPEED_1
-      * (this.speed.getValue() + BASS_SPEED_GAIN * this.bassSpd.getValue() * this.audio.bass);
+      * (speedNow + this.bassSpd.getValue() * bassPulse * Math.max(speedNow, BASS_SPEED_MIN_BASE));
 
     // Clamped-dt integration: fixed-size substeps; overlong frames dilate sim time
     double simDt = deltaMs * .001 * simRate;

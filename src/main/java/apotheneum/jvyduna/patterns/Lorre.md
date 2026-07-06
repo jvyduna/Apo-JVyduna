@@ -89,28 +89,25 @@ signature move).
 
 ## Audio mapping
 
-All reactivity is gated by the **Audio depth knob** (`audio`, default 0),
-attached via `AudioReactive.setDepth(audioDepth)`. No per-site gating exists in
-the pattern — the taps themselves scale with depth. The 2026-07-05 curation
-pass replaced the subtle ±30% dt level-breathing with two overt mechanisms
-(brightness pump, BassSpd) after review feedback that max reactivity was not
-visible enough.
+All reactivity **except BassSpd** is gated by the **Audio depth knob** (`audio`,
+default 0), attached via `AudioReactive.setDepth(audioDepth)`. No per-site
+gating exists in the pattern — the taps themselves scale with depth. BassSpd is
+deliberately **independent of Audio** (2026-07-06, Jeff's request): it is its
+own depth control for the bass→speed coupling, reading the depth-independent
+`bassPulseRaw` tap, so the two knobs act independently on the same FFT data.
+The 2026-07-05 curation pass replaced the subtle ±30% dt level-breathing with
+two overt mechanisms (brightness pump, BassSpd) after review feedback that max
+reactivity was not visible enough.
 
-- **Depth 0 (default)**: every tap reads its silence value — the pump
-  multiplier is exactly 1 (the plain `copyTo` path is taken, bit-identical
-  output), no mini-kicks fire, BassSpd contributes nothing, trails sit at the
-  knob's base half-life. Pure screensaver.
+- **Depth 0 (default)**: every Audio-gated tap reads its silence value — the
+  pump multiplier is exactly 1 (the plain `copyTo` path is taken, bit-identical
+  output), no mini-kicks fire, trails sit at the knob's base half-life. BassSpd
+  also defaults to 0, so default knobs remain a pure screensaver.
 - **Raising the knob** restores, linearly with depth:
   - **Brightness pump** — output copies scale by `1 + 0.6·bass`
     (`BASS_PUMP = 0.6`, `CURATE:`): the whole swarm and its trails visibly
     flash up to ~1.6× with the low end at depth 1. The unmistakable
     max-reactivity tell.
-  - **BassSpd** (`bassSpd` knob, 0–1, default 0.5) — accumulates bass energy
-    into the timebase: `simRate = 0.045 × (Speed + 4·bassSpd·bass)`
-    (`BASS_SPEED_GAIN = 4`, `CURATE:`). A strong bassline (bass ≈ 0.5) at
-    BassSpd 1 adds ~2 speed units (~+80% over the default Speed 2.5), so
-    particles pulse forward on kicks and basslines. Works even at Speed 0: a
-    frozen swarm lurches forward only when the bass hits.
   - `bassHit()` fires a **mini-kick**: the same perturbation as the Kick
     trigger at a fixed `MINI_KICK_MAGNITUDE = 10` Lorenz units × `depth()`
     (was 2–6 energy-scaled; raised ~2–3× for visibility, `CURATE:` obvious
@@ -118,6 +115,25 @@ visible enough.
   - `trebleRatio` shortens the trail half-life by up to ~3.5× when treble runs
     above its running average (`halfLife / (1 + 0.35·max(0, trebleRatio − 1))`)
     — busy hi-hats crisp the trails. (Unchanged.)
+- **BassSpd** (`bassSpd` knob, 0–1, default 0, **independent of Audio**) —
+  turns bass **transients** into a momentary speed surge relative to the
+  current Speed: `simRate = 0.045 × (Speed + bassSpd·pulse·max(Speed, 1))`
+  with `pulse = AudioReactive.bassPulseRaw` — the depth-independent,
+  trough-referenced rise of the bass band, 0..1, saturating at
+  `PULSE_FULL_RISE_DB = 6` dB above the recent trough
+  (`BASS_SPEED_MIN_BASE = 1`, `CURATE:`). Trough-referenced for the same
+  reason as hit detection (2026-07-06 `AudioReactive` tuning): at eighth-note
+  density the running average parks within ~4 dB of the peaks, so
+  ratio-vs-average signals starve — the trough reference keeps full margin at
+  any playback level, saturates on a real kick, and decays with the raw meter
+  (release 100 ms) well before the next beat at 160 BPM. At BassSpd 1 each
+  kick reads as a ~2× forward surge **at any orbit tempo** (the pre-2026-07-06
+  formula added absolute speed units of depth-gated smoothed bass:
+  imperceptible at high Speed, a steady offset rather than a pulse on
+  sustained basslines, and zeroed by Audio 0 — the 1–2 dB wobble of sustained
+  bass reads near pulse 0). The `max(Speed, 1)` floor keeps the Speed-0
+  behavior: a frozen swarm lurches forward only when the bass hits.
+  Silence-safe: the pulse reads ~0 with no audio input.
 - Removed 2026-07-05: the ±30% integration-dt level breathing. Its silence
   factor (0.7×) is folded into the Speed rebaseline calibration below, so
   depth-0 behavior is unchanged from the previous build.
@@ -183,7 +199,7 @@ RndTrig last.
 | `trails` | Trails | CompoundParameter | 0.5 | 0–1 | trail half-life, exp 150 ms – 1.2 s |
 | `hue` | Hue | CompoundParameter | 0.58 | 0–1 | base hue (perceptual position; default classic Lorenz blue) |
 | `audio` | Audio | CompoundParameter | 0 | 0–1 | audio reactivity depth; 0 = pure screensaver |
-| `bassSpd` | BassSpd | CompoundParameter | 0.5 | 0–1 | bass→speed coefficient: bass energy accumulates into the timebase |
+| `bassSpd` | BassSpd | CompoundParameter | 0 | 0–1 | bass transient → speed pulse, independent of Audio: a kick momentarily multiplies orbit tempo, up to 2× at full |
 | `sync` | Sync | BooleanParameter | true | — | defer triggers and RndTrig jumps to the tempo grid; off = fire immediately |
 | `tempoDiv` | TempoDiv | EnumParameter&lt;Tempo.Division&gt; | HALF | all divisions | grid that deferred triggers and RndTrig jumps land on |
 | `rndTrig` | RndTrig | TriggerParameter | — | — | randomly fire a trigger or jump a parameter (formerly Meta) |
@@ -237,7 +253,8 @@ a glitch (mass die-off, blackout, attractor teleport), not a musical hit.
 **Lobe orbit tempo** (`CURATE:` the rebaselined `SIM_RATE_AT_SPEED_1 = 0.045`):
 one orbit around a lobe takes ≈ 0.73 Lorenz time units at ρ=28 (measured: mean
 z-maximum period 0.727 over 2,752 loops). `simRate = 0.045 × (Speed +
-4·bassSpd·bass)`; wall time = 0.73 / simRate:
+bassSpd·pulse·max(Speed, 1))` with `pulse = bassPulseRaw` (0..1, trough-
+referenced bass rise); wall time = 0.73 / simRate:
 
 - Default (Speed 2.5, silence or depth 0): simRate = 0.1125 → orbit ≈ **6.5 s**
   — numerically the old default (0.113), inside the 4–8 s target. Speed 1
@@ -247,10 +264,13 @@ z-maximum period 0.727 over 2,752 loops). `simRate = 0.045 × (Speed +
   ≈ 58 px/s at ρ=28 — *below* the previously analyzed extreme (0.466 / 75
   px/s), so the prior analysis holds: this is local orbiting confined within
   one ≈48-column view, texture rather than sculpture traversal.
-- Absolute max (Speed 8 + BassSpd 1 + bass = 1 at depth 1): simRate = 0.54 →
-  orbit 1.35 s, heads ≈ 86 px/s, still confined per-view and only during bass
-  peaks (transient by construction). `CURATE:` confirm the bass surge reads as
-  pulsing-forward, not strobing, at high Speed.
+- Absolute max (Speed 8 + BassSpd 1 + saturated pulse): simRate =
+  0.045 × 16 = 0.72 → orbit ≈ 1.0 s, heads ≈ 115 px/s — above the previously
+  analyzed sustained extreme (75 px/s), but only for the duration of a kick
+  transient (the pulse decays with the raw meter, ≲100 ms), still confined
+  within one ≈48-column view, and the baseline (between kicks) is the plain
+  Speed rate. `CURATE:` confirm the bass surge reads as pulsing-forward, not
+  strobing, at high Speed.
 
 **Rotation** (the only true full-sculpture sustained motion): max
 `ROTATION_MAX_REV_PER_SEC = 1/30` → one full revolution = full horizontal
@@ -273,7 +293,7 @@ sculpture.
 **Integration stability**: forward Euler at h ≤ 0.004 sim units with a
 12-substep/frame cap and an escape-guard respawn. Verified off-line: zero
 escapes over 300 particles × 900 sim units at both ρ=28 and ρ=40. The absolute
-max simRate (0.54) stays well inside the substep cap (0.004 × 12 = 0.048 sim
+max simRate (0.72) stays well inside the substep cap (0.004 × 12 = 0.048 sim
 units/frame supports simRate ≤ ~2.9 at 60 FPS before time dilation).
 
 **Contrast / brightness**: bold point-swarm forms, no fine texture. Brightness
@@ -293,3 +313,4 @@ wash into gray mush. The bass brightness pump multiplies output up to 1.6×
 | 2026-07-05 | Review + series upgrade (Fable): added `audio` depth knob (default 0 = pure screensaver, wired via `AudioReactive.setDepth`; mini-kick response scaled by `depth()`); added `sync`/`tempoDiv` (HALF) — Kick/Reseed/Tint defer to the next grid boundary when Sync is on, `crossed()` polled every frame to avoid a stale gate; added third trigger `tint` (golden-ratio hue step); fixed the compliance-math error (head speed at absolute max is ≈75 px/s confined within one 48-column view, not the previously claimed 25 px/s — full-sculpture motion remains rotation at ≥30 s/rev); added CURATE notes for cube-view rotation coherence and max-rate swirl. Meta parameter jumps still apply off-grid (TriggerBag has no deferral hook — noted as a util request) | Series conventions (TEMPLATE.md 2026-07-05) + bug hunt |
 | 2026-07-05 | Integration pass: util request granted — `TriggerBag.setJumpScheduler` added, and Meta parameter jumps now defer to the TempoDiv grid via the same pending mechanism as the triggers (`requestJump`/`pendingJump`, latest-wins coalescing, released immediately on Sync off). CURATE: unverified visually — confirm a deferred rho hop landing on a HALF boundary reads as a musical hit | Lorre agent + reviewer both requested the TriggerBag deferral hook; wired it end-to-end |
 | 2026-07-05 | Curation pass (Jeff's review): **Speed rebaselined** to 0–8 with exponent 2 (`SIM_RATE_AT_SPEED_1 = 0.045` absorbs the removed energy/silence factors; 0 = frozen moment, 1 = old slowest, 2.5 = default = old look, 8 = 2× old fastest; RndTrig jump range re-ranged to [1.5, 3.5]). **Renames** (labels + paths): Energy→`Desat` (now pure desaturation 0–1, default 0.55 ≈ old look; sim-rate and mini-kick couplings removed), Rotate→`YRotSpd`, Meta→`RndTrig`. **New params**: `Count` (1–300 ring window, kills oldest first, births copy a live particle + ±1 jitter — `CURATE:` jitter size; compute scales with count), `Vis` (density reveal, ring-order gating, hidden particles keep simulating — `CURATE:` linear vs vis² low end), `YPos` (±50% sculpture-height vertical offset), `BassSpd` (bass→timebase accumulation, `BASS_SPEED_GAIN = 4` `CURATE:`). **Audio punch**: dt level-breathing removed; added bass brightness pump (`BASS_PUMP = 0.6` `CURATE:`) and fixed mini-kick 10 × depth (`CURATE:`). All `CURATE:` items unverified on sculpture; saved project knobs for renamed/re-scaled params reset on load (accepted) | Jeff's curation review notes 2026-07-05 |
+| 2026-07-06 | **BassSpd rework**: additive-absolute smoothed-bass term (`0.045 × (Speed + 4·bassSpd·bass)`) → Speed-relative transient pulse (`0.045 × (Speed + bassSpd·pulse·max(Speed, 1))`, `pulse = bassPulseRaw`; `BASS_SPEED_MIN_BASE = 1` `CURATE:`). Signal switched from depth-gated `bass` (250 ms-release EMA — near-constant on sustained bass, and imperceptible as an absolute-units boost at high Speed) to the new **`bassPulseRaw`** tap in `AudioReactive`: depth-independent, trough-referenced bass rise saturating at `PULSE_FULL_RISE_DB = 6` dB — same trough reference as the 160 BPM hit-detection tuning, since ratio-vs-average signals starve at eighth-note density; attacks with the meter on a kick, decays (release 100 ms) before the next beat, sustained bass wobble (1–2 dB) reads ~0. No new decay knob needed. **Decoupled from Audio** (Jeff's request): BassSpd is its own depth control; default dropped 0.5 → 0 so default knobs remain a pure screensaver. `max(Speed, 1)` floor preserves the Speed-0 lurch. New absolute max simRate 0.72 (transient-only), still inside the substep cap | Jeff: BassSpd imperceptible on bass-heavy 160 BPM music — must scale relative to current Speed (~2× at full), visibly jump on each kick settling before the next beat, and act independently of the Audio knob |

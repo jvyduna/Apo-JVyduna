@@ -55,7 +55,9 @@ import heronarts.lx.parameter.LXParameter;
  * <ul>
  * <li>depth = 0: every public tap reads exactly its silence value — bass /
  *     mid / treble / level and all ratios are 0.0, bassHit()/trebleHit() are
- *     never true. The pattern behaves as if the room were silent.</li>
+ *     never true. The pattern behaves as if the room were silent. (Exception:
+ *     {@link #bassPulseRaw} is deliberately depth-independent, for couplings
+ *     that carry their own depth control.)</li>
  * <li>depth = 1 (or no depth source attached): identical to the ungated
  *     behavior.</li>
  * <li>0 &lt; depth &lt; 1: magnitude taps (bass/mid/treble/level and the
@@ -100,6 +102,12 @@ public class AudioReactive {
    *  couple seconds when the material jumps to a louder sustained level. */
   private static final double TROUGH_RELAX_MS = 500;
 
+  /** {@link #bassPulseRaw} saturates at 1 when the bass band rises this many
+   *  dB above its recent trough. Eighth-note kicks at 160 BPM swing ~9 dB
+   *  peak-to-trough on the default meter, so 6 dB saturates solidly on real
+   *  kicks while the 1-2 dB wobble of sustained bass reads near 0. */
+  private static final double PULSE_FULL_RISE_DB = 6.0;
+
   /** Cap on the default tempo-derived retrigger gate, so eighth notes at
    *  160 BPM (187.5 ms apart) are never gated out even when the project
    *  tempo is slower than the material. */
@@ -117,6 +125,19 @@ public class AudioReactive {
   /** Ratio of instantaneous level to its ~1.5s running average (0..8, ~1 =
    *  average), scaled by the attached depth */
   public double bassRatio, trebleRatio, levelRatio;
+
+  /**
+   * Depth-independent bass transient pulse in 0..1: the rise of the
+   * (dB-normalized) bass band above its recent trough, saturating at
+   * {@link #PULSE_FULL_RISE_DB}. Trough-referenced like hit detection (the
+   * running average parks too close to the peaks at dense hit spacing for
+   * average-referenced signals to have headroom), but continuous and carrying
+   * magnitude: attacks with the meter on a kick, decays with the meter
+   * release well before the next beat. Deliberately NOT scaled by the depth
+   * knob — for couplings that carry their own depth control (e.g. a
+   * bass-to-speed coefficient). Silence-safe: ~0 with no audio input.
+   */
+  public double bassPulseRaw;
 
   /** Depth-independent smoothed levels; these keep tracking the real signal */
   private double smoothBass, smoothMid, smoothTreble, smoothLevel;
@@ -190,6 +211,12 @@ public class AudioReactive {
       this.troughBass + (rawBass - this.troughBass) * troughAlpha;
     this.troughTreble = (rawTreble < this.troughTreble) ? rawTreble :
       this.troughTreble + (rawTreble - this.troughTreble) * troughAlpha;
+
+    // Continuous depth-independent transient pulse: rise above the bass
+    // trough, saturating at PULSE_FULL_RISE_DB (a fixed dB rise is a fixed
+    // normalized delta, so this is playback-level-independent)
+    this.bassPulseRaw = Math.min(1, Math.max(0, rawBass - this.troughBass)
+      / (PULSE_FULL_RISE_DB / this.meter.range.getValue()));
 
     // Hit detection and retrigger bookkeeping run on the real signal at any
     // depth; the public flags are only masked when depth is effectively zero.
