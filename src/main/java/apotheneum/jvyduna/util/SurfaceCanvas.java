@@ -261,17 +261,18 @@ public class SurfaceCanvas {
   }
 
   /**
-   * Copy the canvas onto an Apotheneum orientation, column-major. Works for
-   * both the cube (Orientation spans all 4 faces = 200 columns) and the
-   * cylinder (120 columns). Columns shortened by doors are guarded via
-   * column.points.length. Copies min(width, orientation width) columns and
+   * Copy the canvas onto any Apotheneum surface, column-major. Works for a full
+   * Orientation (the cube ring spans all 4 faces = 200 columns; the cylinder =
+   * 120 columns) as well as a single {@link Apotheneum.Cube.Face} (50 columns) —
+   * both expose {@code columns()}. Columns shortened by doors are guarded via
+   * column.points.length. Copies min(width, surface width) columns and
    * min(height, column length) rows.
    *
-   * @param orientation Target surface
+   * @param surface Target surface (Orientation or single cube Face)
    * @param colors Pattern color buffer (this.colors in the pattern)
    */
-  public void copyTo(Apotheneum.Orientation orientation, int[] colors) {
-    final Apotheneum.Column[] columns = orientation.columns();
+  public void copyTo(Apotheneum.Surface surface, int[] colors) {
+    final Apotheneum.Column[] columns = surface.columns();
     final int w = Math.min(this.width, columns.length);
     for (int x = 0; x < w; ++x) {
       final Apotheneum.Column column = columns[x];
@@ -287,14 +288,14 @@ public class SurfaceCanvas {
    * mult scales each pixel's RGB (clamped to 255, alpha forced opaque);
    * flipY reads the canvas upside down without touching its contents.
    *
-   * @param orientation Target surface
+   * @param surface Target surface (Orientation or single cube Face)
    * @param colors Pattern color buffer (this.colors in the pattern)
    * @param mult RGB multiplier, typically 0..1 for dimming, >1 to boost;
    *             <=0 renders opaque black
    * @param flipY Read rows bottom-to-top (e.g. cave/inversion modes)
    */
-  public void copyTo(Apotheneum.Orientation orientation, int[] colors, double mult, boolean flipY) {
-    final Apotheneum.Column[] columns = orientation.columns();
+  public void copyTo(Apotheneum.Surface surface, int[] colors, double mult, boolean flipY) {
+    final Apotheneum.Column[] columns = surface.columns();
     final int w = Math.min(this.width, columns.length);
     for (int x = 0; x < w; ++x) {
       final Apotheneum.Column column = columns[x];

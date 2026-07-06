@@ -1,50 +1,63 @@
 package apotheneum.jvyduna.patterns;
 
-import java.awt.Color;
+import java.awt.AlphaComposite;
 import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
-import apotheneum.ApotheneumRasterPattern;
+import apotheneum.Apotheneum;
+import apotheneum.ApotheneumPattern;
 import apotheneum.doved.lightning.LSystemAlgorithm;
 import apotheneum.doved.lightning.LightningGenerator;
 import apotheneum.doved.lightning.LightningSegment;
 import apotheneum.doved.lightning.MidpointDisplacementAlgorithm;
 import apotheneum.doved.lightning.PhysicallyBasedAlgorithm;
 import apotheneum.doved.lightning.RRTAlgorithm;
-import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.Ranges;
+import apotheneum.jvyduna.util.SurfaceCanvas;
 import apotheneum.jvyduna.util.TempoLock;
 import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
 import heronarts.lx.Tempo;
+import heronarts.lx.audio.GraphicMeter;
+import heronarts.lx.color.LXColor;
+import heronarts.lx.color.LXDynamicColor;
 import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundParameter;
+import heronarts.lx.parameter.DiscreteParameter;
 import heronarts.lx.parameter.EnumParameter;
 import heronarts.lx.parameter.TriggerParameter;
 
 /**
- * After Dark "Zot!" homage: lightning bolts strike down the cube faces.
+ * After Dark "Zot!" homage: lightning bolts strike down the Apotheneum surfaces.
  *
  * A thin wrapper over the {@code apotheneum.doved.lightning} generator library
- * (midpoint displacement / L-system / RRT / physically-based). Zot owns the
- * strike scheduling (manual trigger, bass transients gated by the Audio depth
- * knob, silence-safe ambient Poisson storms) and the strike envelope (stepped
- * leader draw-in, one-frame return stroke, long afterglow); the doved
- * generators own bolt geometry and segment rendering, and are reused
- * unmodified. With Sync on, every return stroke lands on the TempoDiv grid
- * (the leader duration is retimed), and ambient/storm launches quantize to
- * grid crossings; with Sync off timing is fully free-running.
+ * (midpoint displacement / L-system / RRT / physically-based). Zot owns strike
+ * scheduling (manual trigger, storm burst, or an audio-floor + EMA transient
+ * detector on a chosen FFT bin-pair), the strike envelope (stepped leader
+ * draw-in over StrkTime, one-frame return stroke, glow decay over FadeTime),
+ * per-strike surface routing, and palette color; the doved generators own bolt
+ * geometry and segment rendering and are reused unmodified.
+ *
+ * Each strike is routed onto {@code ESurfs} of the 5 external surfaces (4 cube
+ * exterior faces + the exterior cylinder) and {@code ISurfs} of the 5 internal
+ * surfaces (4 cube interior faces + the interior cylinder), chosen from those
+ * currently displaying the fewest strikes. Cylinder strikes render into an
+ * unrolled half-ring (60 of the 120 columns) placed at a random angular offset,
+ * wrapping across the seam. Bolts run full height to the ground; whatever lands
+ * on the door rows is simply lost.
  *
  * See Zot.md (beside this file) for the full design note.
  */
 @LXCategory("Apotheneum/jvyduna")
 @LXComponent.Name("Zot")
-@LXComponent.Description("After Dark Zot! lightning: leader draw-in, return-stroke flash and long afterglow, struck by hand, bass or ambient storm")
-public class Zot extends ApotheneumRasterPattern {
+@LXComponent.Description("After Dark Zot! lightning: leader draw-in, return-stroke flash and glow, struck by hand, storm or FFT transient, routed across cube + cylinder surfaces")
+public class Zot extends ApotheneumPattern {
 
   // ---- Generator algorithms (shared stateless instances) --------------------
 
@@ -68,22 +81,22 @@ public class Zot extends ApotheneumRasterPattern {
     }
   }
 
-  // ---- Timing / envelope constants (physical intent noted) ------------------
+  // ---- Canvas geometry ------------------------------------------------------
 
-  /** Concurrent bolt slots; further strikes recycle the oldest expired-life slot */
-  private static final int MAX_BOLTS = 3;
+  /** Cube face canvas: 50 columns x 45 rows */
+  private static final int FACE_W = Apotheneum.GRID_WIDTH;
+  private static final int FACE_H = Apotheneum.GRID_HEIGHT;
+  /** Cylinder ring: 120 columns x 43 rows */
+  private static final int CYL_W = Apotheneum.RING_LENGTH;
+  private static final int CYL_H = Apotheneum.CYLINDER_HEIGHT;
+  /** A cylinder strike's canvas is the unrolled half-ring (1/4 of the columns
+   *  each way from a random start angle) */
+  private static final int CYL_CANVAS_W = CYL_W / 2;
 
-  /** Stepped leader draws top-to-bottom over this range (randomized per strike) */
-  private static final double LEADER_MIN_MS = 300;
-  private static final double LEADER_MAX_MS = 600;
+  // ---- Timing / envelope constants ------------------------------------------
 
-  /**
-   * Simulation-principles floor: every bolt's total visual life
-   * (leader + flash + afterglow) is at least this long, so the branching form
-   * registers at 40-foot sculpture scale. Also gates slot recycling: a strike
-   * is dropped rather than cutting short a bolt younger than this.
-   */
-  private static final double MIN_VISUAL_LIFE_MS = 1500;
+  /** Concurrent bolt slots; further strikes recycle the oldest active slot */
+  private static final int MAX_BOLTS = 16;
 
   /** Leader-phase brightness ramp: dim channel forming before the return stroke */
   private static final double LEADER_BRIGHTNESS_LO = 0.25;
@@ -92,24 +105,15 @@ public class Zot extends ApotheneumRasterPattern {
   /** Afterglow starts here (return stroke is 1.0) and decays quadratically to 0 */
   private static final double AFTERGLOW_BRIGHTNESS = 0.7;
 
-  /** Energy scales the Glow knob: long lazy afterglow when ambient, snappier at peak */
-  private static final double GLOW_SCALE_AMBIENT = 1.4;
-  private static final double GLOW_SCALE_PEAK = 0.8;
+  /** Glow/bleed strength passed to the doved renderers (halo around the core) */
+  private static final double BLEED = 1.0;
 
   /**
-   * Physical LEDs are extremely bright: whole-face return-stroke flashes are
+   * Physical LEDs are extremely bright: whole-surface return-stroke flashes are
    * at most 1 frame long and at most one per this many milliseconds.
+   * CURATE: interval unverified at sculpture scale.
    */
-  private static final double FACE_FLASH_MIN_INTERVAL_MS = 8000;
-
-  /** Ambient Poisson mean strike interval: sparse rolling storm at e=0 ... */
-  private static final double AMBIENT_MEAN_MS_AMBIENT = 30000;
-  /** ... down to one beat at the series' 160 BPM convention at e=1 */
-  private static final double AMBIENT_MEAN_MS_PEAK = 375;
-
-  /** Minimum interval between audio-triggered strikes, energy-scaled */
-  private static final double AUDIO_GATE_MS_AMBIENT = 4000;
-  private static final double AUDIO_GATE_MS_PEAK = 375;
+  private static final double FACE_FLASH_MIN_INTERVAL_MS = 1200;
 
   /** Storm trigger: burst of 3..5 bolts spread over ~2 seconds */
   private static final int STORM_MIN_BOLTS = 3;
@@ -121,16 +125,19 @@ public class Zot extends ApotheneumRasterPattern {
   private static final double START_X_MIN = 0.15;
   private static final double START_X_MAX = 0.85;
 
-  /** Glow/bleed strength passed to the doved renderers (halo around the core) */
-  private static final double BLEED = 1.0;
+  // ---- Audio-trigger constants ----------------------------------------------
 
-  // Fixed doved generator settings not worth a knob (curated defaults from
-  // doved's Lightning.java, biased toward tall top-to-bottom strikes)
+  /** A transient fires when the monitored bin average exceeds EMA times this.
+   *  CURATE: 1.5 first-guess. */
+  private static final double EMA_TRIGGER_MULT = 1.5;
+
+  /** Blackout after an audio strike = this fraction of the EMADur window,
+   *  floored to MIN_AUDIO_BLACKOUT_MS, killing double-fires on one transient. */
+  private static final double BLACKOUT_FRAC = 0.15;
+  private static final double MIN_AUDIO_BLACKOUT_MS = 60;
+
+  // Fixed doved generator settings (curated defaults from doved's Lightning.java)
   private static final int MIDPOINT_DEPTH = 6;
-  // NB: doved's default startSpread (0.9) assumed a fixed center startX; Zot
-  // already randomizes startX per strike, and a wide spread re-scattered it
-  // across the full width where the generator's bounds clamp piled ~15% of
-  // strikes at exactly x=0/x=49. Keep just a small jitter here.
   private static final double MIDPOINT_START_SPREAD = 0.1;
   private static final double MIDPOINT_END_SPREAD = 0.8;
   private static final double MIDPOINT_BRANCH_DISTANCE = 0.6;
@@ -152,13 +159,12 @@ public class Zot extends ApotheneumRasterPattern {
   private static final double PHYS_CHARGE_DECAY = 0.02;
   private static final double PHYS_CONNECTION_DISTANCE = 10;
 
-  // ---- Parameters (UI order: triggers, energy, pattern params, audio,
-  // ---- sync, tempoDiv, meta last) --------------------------------------------
+  // ---- Parameters -----------------------------------------------------------
 
   private final TriggerBag bag = new TriggerBag("Zot");
 
   public final TriggerParameter strike = bag.register(
-    new TriggerParameter("Strike", this::launchBolt)
+    new TriggerParameter("Strike", this::launchStrike)
     .setDescription("Strike one bolt now"));
 
   public final TriggerParameter storm = bag.register(
@@ -169,17 +175,17 @@ public class Zot extends ApotheneumRasterPattern {
     new TriggerParameter("NextAlgo", this::nextAlgorithm)
     .setDescription("Cycle to the next lightning generator algorithm"));
 
-  public final CompoundParameter energy =
-    new CompoundParameter("Energy", 0.35)
-    .setDescription("Master energy: 0-40% sparse long-afterglow ambient storms, 60-100% beat-rate strikes (160 BPM)");
-
   public final EnumParameter<Algo> algorithm =
     new EnumParameter<Algo>("Algo", Algo.MIDPOINT)
     .setDescription("Bolt generation algorithm (doved lightning library)");
 
-  public final CompoundParameter threshold =
-    new CompoundParameter("Thresh", 1.5, 1, 4)
-    .setDescription("Bass ratio a transient must exceed to trigger a strike (higher = only the biggest hits)");
+  public final DiscreteParameter eSurfs =
+    new DiscreteParameter("ESurfs", 2, 0, 6)
+    .setDescription("How many of the 5 external surfaces (4 cube faces + cylinder) each strike lights");
+
+  public final DiscreteParameter iSurfs =
+    new DiscreteParameter("ISurfs", 1, 0, 6)
+    .setDescription("How many of the 5 internal surfaces (4 cube faces + cylinder) each strike lights");
 
   public final CompoundParameter thickness =
     new CompoundParameter("Thick", 2, 1, 3)
@@ -193,84 +199,151 @@ public class Zot extends ApotheneumRasterPattern {
     new CompoundParameter("Jag", 0.5)
     .setDescription("Jaggedness: perpendicular displacement / angle variation of the channel");
 
-  public final CompoundParameter glow =
-    new CompoundParameter("Glow", 2.5, 1, 6)
-    .setDescription("Afterglow fade time in seconds (energy-scaled; total bolt life is floored at 1.5s)");
-
-  public final CompoundParameter ambient =
-    new CompoundParameter("Ambient", 1, 0, 4)
-    .setDescription("Ambient strike rate multiplier on the energy-driven Poisson storm (0 = manual/audio only)");
-
   public final CompoundParameter flash =
     new CompoundParameter("Flash", 0.15, 0, 0.5)
-    .setDescription("Whole-face return-stroke flash brightness; 1 frame max, rate-limited to one per 8s; 0 = off");
+    .setDescription("Whole-surface return-stroke flash brightness; 1 frame max, rate-limited; 0 = off");
 
-  public final CompoundParameter audioDepth =
+  public final EnumParameter<Tempo.Division> strkTime =
+    new EnumParameter<Tempo.Division>("StrkTime", Tempo.Division.QUARTER)
+    .setDescription("Tempo division a strike takes to draw top-to-bottom (starts immediately on trigger)");
+
+  public final EnumParameter<Tempo.Division> fadeTime =
+    new EnumParameter<Tempo.Division>("FadeTime", Tempo.Division.HALF)
+    .setDescription("Tempo division of the fade (return-stroke flash + glow decay); total life = StrkTime + FadeTime");
+
+  public final BooleanParameter white =
+    new BooleanParameter("White", true)
+    .setDescription("On: white bolts. Off: each strike takes a random palette color");
+
+  public final CompoundParameter audioFloor =
     new CompoundParameter("Audio", 0)
-    .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
+    .setDescription("FFT floor for audio strikes: the monitored bins must exceed this. 0 = audio strikes off (manual only)");
 
-  public final BooleanParameter sync =
-    new BooleanParameter("Sync", true)
-    .setDescription("Lock strikes to the tempo grid; off restores free-running timing");
+  public final DiscreteParameter audFreq =
+    new DiscreteParameter("AudFreq", 0, 0, 15)
+    .setDescription("Which neighbouring FFT bin-pair to watch: 0 = lowest 2 of 16, 14 = highest 2");
 
-  public final EnumParameter<Tempo.Division> tempoDiv =
-    new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.QUARTER)
-    .setDescription("Tempo division that return strokes and quantized launches land on when Sync is enabled");
+  public final DiscreteParameter emaDur =
+    new DiscreteParameter("EMADur", 3, 0, 17)
+    .setDescription("EMA / refractory window in beats: a strike usually won't re-fire within this many beats (0 = no EMA gate)");
 
   public final TriggerParameter meta =
     new TriggerParameter("Meta", bag::fire)
     .setDescription("Randomly fire a trigger or jump a parameter");
 
-  // ---- Bolt slots (preallocated) ---------------------------------------------
+  // ---- Surfaces (10 total: external[0..4], internal[0..4]) ------------------
+
+  private static final class Surface {
+    final SurfaceCanvas canvas;
+    final boolean cylinder;
+    Apotheneum.Surface target; // set lazily once the model exists
+    int activeCount;
+
+    Surface(int w, int h, boolean cylinder) {
+      this.canvas = new SurfaceCanvas(w, h);
+      this.cylinder = cylinder;
+    }
+  }
+
+  private final Surface[] external = new Surface[5];
+  private final Surface[] internal = new Surface[5];
+  private final Surface[] allSurfaces = new Surface[10]; // flat: 0-4 ext, 5-9 int
+  private boolean surfacesReady = false;
+
+  // ---- Bolt slots (preallocated) --------------------------------------------
 
   private enum Phase { LEADER, FLASH, GLOW }
 
   private static final class Bolt {
-    // Segment lists are filled by the doved generators at strike time
-    // (event-rate allocation, acceptable); `visible` is the growing prefix
-    // rendered during the leader phase, extended in place with no allocation.
-    final ArrayList<LightningSegment> segments = new ArrayList<>();
-    final ArrayList<LightningSegment> visible = new ArrayList<>();
+    // Full geometry (filled by the doved generators at strike time) and the
+    // growing leader prefix (extended in place, no per-frame allocation).
+    final ArrayList<LightningSegment> faceSegments = new ArrayList<>();
+    final ArrayList<LightningSegment> faceVisible = new ArrayList<>();
+    final ArrayList<LightningSegment> cylSegments = new ArrayList<>();
+    final ArrayList<LightningSegment> cylVisible = new ArrayList<>();
+    final int[] surfaceIds = new int[10];
+    int surfaceCount;
+    boolean hasFace, hasCyl;
     LightningGenerator generator;
+    boolean white;
+    int color;      // ARGB, used only when !white
+    int cylOffset;  // starting column (0..119) for cylinder placement
     boolean active = false;
+    boolean flashThisStrike = false;
     Phase phase = Phase.GLOW;
-    double ageMs, leaderMs, glowMs;
+    double ageMs, leaderMs, fadeMs;
   }
 
   private final Bolt[] bolts = new Bolt[MAX_BOLTS];
 
-  private final Random random = new Random();
-  private final AudioReactive audio;
-  private final TempoLock tempoLock;
+  // ---- Scratch (preallocated) -----------------------------------------------
 
-  private double msSinceAudioStrike = 1e9;
+  private final BufferedImage faceScratch =
+    new BufferedImage(FACE_W, FACE_H, BufferedImage.TYPE_INT_ARGB);
+  private final Graphics2D faceG;
+  private final int[] facePixels = new int[FACE_W * FACE_H];
+
+  private final BufferedImage cylScratch =
+    new BufferedImage(CYL_CANVAS_W, CYL_H, BufferedImage.TYPE_INT_ARGB);
+  private final Graphics2D cylG;
+  private final int[] cylPixels = new int[CYL_CANVAS_W * CYL_H];
+
+  private final boolean[] pickScratch = new boolean[5];
+
+  // ---- State ----------------------------------------------------------------
+
+  private final Random random = new Random();
+  private final TempoLock tempoLock;
+  private final GraphicMeter meter;
+
+  private double ema = 0;
+  private double audioBlackoutMs = 0;
   private double msSinceFaceFlash = 1e9;
   private int stormRemaining = 0;
   private double stormNextMs = 0;
 
   public Zot(LX lx) {
     super(lx);
-    this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
     this.tempoLock = new TempoLock(lx);
+    this.meter = lx.engine.audio.meter;
+    this.faceG = configureGraphics(this.faceScratch);
+    this.cylG = configureGraphics(this.cylScratch);
+
     for (int i = 0; i < MAX_BOLTS; ++i) {
       this.bolts[i] = new Bolt();
+    }
+    // Canvases exist now; targets are bound lazily in ensureSurfaces()
+    this.external[0] = new Surface(FACE_W, FACE_H, false);
+    this.external[1] = new Surface(FACE_W, FACE_H, false);
+    this.external[2] = new Surface(FACE_W, FACE_H, false);
+    this.external[3] = new Surface(FACE_W, FACE_H, false);
+    this.external[4] = new Surface(CYL_W, CYL_H, true);
+    this.internal[0] = new Surface(FACE_W, FACE_H, false);
+    this.internal[1] = new Surface(FACE_W, FACE_H, false);
+    this.internal[2] = new Surface(FACE_W, FACE_H, false);
+    this.internal[3] = new Surface(FACE_W, FACE_H, false);
+    this.internal[4] = new Surface(CYL_W, CYL_H, true);
+    for (int i = 0; i < 5; ++i) {
+      this.allSurfaces[i] = this.external[i];
+      this.allSurfaces[5 + i] = this.internal[i];
     }
 
     addParameter("strike", this.strike);
     addParameter("storm", this.storm);
     addParameter("nextAlgo", this.nextAlgo);
-    addParameter("energy", this.energy);
     addParameter("algorithm", this.algorithm);
-    addParameter("threshold", this.threshold);
+    addParameter("eSurfs", this.eSurfs);
+    addParameter("iSurfs", this.iSurfs);
     addParameter("thickness", this.thickness);
     addParameter("branch", this.branch);
     addParameter("jag", this.jag);
-    addParameter("glow", this.glow);
-    addParameter("ambient", this.ambient);
     addParameter("flash", this.flash);
-    addParameter("audio", this.audioDepth);
-    addParameter("sync", this.sync);
-    addParameter("tempoDiv", this.tempoDiv);
+    addParameter("strkTime", this.strkTime);
+    addParameter("fadeTime", this.fadeTime);
+    addParameter("white", this.white);
+    addParameter("audio", this.audioFloor);
+    addParameter("audFreq", this.audFreq);
+    addParameter("emaDur", this.emaDur);
     addParameter("meta", this.meta);
 
     // Jump candidates — mirrored 1:1 in the Zot.md "Jump candidates" table
@@ -278,8 +351,39 @@ public class Zot extends ApotheneumRasterPattern {
     bag.jumpable(this.thickness, 1, 3);
     bag.jumpable(this.branch, 0.1, 0.8);
     bag.jumpable(this.jag, 0.15, 0.9);
-    bag.jumpable(this.glow, 1.5, 5);
-    bag.jumpable(this.ambient, 0.25, 2);
+    bag.jumpable(this.eSurfs, 1, 4);
+    bag.jumpable(this.iSurfs, 0, 3);
+  }
+
+  private static Graphics2D configureGraphics(BufferedImage image) {
+    final Graphics2D g = image.createGraphics();
+    g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+    return g;
+  }
+
+  /** Bind surface targets once the Apotheneum model is loaded (run() guards
+   *  render() behind Apotheneum.exists, so cube/cylinder are valid here). */
+  private void ensureSurfaces() {
+    if (this.surfacesReady) {
+      return;
+    }
+    if (Apotheneum.cube != null) {
+      this.external[0].target = Apotheneum.cube.exterior.front;
+      this.external[1].target = Apotheneum.cube.exterior.right;
+      this.external[2].target = Apotheneum.cube.exterior.back;
+      this.external[3].target = Apotheneum.cube.exterior.left;
+      if (Apotheneum.cube.interior != null) {
+        this.internal[0].target = Apotheneum.cube.interior.front;
+        this.internal[1].target = Apotheneum.cube.interior.right;
+        this.internal[2].target = Apotheneum.cube.interior.back;
+        this.internal[3].target = Apotheneum.cube.interior.left;
+      }
+    }
+    if (Apotheneum.cylinder != null) {
+      this.external[4].target = Apotheneum.cylinder.exterior;
+      this.internal[4].target = Apotheneum.cylinder.interior;
+    }
+    this.surfacesReady = true;
   }
 
   // ---- Strike sources --------------------------------------------------------
@@ -297,67 +401,159 @@ public class Zot extends ApotheneumRasterPattern {
   }
 
   /**
-   * Strike one bolt into a free slot. If all slots are busy, the oldest bolt is
-   * recycled — but only once it has had its minimum visual life; otherwise the
-   * strike is dropped (never cut a bolt short of the 1.5s floor).
+   * Strike one bolt: pick a free/recyclable slot, route it onto ESurfs external
+   * + ISurfs internal surfaces (fewest-displayed first, random tiebreak),
+   * generate the needed geometry, and start its LEADER phase.
    */
-  private void launchBolt() {
-    Bolt bolt = null;
-    for (Bolt b : this.bolts) {
-      if (!b.active) {
-        bolt = b;
-        break;
-      }
+  private void launchStrike() {
+    if (!this.surfacesReady) {
+      return; // model not loaded yet
     }
-    if (bolt == null) {
-      Bolt oldest = this.bolts[0];
-      for (Bolt b : this.bolts) {
-        if (b.ageMs > oldest.ageMs) {
-          oldest = b;
-        }
-      }
-      if (oldest.ageMs < MIN_VISUAL_LIFE_MS) {
-        return; // drop the strike rather than truncate a young bolt
-      }
-      bolt = oldest;
+    final int es = this.eSurfs.getValuei();
+    final int is = this.iSurfs.getValuei();
+    if (es + is == 0) {
+      return; // nowhere to show it
     }
 
-    // Per-STRIKE allocation below (Parameters object + LightningSegments inside
-    // the doved generators) is event-rate, not per-frame: acceptable under the
-    // zero-alloc render rule. See Zot.md.
+    final Bolt bolt = allocateBolt();
+    bolt.active = false; // clean slot; only activated on success below
+    bolt.surfaceCount = 0;
+    pickSurfaces(es, 0, bolt);
+    pickSurfaces(is, 5, bolt);
+    if (bolt.surfaceCount == 0) {
+      return; // no available surfaces (e.g. missing interior model)
+    }
+
+    bolt.hasFace = false;
+    bolt.hasCyl = false;
+    for (int j = 0; j < bolt.surfaceCount; ++j) {
+      if (this.allSurfaces[bolt.surfaceIds[j]].cylinder) {
+        bolt.hasCyl = true;
+      } else {
+        bolt.hasFace = true;
+      }
+    }
+
+    // Per-STRIKE allocation (Parameters + LightningSegments inside the doved
+    // generators) is event-rate, not per-frame: acceptable under the zero-alloc
+    // render rule.
     final Algo algo = this.algorithm.getEnum();
-    bolt.segments.clear();
-    bolt.visible.clear();
-    algo.generator.generateLightning(bolt.segments, buildParams(algo));
-    if (bolt.segments.isEmpty()) {
-      // A recycled slot has already been wiped — retire it rather than leave
-      // an active husk holding an empty segment list until its old expiry
-      bolt.active = false;
-      return;
+    if (bolt.hasFace) {
+      generate(bolt.faceSegments, algo, FACE_W, FACE_H);
+    } else {
+      bolt.faceSegments.clear();
     }
-    bolt.visible.ensureCapacity(bolt.segments.size());
+    if (bolt.hasCyl) {
+      generate(bolt.cylSegments, algo, CYL_CANVAS_W, CYL_H);
+    } else {
+      bolt.cylSegments.clear();
+    }
+    final boolean any =
+      (bolt.hasFace && !bolt.faceSegments.isEmpty())
+      || (bolt.hasCyl && !bolt.cylSegments.isEmpty());
+    if (!any) {
+      return; // empty generation; leave the slot inactive, no counts touched
+    }
+
+    // Commit: claim the chosen surfaces
+    for (int j = 0; j < bolt.surfaceCount; ++j) {
+      this.allSurfaces[bolt.surfaceIds[j]].activeCount++;
+    }
+    bolt.faceVisible.clear();
+    bolt.cylVisible.clear();
+    bolt.faceVisible.ensureCapacity(bolt.faceSegments.size());
+    bolt.cylVisible.ensureCapacity(bolt.cylSegments.size());
     bolt.generator = algo.generator;
-    bolt.leaderMs = LEADER_MIN_MS
-      + this.random.nextDouble() * (LEADER_MAX_MS - LEADER_MIN_MS);
-    if (this.sync.isOn()) {
-      // Land the return stroke — the "Zot!" pop, the bolt's one salient
-      // instant — on the tempo grid. retime() returns a rate scale (apply as
-      // velocity *= s), so the leader duration divides by it; with the
-      // default [0.7, 1.4] clamp the leader stays within ~214-857 ms and the
-      // glow floor below still guarantees >= 1.5s total visual life.
-      bolt.leaderMs /= this.tempoLock.retime(bolt.leaderMs, this.tempoDiv.getEnum());
-    }
-    final double glowMs = this.glow.getValue() * 1000
-      * Ranges.lin(this.energy.getValue(), GLOW_SCALE_AMBIENT, GLOW_SCALE_PEAK);
-    // Enforce the minimum total visual life (simulation principles)
-    bolt.glowMs = Math.max(glowMs, MIN_VISUAL_LIFE_MS - bolt.leaderMs);
+    bolt.white = this.white.isOn();
+    bolt.color = bolt.white ? 0xffffffff : pickColor();
+    bolt.cylOffset = this.random.nextInt(CYL_W);
+    bolt.leaderMs = this.tempoLock.divisionMs(this.strkTime.getEnum());
+    bolt.fadeMs = this.tempoLock.divisionMs(this.fadeTime.getEnum());
     bolt.ageMs = 0;
     bolt.phase = Phase.LEADER;
+    bolt.flashThisStrike = false;
     bolt.active = true;
   }
 
+  /** Find a free slot, or recycle the oldest active bolt (releasing its surface
+   *  counts first). */
+  private Bolt allocateBolt() {
+    for (Bolt b : this.bolts) {
+      if (!b.active) {
+        return b;
+      }
+    }
+    Bolt oldest = this.bolts[0];
+    for (Bolt b : this.bolts) {
+      if (b.ageMs > oldest.ageMs) {
+        oldest = b;
+      }
+    }
+    releaseSurfaces(oldest);
+    return oldest;
+  }
+
+  /** Choose {@code count} surfaces from a 5-pool (poolStart 0=external, 5=internal)
+   *  with the lowest activeCount, random tiebreak; append their flat ids to the
+   *  bolt. Skips surfaces with no bound target. */
+  private void pickSurfaces(int count, int poolStart, Bolt bolt) {
+    java.util.Arrays.fill(this.pickScratch, false);
+    for (int k = 0; k < count; ++k) {
+      int best = -1;
+      int bestCount = Integer.MAX_VALUE;
+      int ties = 0;
+      for (int i = 0; i < 5; ++i) {
+        if (this.pickScratch[i]) {
+          continue;
+        }
+        final Surface s = this.allSurfaces[poolStart + i];
+        if (s.target == null) {
+          continue;
+        }
+        if (s.activeCount < bestCount) {
+          bestCount = s.activeCount;
+          best = i;
+          ties = 1;
+        } else if (s.activeCount == bestCount) {
+          // reservoir sampling: uniform random among the current-minimum ties
+          ++ties;
+          if (this.random.nextInt(ties) == 0) {
+            best = i;
+          }
+        }
+      }
+      if (best < 0) {
+        break; // pool exhausted
+      }
+      this.pickScratch[best] = true;
+      bolt.surfaceIds[bolt.surfaceCount++] = poolStart + best;
+    }
+  }
+
+  private void releaseSurfaces(Bolt bolt) {
+    for (int j = 0; j < bolt.surfaceCount; ++j) {
+      final Surface s = this.allSurfaces[bolt.surfaceIds[j]];
+      if (s.activeCount > 0) {
+        s.activeCount--;
+      }
+    }
+  }
+
+  private int pickColor() {
+    final List<LXDynamicColor> swatch = this.lx.engine.palette.swatch.colors;
+    if (!swatch.isEmpty()) {
+      return swatch.get(this.random.nextInt(swatch.size())).getColor();
+    }
+    return LXColor.hsb(this.random.nextFloat() * 360, 100, 100);
+  }
+
+  private void generate(ArrayList<LightningSegment> out, Algo algo, int w, int h) {
+    out.clear();
+    algo.generator.generateLightning(out, buildParams(algo, w, h));
+  }
+
   /** Build a per-strike doved Parameters object for the selected algorithm. */
-  private Object buildParams(Algo algo) {
+  private Object buildParams(Algo algo, int w, int h) {
     final double startX = START_X_MIN
       + this.random.nextDouble() * (START_X_MAX - START_X_MIN);
     final double branchValue = this.branch.getValue();
@@ -365,117 +561,50 @@ public class Zot extends ApotheneumRasterPattern {
     switch (algo) {
       case L_SYSTEM:
         return new LSystemAlgorithm.Parameters(
-          LS_ITERATIONS,
-          LS_SEGMENT_LENGTH,
-          jagValue,
-          LS_LENGTH_VARIATION,
+          LS_ITERATIONS, LS_SEGMENT_LENGTH, jagValue, LS_LENGTH_VARIATION,
           Ranges.lin(branchValue, LS_BRANCH_ANGLE_MIN_DEG, LS_BRANCH_ANGLE_MAX_DEG),
-          startX,
-          RASTER_WIDTH, RASTER_HEIGHT);
+          startX, w, h);
       case RRT:
         return new RRTAlgorithm.Parameters(
-          RRT_STEP_SIZE,
-          RRT_GOAL_BIAS,
-          RRT_MAX_ITERATIONS,
-          branchValue,
-          jagValue,
-          RRT_GOAL_RADIUS,
-          RRT_ELECTRICAL_FIELD,
-          startX,
-          RASTER_WIDTH, RASTER_HEIGHT);
+          RRT_STEP_SIZE, RRT_GOAL_BIAS, RRT_MAX_ITERATIONS, branchValue, jagValue,
+          RRT_GOAL_RADIUS, RRT_ELECTRICAL_FIELD, startX, w, h);
       case PHYSICAL:
         return new PhysicallyBasedAlgorithm.Parameters(
-          PHYS_ELECTRIC_POTENTIAL,
-          PHYS_STEP_LENGTH,
-          PHYS_MAX_STEPS,
-          branchValue * PHYS_BRANCH_SCALE,
-          jagValue * Math.PI, // radians, as in doved's Lightning.java
-          PHYS_CHARGE_DECAY,
-          PHYS_CONNECTION_DISTANCE,
-          startX,
-          RASTER_WIDTH, RASTER_HEIGHT);
+          PHYS_ELECTRIC_POTENTIAL, PHYS_STEP_LENGTH, PHYS_MAX_STEPS,
+          branchValue * PHYS_BRANCH_SCALE, jagValue * Math.PI, // radians, as in doved
+          PHYS_CHARGE_DECAY, PHYS_CONNECTION_DISTANCE, startX, w, h);
       default: // MIDPOINT
         return new MidpointDisplacementAlgorithm.Parameters(
-          jagValue,
-          MIDPOINT_DEPTH,
-          startX,
-          MIDPOINT_START_SPREAD,
-          MIDPOINT_END_SPREAD,
-          branchValue,
-          MIDPOINT_BRANCH_DISTANCE,
-          MIDPOINT_BRANCH_ANGLE,
-          RASTER_WIDTH, RASTER_HEIGHT);
+          jagValue, MIDPOINT_DEPTH, startX, MIDPOINT_START_SPREAD, MIDPOINT_END_SPREAD,
+          branchValue, MIDPOINT_BRANCH_DISTANCE, MIDPOINT_BRANCH_ANGLE, w, h);
     }
   }
 
-  // ---- Render ------------------------------------------------------------------
+  // ---- Render ---------------------------------------------------------------
 
   @Override
-  protected void render(double deltaMs, Graphics2D graphics) {
-    this.audio.tick(deltaMs);
-    final double e = this.energy.getValue();
-    final boolean sync = this.sync.isOn();
-    final Tempo.Division div = this.tempoDiv.getEnum();
-    // Poll the grid gate every frame (even with Sync off) so it stays primed
-    // and re-enabling Sync doesn't see a spurious catch-up crossing
-    final boolean onGrid = this.tempoLock.crossed(div) && sync;
+  protected void render(double deltaMs) {
+    ensureSurfaces();
 
-    // Strike source 1: audio bass transients over the ratio threshold,
-    // gated by an energy-scaled minimum interval. Silence-safe: with no
-    // audio (or the Audio depth knob at 0) bassHit() never fires and this
-    // path is simply inert. Launch is immediate — the hit itself is the
-    // musical timing — and with Sync on the return stroke still lands on
-    // the grid via the leader retime in launchBolt().
-    this.msSinceAudioStrike += deltaMs;
-    final double audioGateMs = Ranges.exp(e, AUDIO_GATE_MS_AMBIENT, AUDIO_GATE_MS_PEAK);
-    if (this.audio.bassHit()
-        && (this.audio.bassRatio >= this.threshold.getValue())
-        && (this.msSinceAudioStrike >= audioGateMs)) {
-      this.msSinceAudioStrike = 0;
-      launchBolt();
-    }
+    // Strike source 1: audio transient on the chosen bins
+    updateAudio(deltaMs);
 
-    // Strike source 2: ambient storm — mean interval from energy, scaled by
-    // the Ambient knob. Keeps storms rolling with no audio at all. Free-run:
-    // per-frame Poisson. Sync: a Bernoulli draw at each grid crossing with
-    // matched mean rate (p = divisionMs / meanMs, saturating at one strike
-    // per division) — energy chooses how many grid slots strike, launches
-    // never drift off-grid.
-    final double ambientRate = this.ambient.getValue();
-    if (ambientRate > 0) {
-      final double meanMs =
-        Ranges.exp(e, AMBIENT_MEAN_MS_AMBIENT, AMBIENT_MEAN_MS_PEAK) / ambientRate;
-      if (sync) {
-        if (onGrid && (this.random.nextDouble() < this.tempoLock.divisionMs(div) / meanMs)) {
-          launchBolt();
-        }
-      } else if (this.random.nextDouble() < deltaMs / meanMs) {
-        launchBolt();
-      }
-    }
-
-    // Strike source 3: pending storm-burst bolts. Free-run: random 300-700ms
-    // spacing. Sync: one bolt per grid crossing until the burst is spent.
+    // Strike source 2: pending storm-burst bolts
     if (this.stormRemaining > 0) {
-      if (sync) {
-        if (onGrid) {
-          --this.stormRemaining;
-          launchBolt();
-        }
-      } else {
-        this.stormNextMs -= deltaMs;
-        if (this.stormNextMs <= 0) {
-          --this.stormRemaining;
-          this.stormNextMs = STORM_SPACING_MIN_MS
-            + this.random.nextDouble() * (STORM_SPACING_MAX_MS - STORM_SPACING_MIN_MS);
-          launchBolt();
-        }
+      this.stormNextMs -= deltaMs;
+      if (this.stormNextMs <= 0) {
+        --this.stormRemaining;
+        this.stormNextMs = STORM_SPACING_MIN_MS
+          + this.random.nextDouble() * (STORM_SPACING_MAX_MS - STORM_SPACING_MIN_MS);
+        launchStrike();
       }
     }
 
-    // Update bolt lifecycles; detect return strokes (no drawing yet)
+    // Advance lifecycles; detect return strokes (rate-limited whole-surface flash)
     this.msSinceFaceFlash += deltaMs;
-    boolean faceFlash = false;
+    final boolean flashAllowed = (this.flash.getValue() > 0)
+      && (this.msSinceFaceFlash >= FACE_FLASH_MIN_INTERVAL_MS);
+    boolean flashConsumed = false;
     for (Bolt bolt : this.bolts) {
       if (!bolt.active) {
         continue;
@@ -483,64 +612,228 @@ public class Zot extends ApotheneumRasterPattern {
       bolt.ageMs += deltaMs;
       if (bolt.phase == Phase.LEADER) {
         if (bolt.ageMs >= bolt.leaderMs) {
-          // Return stroke: exactly one rendered frame at full brightness
-          bolt.phase = Phase.FLASH;
-          if ((this.flash.getValue() > 0)
-              && (this.msSinceFaceFlash >= FACE_FLASH_MIN_INTERVAL_MS)) {
+          bolt.phase = Phase.FLASH; // one rendered frame at full brightness
+          if (flashAllowed && !flashConsumed) {
+            bolt.flashThisStrike = true;
+            flashConsumed = true;
             this.msSinceFaceFlash = 0;
-            faceFlash = true;
           }
         }
       } else if (bolt.phase == Phase.FLASH) {
         bolt.phase = Phase.GLOW; // the flash was rendered exactly once
       }
-      if ((bolt.phase == Phase.GLOW)
-          && (bolt.ageMs >= bolt.leaderMs + bolt.glowMs)) {
+      if ((bolt.phase == Phase.GLOW) && (bolt.ageMs >= bolt.leaderMs + bolt.fadeMs)) {
         bolt.active = false;
+        releaseSurfaces(bolt);
       }
     }
 
-    // Draw
-    clear();
-    if (faceFlash) {
-      // One-frame dim whole-face flash under the bolts (event-rate allocation)
-      graphics.setColor(new Color(0.85f, 0.9f, 1f, (float) this.flash.getValue()));
-      graphics.fillRect(0, 0, RASTER_WIDTH, RASTER_HEIGHT);
+    // Clear all surface canvases, composite bolts, write to LEDs
+    for (Surface s : this.allSurfaces) {
+      if (s.target != null) {
+        s.canvas.fill(0xff000000);
+      }
     }
     final double thick = this.thickness.getValue();
     for (Bolt bolt : this.bolts) {
-      if (!bolt.active) {
-        continue;
+      if (bolt.active) {
+        renderBolt(bolt, thick);
       }
-      final List<LightningSegment> draw;
-      final double fade;
-      switch (bolt.phase) {
-        case LEADER: {
-          // Progressive top-to-bottom draw-in: render a growing prefix of the
-          // segment list (generators emit segments in growth order)
-          final double progress = Math.min(bolt.ageMs / bolt.leaderMs, 1);
-          final int target = (int) Math.ceil(progress * bolt.segments.size());
-          while (bolt.visible.size() < target) {
-            bolt.visible.add(bolt.segments.get(bolt.visible.size()));
-          }
-          draw = bolt.visible;
-          fade = LEADER_BRIGHTNESS_LO
-            + (LEADER_BRIGHTNESS_HI - LEADER_BRIGHTNESS_LO) * progress;
-          break;
-        }
-        case FLASH: {
-          draw = bolt.segments;
-          fade = 1.0; // return stroke: whole bolt at full brightness, one frame
-          break;
-        }
-        default: { // GLOW
-          draw = bolt.segments;
-          final double u = Math.min((bolt.ageMs - bolt.leaderMs) / bolt.glowMs, 1);
-          fade = AFTERGLOW_BRIGHTNESS * (1 - u) * (1 - u);
-          break;
-        }
-      }
-      bolt.generator.render(graphics, draw, fade, 1.0, thick, BLEED);
     }
+    for (Surface s : this.allSurfaces) {
+      if (s.target != null) {
+        s.canvas.copyTo(s.target, this.colors);
+      }
+    }
+  }
+
+  /** Render one bolt: draw via the doved generator into scratch, then tint +
+   *  composite onto each assigned surface (cylinder placed at a wrapped offset). */
+  private void renderBolt(Bolt bolt, double thick) {
+    // Phase-dependent draw list + brightness
+    final List<LightningSegment> faceDraw;
+    final List<LightningSegment> cylDraw;
+    final double fade;
+    switch (bolt.phase) {
+      case LEADER: {
+        final double progress = Math.min(bolt.ageMs / bolt.leaderMs, 1);
+        extendPrefix(bolt.faceVisible, bolt.faceSegments, progress);
+        extendPrefix(bolt.cylVisible, bolt.cylSegments, progress);
+        faceDraw = bolt.faceVisible;
+        cylDraw = bolt.cylVisible;
+        fade = LEADER_BRIGHTNESS_LO + (LEADER_BRIGHTNESS_HI - LEADER_BRIGHTNESS_LO) * progress;
+        break;
+      }
+      case FLASH: {
+        faceDraw = bolt.faceSegments;
+        cylDraw = bolt.cylSegments;
+        fade = 1.0;
+        break;
+      }
+      default: { // GLOW
+        faceDraw = bolt.faceSegments;
+        cylDraw = bolt.cylSegments;
+        final double u = Math.min((bolt.ageMs - bolt.leaderMs) / bolt.fadeMs, 1);
+        fade = AFTERGLOW_BRIGHTNESS * (1 - u) * (1 - u);
+        break;
+      }
+    }
+    final float flashBright = (float) this.flash.getValue();
+
+    if (bolt.hasFace && !bolt.faceSegments.isEmpty()) {
+      clearScratch(this.faceG, FACE_W, FACE_H);
+      bolt.generator.render(this.faceG, faceDraw, fade, 1.0, thick, BLEED);
+      this.faceScratch.getRGB(0, 0, FACE_W, FACE_H, this.facePixels, 0, FACE_W);
+      for (int j = 0; j < bolt.surfaceCount; ++j) {
+        final Surface s = this.allSurfaces[bolt.surfaceIds[j]];
+        if (s.cylinder) {
+          continue;
+        }
+        if (bolt.flashThisStrike) {
+          flashFill(s.canvas, 0, FACE_W, FACE_H, bolt, flashBright);
+        }
+        compositeBolt(s.canvas, this.facePixels, FACE_W, FACE_H, 0, bolt);
+      }
+    }
+
+    if (bolt.hasCyl && !bolt.cylSegments.isEmpty()) {
+      clearScratch(this.cylG, CYL_CANVAS_W, CYL_H);
+      bolt.generator.render(this.cylG, cylDraw, fade, 1.0, thick, BLEED);
+      this.cylScratch.getRGB(0, 0, CYL_CANVAS_W, CYL_H, this.cylPixels, 0, CYL_CANVAS_W);
+      for (int j = 0; j < bolt.surfaceCount; ++j) {
+        final Surface s = this.allSurfaces[bolt.surfaceIds[j]];
+        if (!s.cylinder) {
+          continue;
+        }
+        if (bolt.flashThisStrike) {
+          flashFill(s.canvas, bolt.cylOffset, CYL_CANVAS_W, CYL_H, bolt, flashBright);
+        }
+        compositeBolt(s.canvas, this.cylPixels, CYL_CANVAS_W, CYL_H, bolt.cylOffset, bolt);
+      }
+    }
+
+    bolt.flashThisStrike = false; // consumed (FLASH phase is one frame)
+  }
+
+  private static void extendPrefix(ArrayList<LightningSegment> visible,
+      ArrayList<LightningSegment> segments, double progress) {
+    final int target = (int) Math.ceil(progress * segments.size());
+    while (visible.size() < target) {
+      visible.add(segments.get(visible.size()));
+    }
+  }
+
+  private void clearScratch(Graphics2D g, int w, int h) {
+    g.setComposite(AlphaComposite.Clear);
+    g.fillRect(0, 0, w, h);
+    g.setComposite(AlphaComposite.SrcOver);
+  }
+
+  /** Composite a rendered (blue-white, alpha-keyed) scratch buffer onto a canvas
+   *  with per-channel max blending; tinted to the strike color when !white. */
+  private void compositeBolt(SurfaceCanvas canvas, int[] pixels, int w, int h,
+      int xOffset, Bolt bolt) {
+    for (int y = 0; y < h; ++y) {
+      final int row = y * w;
+      for (int x = 0; x < w; ++x) {
+        final int argb = pixels[row + x];
+        final int a = (argb >>> 24) & 0xff;
+        if (a == 0) {
+          continue;
+        }
+        canvas.setMax(xOffset + x, y, tint(argb, a, bolt.white, bolt.color));
+      }
+    }
+  }
+
+  /** Flatten a rendered pixel over black (white mode) or scale the strike color
+   *  by the pixel's intensity (color mode). Returns opaque ARGB. */
+  private static int tint(int argb, int a, boolean white, int color) {
+    final int r = (argb >> 16) & 0xff;
+    final int g = (argb >> 8) & 0xff;
+    final int b = argb & 0xff;
+    if (white) {
+      return 0xff000000 | ((r * a / 255) << 16) | ((g * a / 255) << 8) | (b * a / 255);
+    }
+    final int maxc = Math.max(r, Math.max(g, b));
+    final double intensity = (a / 255.0) * (maxc / 255.0);
+    final int cr = (int) (((color >> 16) & 0xff) * intensity);
+    final int cg = (int) (((color >> 8) & 0xff) * intensity);
+    final int cb = (int) ((color & 0xff) * intensity);
+    return 0xff000000 | (cr << 16) | (cg << 8) | cb;
+  }
+
+  private void flashFill(SurfaceCanvas canvas, int xOffset, int w, int h,
+      Bolt bolt, float bright) {
+    final int c = flashColor(bolt.white, bolt.color, bright);
+    for (int y = 0; y < h; ++y) {
+      for (int x = 0; x < w; ++x) {
+        canvas.setMax(xOffset + x, y, c);
+      }
+    }
+  }
+
+  private static int flashColor(boolean white, int color, float bright) {
+    if (white) {
+      final int r = clamp8((int) (0.85f * 255 * bright));
+      final int g = clamp8((int) (0.9f * 255 * bright));
+      final int b = clamp8((int) (255 * bright));
+      return 0xff000000 | (r << 16) | (g << 8) | b;
+    }
+    final int cr = clamp8((int) (((color >> 16) & 0xff) * bright));
+    final int cg = clamp8((int) (((color >> 8) & 0xff) * bright));
+    final int cb = clamp8((int) ((color & 0xff) * bright));
+    return 0xff000000 | (cr << 16) | (cg << 8) | cb;
+  }
+
+  private static int clamp8(int v) {
+    return (v < 0) ? 0 : (v > 255) ? 255 : v;
+  }
+
+  // ---- Audio trigger ---------------------------------------------------------
+
+  /**
+   * Audio strike: watch a neighbouring FFT bin-pair (AudFreq). A strike fires
+   * when the pair average exceeds the Audio floor AND (EMADur>0) EMA*1.5, with a
+   * short blackout to suppress double-fires. On a fire the EMA snaps up to the
+   * peak so it self-suppresses over ~EMADur beats until a larger transient
+   * arrives. Audio floor = 0 disables audio strikes entirely.
+   */
+  private void updateAudio(double deltaMs) {
+    if (this.audioBlackoutMs > 0) {
+      this.audioBlackoutMs -= deltaMs;
+    }
+    final double floor = this.audioFloor.getValue();
+    if (floor <= 0) {
+      return; // audio strikes off
+    }
+
+    final int f = this.audFreq.getValuei();
+    final double avg = 0.5 * (this.meter.getBand(f) + this.meter.getBand(f + 1));
+
+    final int dur = this.emaDur.getValuei();
+    final double beatMs = this.lx.engine.tempo.period.getValue();
+    if (dur > 0) {
+      final double tauMs = dur * beatMs;
+      this.ema += (avg - this.ema) * (1 - Math.exp(-deltaMs / tauMs));
+    } else {
+      this.ema = avg; // no EMA gate
+    }
+
+    final boolean emaGate = (dur == 0) || (avg > this.ema * EMA_TRIGGER_MULT);
+    if ((avg > floor) && emaGate && (this.audioBlackoutMs <= 0)) {
+      launchStrike();
+      if (dur > 0) {
+        this.ema = Math.max(this.ema, avg); // snap up: self-suppress for ~dur beats
+      }
+      this.audioBlackoutMs = Math.max(MIN_AUDIO_BLACKOUT_MS, BLACKOUT_FRAC * dur * beatMs);
+    }
+  }
+
+  @Override
+  public void dispose() {
+    super.dispose();
+    this.faceG.dispose();
+    this.cylG.dispose();
   }
 }
