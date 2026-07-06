@@ -34,6 +34,13 @@ import heronarts.lx.Tempo;
  *     period) to the nearest whole multiple or unit fraction of the division,
  *     with an internal harmonic latch so per-frame reapplication does not
  *     jitter. Safe (and intended) to call every frame.</li>
+ * <li><b>Absolute beat position</b> — {@link #beatPosition()},
+ *     {@link #beatCycle()}, {@link #beatPeriodMs()} and
+ *     {@link #msUntilBeat(double)} expose the transport's continuous
+ *     quarter-note beat index (Mystify-style). Patterns that hard-lock events
+ *     to the grid store a target as an absolute beat and derive velocity from
+ *     remaining-distance / msUntilBeat(target) each frame — exact arrival,
+ *     robust to live BPM changes.</li>
  * </ol>
  *
  * <h2>When to call retime()</h2>
@@ -248,6 +255,49 @@ public class TempoLock {
     }
     // Final safety clamp: bounded, positive, finite
     return (s < lo) ? lo : (s > hi) ? hi : s;
+  }
+
+  /**
+   * The transport's continuous absolute beat position: integer quarter-note
+   * cycle count plus fractional phase. Monotonic while the transport runs;
+   * resets if the engine tempo restarts, so callers holding absolute-beat
+   * targets should treat a wildly stale target as a replan event. (Int cycle
+   * wrap is ~2^31 quarter notes, decades at any musical BPM — ignored.)
+   *
+   * @return Absolute beat index, e.g. 133.25 = a quarter past beat 133
+   */
+  public double beatPosition() {
+    return this.tempo.getCycleCount(Tempo.Division.QUARTER)
+         + this.tempo.getBasis(Tempo.Division.QUARTER);
+  }
+
+  /**
+   * Integer quarter-note cycle count, for anchoring beat grids.
+   *
+   * @return The transport's current whole-beat index
+   */
+  public int beatCycle() {
+    return this.tempo.getCycleCount(Tempo.Division.QUARTER);
+  }
+
+  /**
+   * Milliseconds per quarter-note beat at the current BPM.
+   *
+   * @return Beat period in ms
+   */
+  public double beatPeriodMs() {
+    return this.tempo.period.getValue();
+  }
+
+  /**
+   * Signed time until an absolute beat index at the current BPM; negative if
+   * the beat is already past.
+   *
+   * @param absoluteBeat Absolute beat index (see {@link #beatPosition()})
+   * @return Milliseconds until that beat, negative if past
+   */
+  public double msUntilBeat(double absoluteBeat) {
+    return (absoluteBeat - beatPosition()) * beatPeriodMs();
   }
 
   /**
