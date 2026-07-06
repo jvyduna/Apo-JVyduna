@@ -38,11 +38,24 @@ as an alternative to the Ableton-based workflows most artists currently use.
 
 ## Git workflow
 
-- Claude Code sessions develop in worktrees under `.claude/worktrees/` on
+Two Claude Code session modes touch this repo. **First figure out which mode
+you are in** — check whether the checkout is Jeff's real working copy
+(`/Users/jvyduna/Code/jvyduna/Apo-JVyduna`, `~/Chromatik` and `~/.m2` exist,
+`mvn` resolves the provided-scope LX/apotheneum jars) or an ephemeral
+per-session container (some sandbox path like `/home/user/...`, on a
+`claude/<name>` branch, `mvn` cannot resolve `com.heronarts:lx`). Following
+the wrong mode's rules has already lost work once (see remote mode below).
+
+**Unconditional in both modes: pushing `main` to GitHub requires Jeff's
+explicit approval. Never open PRs unless asked.**
+
+### Local Mac sessions (Jeff's machine)
+
+- Sessions develop in worktrees under `.claude/worktrees/` on
   `worktree-bridge-*` branches; the repo root stays on `main`.
 - **Minimal remote activity.** When a turn of improvements is done, merge it
-  back into the **local** `main` branch. Do not push worktree branches, create
-  remote branches, or open PRs; `git push` of main happens only when Jeff asks.
+  back into the **local** `main` branch. Do not push worktree branches or
+  create remote branches.
 - **Rebase on main at the start of every turn.** Before making new edits, run
   `git rebase main` in the worktree so the session builds on the latest merged
   state and current CLAUDE.md. Only rebase a clean tree — commit (or stash)
@@ -60,8 +73,54 @@ as an alternative to the Ableton-based workflows most artists currently use.
   noting in the body any file overlap with other recent sessions.
 - After merging, rebuild on main (`mvn -Pinstall clean install`) so the
   deployed jar in `~/Chromatik/Packages` matches main.
+
+### Remote/cloud sessions (Claude Code web, server mode, worktree isolation)
+
+These run in an isolated, throwaway container that dies with the session.
+**The pushed session branch is the ONLY thing that survives.** Lesson learned
+2026-07-06: a remote session "merged into main" inside its container and
+committed CLAUDE.md edits to that main — none of it was pushed, the container
+evaporated, and the work had to be reconstructed by hand on the Mac.
+
+- Commit **all** work — code, design docs, CLAUDE.md edits, everything — on
+  the session's own `claude/<name>` branch. Never commit to, or merge into,
+  `main` inside the container: that main is an ephemeral copy, and unpushed
+  commits on it are silently lost when the session ends.
+- When a workstream is complete (implemented and verified as far as the
+  sandbox allows), **push the session branch to origin automatically** —
+  `git push -u origin <branch>`, no need to ask. This is required, not
+  optional: it is the only channel back to Jeff's machine, where the branch
+  gets merged into the real `main` to compile and review.
+- If Jeff says "merge to main" during a remote session, that means: make sure
+  the session branch is pushed and tell him it's ready to merge locally — do
+  NOT perform the merge in the container.
+- The container cannot build (`mvn` fails on the provided-scope
+  `com.heronarts:lx` / `apotheneum:apotheneum` jars — no `~/.m2`). Verify via
+  stubbed-API compile + headless harnesses; real build/verify happens on the
+  Mac after the merge.
+
+### Both modes
+
 - Leave local `.idea/` drift in the repo root uncommitted unless asked.
 - Never `git add` audio (see Layout).
+
+## Commit signing (known remote-environment quirk)
+
+Some remote Claude Code sessions get a container whose SSH commit-signing key
+(`~/.ssh/commit_signing_key.pub`) is provisioned empty, even though
+`~/.gitconfig` correctly sets `commit.gpgsign=true`, `gpg.format=ssh`, and
+`gpg.ssh.program`. Commits then land unsigned, and a stop hook may flag them
+as "Unverified" on GitHub. This is an Anthropic environment-provisioning gap
+outside this repo's (and Jeff's) control — not a git config problem, not
+something a commit --amend or rebase fixes, and not worth chasing:
+
+- Do not attempt to amend/rebase to "fix" a signature, especially not on any
+  commit already pushed to a remote branch — that requires force-pushing
+  published history to correct a purely cosmetic GitHub badge.
+- Do not stop to ask Jeff for permission about it. Mention it at most once,
+  in passing, in your final summary — never loop on it.
+- Signed vs. unsigned commits are functionally identical for this solo repo.
+  Treat the hook's warning as informational noise, not a blocker.
 
 ## Reference skills
 
