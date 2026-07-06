@@ -48,7 +48,7 @@ import heronarts.lx.parameter.LXParameter;
  *     .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
  *   // constructor:
  *   this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
- *   addParameter("audio", this.audioDepth); // after pattern params, before sync/tempoDiv, Meta last
+ *   addParameter("audio", this.audioDepth); // after the pattern params (RndTrig sits with the triggers up front)
  * </pre>
  *
  * Depth semantics (consulted once per {@link #tick(double)}):
@@ -56,8 +56,9 @@ import heronarts.lx.parameter.LXParameter;
  * <li>depth = 0: every public tap reads exactly its silence value — bass /
  *     mid / treble / level and all ratios are 0.0, bassHit()/trebleHit() are
  *     never true. The pattern behaves as if the room were silent. (Exception:
- *     {@link #bassPulseRaw} is deliberately depth-independent, for couplings
- *     that carry their own depth control.)</li>
+ *     {@link #bassPulseRaw} and {@link #bassFast} are deliberately
+ *     depth-independent, for couplings that carry their own depth
+ *     control.)</li>
  * <li>depth = 1 (or no depth source attached): identical to the ungated
  *     behavior.</li>
  * <li>0 &lt; depth &lt; 1: magnitude taps (bass/mid/treble/level and the
@@ -116,6 +117,12 @@ public class AudioReactive {
   /** Hits are suppressed when the effective depth is at or below this */
   private static final double DEPTH_EPSILON = 0.01;
 
+  /** {@link #bassFast} attack/release time constants (ms): both under a 16th
+   *  note at 160 BPM (94 ms), so consecutive 16th-note hits register and
+   *  decay as distinct surges while sustained bass holds the level high. */
+  private static final double BASS_FAST_ATTACK_MS = 15;
+  private static final double BASS_FAST_RELEASE_MS = 85;
+
   private final LX lx;
   private final GraphicMeter meter;
 
@@ -138,6 +145,17 @@ public class AudioReactive {
    * bass-to-speed coefficient). Silence-safe: ~0 with no audio input.
    */
   public double bassPulseRaw;
+
+  /**
+   * Depth-independent smoothed bass level in 0..1 (dB-normalized band
+   * average, attack {@link #BASS_FAST_ATTACK_MS} / release
+   * {@link #BASS_FAST_RELEASE_MS}). Unlike {@link #bassPulseRaw} it is NOT
+   * trough- or average-referenced: sustained high bass HOLDS a high value,
+   * while the fast attack/release resolves 16th-note hits at 160 BPM as
+   * distinct surges. For couplings that carry their own depth control.
+   * Silence-safe: decays to ~0 with no audio input.
+   */
+  public double bassFast;
 
   /** Depth-independent smoothed levels; these keep tracking the real signal */
   private double smoothBass, smoothMid, smoothTreble, smoothLevel;
@@ -174,6 +192,10 @@ public class AudioReactive {
     this.smoothMid = smooth(this.smoothMid, rawMid, deltaMs);
     this.smoothTreble = smooth(this.smoothTreble, rawTreble, deltaMs);
     this.smoothLevel = smooth(this.smoothLevel, rawLevel, deltaMs);
+
+    // Fast level tap: same one-pole shape but with a sub-16th-note release
+    this.bassFast += (rawBass - this.bassFast)
+      * alpha(deltaMs, (rawBass > this.bassFast) ? BASS_FAST_ATTACK_MS : BASS_FAST_RELEASE_MS);
 
     final double avgAlpha = alpha(deltaMs, RUNNING_AVG_MS);
     this.avgBass += (rawBass - this.avgBass) * avgAlpha;

@@ -139,10 +139,9 @@ height chase) stays smooth and is never tempo-quantized. Default division:
   rule (grid-strict): finish on the next boundary, unless it is less than half
   a division away — then target the boundary after. Durations land in
   [0.5, 1.5) divisions; timer births fire *on* crossings, so they get exactly
-  1.0 division. `Sync` off: fixed free rise of 1.4 s (≈ the old default feel),
-  same envelope code path.
-- **Spontaneous mountain births initiate on the grid** — with `Sync` on, the
-  free-running Poisson timer is replaced by a `TempoLock.crossed(tempoDiv)`
+  1.0 division.
+- **Spontaneous mountain births initiate on the grid** — a
+  `TempoLock.crossed(tempoDiv)`
   per-frame gate: on each grid crossing a birth fires with probability
   `upliftRate × divisionMs / 1000`, preserving the same expected rate as the
   Poisson timer (capped at one birth per division cycle — at peak drive with
@@ -160,10 +159,9 @@ height chase) stays smooth and is never tempo-quantized. Default division:
 - **Not locked**: cataclysm/reseed triggers (fire when pressed; their terrain
   writes ride the background chase), erosion, subsidence, roughness jitter.
 
-`Sync` off restores free-running behavior: Poisson birth timer, 1.4 s rises,
-and the fixed 5 s flood ramp (`retime()` is not called; `crossed()` is
-still polled every frame with its result unused, so the gate stays fresh and
-re-enabling Sync cannot report a stale boundary and fire one spurious birth).
+The `Sync` toggle was removed 2026-07-06 — grid-locking of these ambient
+events is always on (triggers themselves fire immediately; the grid only
+shapes ambient timing and completion landing).
 CURATE: quarter-note default division for birth quantization
 unverified — at high BPM births may want `HALF`/`WHOLE` to stay stately.
 CURATE: sub-second envelope rises (e.g. 0.5 div at 160 BPM QUARTER ≈ 190 ms
@@ -188,7 +186,8 @@ The terrain chase rate (height/5 s) is **not** drive-scaled.
 
 ## Parameters
 
-UI order: triggers first, pattern parameters, Audio, Sync, TempoDiv, Meta last.
+UI order (2026-07-06 series convention): triggers first with RndTrig
+immediately after them, then pattern parameters, Audio, TempoDiv.
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
@@ -196,6 +195,7 @@ UI order: triggers first, pattern parameters, Audio, Sync, TempoDiv, Meta last.
 | `flood` | Flood | TriggerParameter | — | — | sea ramps to max, holds 2 s, drains back |
 | `reseed` | Reseed | TriggerParameter | — | — | morph to a fresh random terrain over ~5 s |
 | `erupt` | Erupt | TriggerParameter | — | — | raise one new mountain now, exactly as a spontaneous uplift would |
+| `rndTrig` | RndTrig | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
 | `upliftSize` | Uplift | CompoundParameter | 0.5 | 0..1 | amplitude of new mountain uplifts |
 | `erosion` | Erosion | CompoundParameter | 0.4 | 0..10, exponent 2 | diffusion + subsidence rate; quadratic knob (value = 10·knob²) gives fine low-end resolution, top is 10× the old max |
 | `rough` | Rough | CompoundParameter | 0.25 | 0..1 | terrain ruggedness: continuous ±2.7-row jitter bumps/divots, up to 25 /s per surface |
@@ -204,9 +204,12 @@ UI order: triggers first, pattern parameters, Audio, Sync, TempoDiv, Meta last.
 | `whiteCaps` | WhtCps | BooleanParameter | false | — | peaks band pure white; swatch color 0 discarded (no band shifting); TrbSprk crackles the peaks dark |
 | `trbSprk` | TrbSprk | CompoundParameter | 0.5 | 0..1 | treble-hit white flash burst coverage on the peaks |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth: 0 = pure screensaver, 1 = full reactivity |
-| `sync` | Sync | BooleanParameter | true | — | lock uplift rises + births + flood landing to the tempo grid |
-| `tempoDiv` | TempoDiv | EnumParameter\<Tempo.Division\> | QUARTER | divisions | grid that synced events land on |
-| `meta` | Meta | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
+| `tempoDiv` | TempoDiv | EnumParameter\<Tempo.Division\> | QUARTER | divisions | grid that uplift rises, births and flood landings land on |
+
+Removed/renamed 2026-07-06: `sync` path dropped (grid-locking is baked on;
+`UPLIFT_FREE_RISE_MS` free path deleted); `meta` → `rndTrig` (label Meta →
+RndTrig) and moved up next to the triggers. Saved `.lxp` references to the
+old paths are silently dropped on load.
 
 UI is Chromatik's default auto-generated control panel (no custom
 `UIDeviceControls`).
@@ -219,12 +222,12 @@ curation.
 ## Triggers
 
 Four non-meta triggers spanning small → large, all registered through the
-`TriggerBag` (so Meta can fire any of them):
+`TriggerBag` (so RndTrig can fire any of them):
 
 - `erupt` (small) — books a single new mountain on each surface, exactly the
   spontaneous-uplift recipe (drive-scaled amplitude and sigma, random
-  columns). With Sync on the rise completes on the next tempoDiv boundary
-  (≥ 0.5 div away); Sync off, 1.4 s. The subtlest permutation.
+  columns). The rise completes on the next tempoDiv boundary
+  (≥ 0.5 div away). The subtlest permutation.
 - `cataclysm` — adds a mountain-range ridge (0.85 H central peak + two 0.55 H
   shoulders, σ = 5% of ring) to both surfaces' targets and starts the shake: a
   spatial sine ripple (±2.5 rows, 7 Hz, decaying) across every column for
@@ -238,8 +241,8 @@ Four non-meta triggers spanning small → large, all registered through the
   the audio-driven level. Since the sea-rate change that drain is one full
   sweep per beat — a dramatic whoosh rather than the old 8 s ebb (accepted;
   if curation dislikes it, give `floodPhase` exit a dedicated slow drain
-  rate). With `Sync` on, the ramp rate is retimed (slow-down only, see Tempo
-  mapping) so the sea tops out on a `TempoDiv` boundary.
+  rate). The ramp rate is retimed (slow-down only, see Tempo mapping) so the
+  sea tops out on a `TempoDiv` boundary.
 - `reseed` — re-rolls both targets (random base 0.05–0.15 H plus 8 cube / 6
   cylinder random bumps, amp 0.25–0.8 H); displayed heights morph there under
   the rate limit, so the world transforms over ≤ 5 s. Deliberately unquantized.
@@ -316,8 +319,8 @@ visible; check it doesn't read as the sea "breathing wrong" against music.
 Other unverified constants: CURATE: `SEA_SWING` 0.45, `SEA_TAU_SEC` 0.35 and
 `DRIVE_TAU_SEC` 2 (sea pumps with dynamics without strobing; drive swings the
 uplift/erosion regime over phrases, not bars?). CURATE: spontaneous birth
-rates 0.06→0.5 /s, applied both as Poisson rate (Sync off) and per-crossing
-probability (Sync on) — is ambient lively enough / peak not cluttered?
+rates 0.06→0.5 /s, applied as per-crossing probability on the tempo grid —
+is ambient lively enough / peak not cluttered?
 CURATE: subsidence taus 120→30 s (do old ranges linger too long?).
 CURATE: `ROUGH_RATE_MAX_HZ` 25 / `ROUGH_AMP_FRAC` 0.06 (does Rough = 1 read
 as craggy or as boiling?). CURATE: bass gate drive ≥ 0.35 (old energy gate
@@ -333,3 +336,4 @@ CURATE: seed bump counts (8 cube / 6 cylinder) and base height 0.05–0.15 H.
 | 2026-07-05 | Integration pass: fixed the Sync-re-enable stale-gate nit reported to the util queue — `crossed()` is now polled unconditionally every frame (was inside the Sync-on ternary branch), matching the series idiom, so re-enabling Sync no longer fires one spurious off-grid birth; `TempoLock.crossed()` javadoc now states the unconditional-poll contract | Terraform agent's util request; fixed at the call site rather than with a heuristic in-util guard |
 | 2026-07-06 | Curation pass (7 changes, no visual verification yet): Erosion re-ranged 0..10 with `setExponent(2)` + diffusion sub-stepping and exact-exponential subsidence for stability; **Energy knob removed** — `drive` (τ = 2 s smoothed audio level) substitutes at every site; land band colors now palette-driven (peaks/rock/grass/sand ← swatch 0–3, Rubik fill rules) + `WhtCps` white-peaks toggle; uplifts became tempo-quantized eased envelopes (overlay + commit, grid-strict [0.5, 1.5) div, Sync-off 1.4 s); sea re-rated to one full sweep per beat with a fast τ = 0.35 s smoother + erosion-coupled `silt` raising the sea; added `Rough` jitter-bump knob; Sparkle → `TrbSprk` treble-hit white flash bursts (the old ≤ 45% snow *dimming* was invisible over bright snow and gated behind the removed energy > 0.5) | Jeff's curation notes: better low-end Erosion resolution and a real 10x top; Energy redundant; palette integration; beat-locked geology; the sea was imperceptible; terrain needed a ruggedness axis; sparkle was never visible with audio playing |
 | 2026-07-06 | Post-implementation review fixes (multi-angle code review, 8 findings): uplift envelopes now advance *before* the spawn decision (a just-booked rise was credited the pre-booking frame's deltaMs and peaked one frame ahead of the grid); bass-uplift gate made depth-relative (`drive ≥ 0.35 × depth()` — a fixed 0.35 gate silently disabled bass uplifts for any Audio knob < 0.35, since drive ≤ depth); flash amplitude now `depth()` instead of 1 (AudioReactive's scaled-hit-response contract — Audio = 0.05 must not strobe full white); WhtCps + TrbSprk interaction resolved (peaks crackle dark under white caps; white-on-white was a no-op); pool-overflow steal hands the eased fraction to `height[]` + remainder to the chase instead of committing full amplitude in one frame (terrain pop); `addBump`/`addOverlayBump` merged into one ±4σ-windowed `addGaussian` kernel (shape-divergence risk + ~2560 wasted Math.exp/frame at a full pool); silt ordering contract documented in code + doc; dead 1.02·H clamp removed from renderSurface, `hueWork` sized to its real capacity | review found the envelope/gate/flash regressions before hardware time; tempo-change-mid-rise un-quantizing noted and accepted (retime-once, flood idiom) |
+| 2026-07-06 | Series RndTrig/Sync cleanup: `meta` → `rndTrig` (label RndTrig) and moved to 5th, right after the triggers; `Sync` removed with grid-locking baked always-on (uplift rises, grid-gated births, flood-ramp retime); the Sync-off free paths (`UPLIFT_FREE_RISE_MS` 1.4 s rise, Poisson birth timer, unretimed flood ramp) deleted. `.lxp` values on the old `sync`/`meta` paths are dropped on load | Jeff 2026-07-06: RndTrig placement convention; remove Sync booleans — triggers are aligned in the composition timeline, ambient events stay tempo-locked |

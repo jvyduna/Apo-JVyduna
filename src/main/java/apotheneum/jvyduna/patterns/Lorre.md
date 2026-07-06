@@ -26,16 +26,17 @@ signature move).
   Canvases are copied to the exteriors via `canvas.copyTo(orientation, colors)`
   (or the brightness-multiplier overload when the bass pump is active), then
   interiors mirror via `copyCubeExterior()` / `copyCylinderExterior()`.
-- **Simulation**: up to 300 particles in a preallocated `double[3][300]`,
+- **Simulation**: up to 150 particles in a preallocated `double[3][150]`,
   integrating the Lorenz ODE (`dx=σ(y−x)`, `dy=x(ρ−z)−y`, `dz=xy−βz`; σ=10,
   β=8/3, ρ from the `Rho` knob) with clamped-dt forward Euler: fixed substeps
-  of ≤ 0.004 sim units, at most 12 per frame (longer frames dilate sim time
-  rather than destabilizing). Escape guard: any non-finite particle or one
+  of ≤ 0.004 sim units, at most 32 per frame (longer frames dilate sim time
+  rather than destabilizing; raised from 12 on 2026-07-06 so the full BassSpd
+  surge clears the clamp). Escape guard: any non-finite particle or one
   beyond radius 250 respawns near a fixed point C± = (±√(β(ρ−1)), ±√(β(ρ−1)),
   ρ−1). The constructor scatters the swarm and silently integrates 2 sim units
   so frame one already shows the butterfly.
 - **Particle lifecycle (Count / ring window)**: live particles occupy a ring
-  window `(head + k) % 300, k < activeCount` over the preallocated arrays,
+  window `(head + k) % 150, k < activeCount` over the preallocated arrays,
   reconciled to the `Count` knob once per frame. Decreases advance `head` —
   the **oldest particles are killed first** and their trails fade out via
   canvas decay; increases birth at the tail by **copying a random live
@@ -71,19 +72,26 @@ signature move).
 - **Trails**: `decay()` once per frame per canvas instead of clearing; heads by
   particle speed (below). Equal-channel decay preserves hue and integer
   truncation extinguishes trails fully to black — no gray-mush floor.
-- **Density reveal (Vis)**: only the first
-  `1 + round(vis × (activeCount − 1))` window slots are plotted; the rest
-  **keep simulating invisibly** (constant compute), so raising Vis is an
-  instant reveal. Vis 0 shows exactly one particle and its trail. Ring order is
-  uncorrelated with spatial position (chaotic mixing), so lowering Vis thins
-  density uniformly across the attractor rather than blanking a region.
+- **Density reveal (Vis%)**: only the first
+  `1 + round(vis/100 × (activeCount − 1))` window slots are plotted; the rest
+  **keep simulating invisibly** (constant compute), so raising Vis% is an
+  instant reveal. Vis% 0 shows exactly one particle and its trail. Ring order
+  is uncorrelated with spatial position (chaotic mixing), so lowering Vis%
+  thins density uniformly across the attractor rather than blanking a region.
   `CURATE:` mapping is linear; consider vis² if the low end needs finer
   control.
-- **Buffers**: everything (`pos`, `spd`, canvases, per-view cos/sin arrays) is
-  preallocated in the constructor. Zero allocation in the render path
-  (`LXColor.hsb`, `Random.nextDouble`, and `PerceptualHue` are all
-  allocation-free). Trigger handlers allocate nothing either; `TriggerBag.fire`
-  does event-rate logging allocation, which is accepted by convention.
+- **Color (palette)**: each particle is dealt a random color index at birth
+  (also on reseed and escape-respawn) in `[0, 60)` — 60 = LCM(1..5), reduced
+  mod the active swatch size at draw time, so the deal stays uniform when the
+  swatch grows or shrinks live, with no listener. The active swatch's ≤5
+  colors are read and h/s/b-decomposed **once per frame** (tint-blended when a
+  Tint crossfade is in flight); the per-particle path is flat array reads.
+- **Buffers**: everything (`pos`, `spd`, `colorIndex`, palette caches,
+  canvases, per-view cos/sin arrays) is preallocated in the constructor. Zero
+  allocation in the render path (`LXColor.hsb/.lerp/.h/.s/.b` and
+  `Random.nextDouble` are all allocation-free). Trigger handlers allocate
+  nothing either; `TriggerBag.fire` does event-rate logging allocation, which
+  is accepted by convention.
 - **Door columns**: only written via `SurfaceCanvas.copyTo`, which guards with
   `column.points.length`.
 
@@ -94,7 +102,7 @@ default 0), attached via `AudioReactive.setDepth(audioDepth)`. No per-site
 gating exists in the pattern — the taps themselves scale with depth. BassSpd is
 deliberately **independent of Audio** (2026-07-06, Jeff's request): it is its
 own depth control for the bass→speed coupling, reading the depth-independent
-`bassPulseRaw` tap, so the two knobs act independently on the same FFT data.
+`bassFast` tap, so the two knobs act independently on the same FFT data.
 The 2026-07-05 curation pass replaced the subtle ±30% dt level-breathing with
 two overt mechanisms (brightness pump, BassSpd) after review feedback that max
 reactivity was not visible enough.
@@ -116,56 +124,46 @@ reactivity was not visible enough.
     above its running average (`halfLife / (1 + 0.35·max(0, trebleRatio − 1))`)
     — busy hi-hats crisp the trails. (Unchanged.)
 - **BassSpd** (`bassSpd` knob, 0–1, default 0, **independent of Audio**) —
-  turns bass **transients** into a momentary speed surge relative to the
-  current Speed: `simRate = 0.045 × (Speed + bassSpd·pulse·max(Speed, 1))`
-  with `pulse = AudioReactive.bassPulseRaw` — the depth-independent,
-  trough-referenced rise of the bass band, 0..1, saturating at
-  `PULSE_FULL_RISE_DB = 6` dB above the recent trough
-  (`BASS_SPEED_MIN_BASE = 1`, `CURATE:`). Trough-referenced for the same
-  reason as hit detection (2026-07-06 `AudioReactive` tuning): at eighth-note
-  density the running average parks within ~4 dB of the peaks, so
-  ratio-vs-average signals starve — the trough reference keeps full margin at
-  any playback level, saturates on a real kick, and decays with the raw meter
-  (release 100 ms) well before the next beat at 160 BPM. At BassSpd 1 each
-  kick reads as a ~2× forward surge **at any orbit tempo** (the pre-2026-07-06
-  formula added absolute speed units of depth-gated smoothed bass:
-  imperceptible at high Speed, a steady offset rather than a pulse on
-  sustained basslines, and zeroed by Audio 0 — the 1–2 dB wobble of sustained
-  bass reads near pulse 0). The `max(Speed, 1)` floor keeps the Speed-0
-  behavior: a frozen swarm lurches forward only when the bass hits.
-  Silence-safe: the pulse reads ~0 with no audio input.
+  turns the bass **level** into a speed surge relative to the current Speed:
+  `simRate = 0.045 × (Speed + 16·bassSpd·drive·max(Speed, 1))` with
+  `drive = AudioReactive.bassFast` — the depth-independent, **level-based**
+  smoothed bass band (attack 15 ms, release 85 ms, both under the 94 ms 16th
+  note at 160 BPM). At BassSpd 1, saturated bass runs the sim at up to
+  **17× the current Speed** (`BASS_SPEED_GAIN = 16` `CURATE:` — 16× the
+  forward progress of the previous 2× ceiling, per Jeff: the pulse version
+  was still way too subtle). Level-based rather than trough-referenced
+  (2026-07-06): the previous `bassPulseRaw` drive decayed to ~0 within a
+  couple seconds of **sustained** bass as its trough tracker relaxed upward —
+  now a sustained high bass FFT level *holds* the speed elevated, while the
+  sub-16th-note attack/release still resolves individual 160 BPM 16th-note
+  hits as distinct hit-and-decay surges. The `max(Speed, 1)` floor keeps the
+  Speed-0 behavior: a frozen swarm lurches forward only when the bass does.
+  Silence-safe: the drive decays to ~0 with no audio input.
 - Removed 2026-07-05: the ±30% integration-dt level breathing. Its silence
   factor (0.7×) is folded into the Speed rebaseline calibration below, so
   depth-0 behavior is unchanged from the previous build.
 
 ## Tempo mapping
 
-The continuous motion (lobe orbit, Y rotation) is chaotic/smooth by design and
-is **never retimed** — only discrete regime-change instants lock to the grid,
-so tempo lock cannot interact with the ≥5 s traversal cap.
+Sync/TempoDiv and the whole trigger-deferral mechanism were **removed
+2026-07-06** (Jeff: triggers will be properly aligned in the composition
+timeline, so the pattern should not quantize them). Kick, Reseed, Tint and
+RndTrig-fired actions — including RndTrig parameter jumps — all execute
+immediately; `TempoLock` is no longer used by this pattern.
 
-- With **Sync on** (default), the three triggers — Kick, Reseed, Tint,
-  including RndTrig-fired ones (RndTrig routes through the same trigger
-  callbacks) — are **deferred to the next `TempoDiv` boundary** (default
-  **HALF**): the scatter/recolor lands on the grid like a musical hit. Deferral
-  latency is at most one division (1 s at 120 BPM HALF). Repeat fires within
-  one window coalesce into a single action.
-- `TempoLock.crossed(division)` is called once per frame unconditionally (even
-  with Sync off, where its result is unused) so the gate never goes stale — a
-  lapsed gate would treat any old boundary as "just crossed" and fire a
-  deferred trigger off-grid.
-- bassHit mini-kicks stay **audio-timed**, not grid-quantized — transients are
-  already musically placed.
-- RndTrig parameter jumps (rho/yRotSpd/trails/speed/hue) get the same deferral:
-  the bag routes jump actions through `TriggerBag.setJumpScheduler`, so with
-  Sync on a RndTrig-fired rho regime hop also lands on the grid. Repeat RndTrig
-  fires within one window coalesce (latest jump wins; the jump value is
-  chosen, and logged, at the boundary).
-- **Sync off**: triggers and RndTrig jumps fire immediately (the pattern's
-  original behavior, fully functional); anything pending when Sync turns off
-  is released on the next frame.
-- No `retime()` calls: there is no scheduled future arrival to nudge (particle
-  motion is chaotic), so only the `crossed()` gate is used.
+Tempo still drives two things, read directly from `lx.engine.tempo`:
+
+- **Y rotation (YRotDiv)**: one quarter turn per selected division (pattern-
+  local `RotDiv` enum: Off, 1/4, 1/2, 1 bar, 2, 4, 8, 16 bars; default
+  **4 bars** ≈ the old default rate at 120 BPM). Phase is accumulated
+  incrementally per frame (`Δangle = deltaMs / divisionMs × π/2`), so a live
+  BPM or division change alters the *rate* without snapping the angle. Off
+  freezes rotation.
+- **Tint crossfade duration**: one beat (`tempo.period`), captured at trigger
+  time (a BPM change mid-fade drifts the ending — accepted).
+
+bassHit mini-kicks stay **audio-timed** — transients are already musically
+placed.
 
 ## Desat mapping
 
@@ -181,47 +179,50 @@ Energy's two other former couplings were removed on 2026-07-05:
 
 ## Parameters
 
-UI order: triggers first, pattern parameters, audio pair, Sync, TempoDiv,
-RndTrig last.
+UI order (2026-07-06 series convention): triggers first with RndTrig
+immediately after them, then pattern parameters, audio pair last.
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
 | `kick` | Kick | TriggerParameter | — | — | perturb every live particle; swarm re-converges over ~5 s |
 | `reseed` | Reseed | TriggerParameter | — | — | re-scatter live particles in the attractor's bounding box |
-| `tint` | Tint | TriggerParameter | — | — | rotate base hue by a golden-ratio step (0.382) of the perceptual wheel |
+| `tint` | Tint | TriggerParameter | — | — | one-beat crossfade of every particle to its next palette color (mod swatch size) |
+| `rndTrig` | RndTrig | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
 | `desat` | Desat | CompoundParameter | 0.55 | 0–1 | white-hot desaturation of fast heads (0 = saturated, 1 = pastel) |
 | `rho` | Rho | CompoundParameter | 28 | 20–45 | Lorenz ρ; regime control (near-stable spirals low, wild chaos high) |
 | `speed` | Speed | CompoundParameter | 2.5 | 0–8, exp 2 | orbit tempo: 0 = frozen moment, 1 = 100% (old slowest), 2.5 = old default, 4 = old fastest, 8 = 800% (2× old fastest) |
-| `count` | Count | DiscreteParameter | 300 | 1–300 | simulated particles; kills oldest first, births emerge from the swarm; compute scales with it |
-| `vis` | Vis | CompoundParameter | 1 | 0–1 | density reveal ("#vis"): 0 = one particle + trail, 1 = whole swarm; hidden particles keep simulating |
+| `count` | Count | DiscreteParameter | 40 | 1–150 | simulated particles; kills oldest first, births emerge from the swarm; compute scales with it |
+| `vis` | Vis% | CompoundParameter | 50 | 0–100 (%) | density reveal: 0 = one particle + trail, 100 = whole swarm; hidden particles keep simulating |
 | `yPos` | YPos | CompoundParameter | 0 | −0.5–0.5 | attractor vertical position: ±50% of the sculpture height below/above |
-| `yRotSpd` | YRotSpd | CompoundParameter | 0.75 | 0–1 | Y-rotation speed; 1 = one revolution / 30 s |
+| `yRotDiv` | YRotDiv | EnumParameter&lt;RotDiv&gt; | 4 bars | Off, 1/4 – 16 bars | one quarter turn per division; Off freezes rotation |
 | `trails` | Trails | CompoundParameter | 0.5 | 0–1 | trail half-life, exp 150 ms – 1.2 s |
-| `hue` | Hue | CompoundParameter | 0.58 | 0–1 | base hue (perceptual position; default classic Lorenz blue) |
-| `audio` | Audio | CompoundParameter | 0 | 0–1 | audio reactivity depth; 0 = pure screensaver |
-| `bassSpd` | BassSpd | CompoundParameter | 0 | 0–1 | bass transient → speed pulse, independent of Audio: a kick momentarily multiplies orbit tempo, up to 2× at full |
-| `sync` | Sync | BooleanParameter | true | — | defer triggers and RndTrig jumps to the tempo grid; off = fire immediately |
-| `tempoDiv` | TempoDiv | EnumParameter&lt;Tempo.Division&gt; | HALF | all divisions | grid that deferred triggers and RndTrig jumps land on |
-| `rndTrig` | RndTrig | TriggerParameter | — | — | randomly fire a trigger or jump a parameter (formerly Meta) |
+| `audio` | Audio | CompoundParameter | 0 | 0–1 | audio depth: bass hits mini-kick the swarm, bass pumps brightness, treble shortens trails |
+| `bassSpd` | BassSpd | CompoundParameter | 0 | 0–1 | bass level → speed, independent of Audio: up to ~17× current Speed at full, holds under sustained bass |
 
 Renames 2026-07-05 (labels **and** paths, per curation): Energy→Desat,
-Rotate→YRotSpd, Meta→RndTrig. Saved Lorre instances from earlier project files
-reset those knobs (and Speed, whose scale changed) to defaults on load.
+Rotate→YRotSpd, Meta→RndTrig. Removed/re-ranged 2026-07-06: `hue`, `sync`,
+`tempoDiv`, `yRotSpd` paths dropped (saved values silently ignored on load);
+`yRotDiv` is a new path; `vis` re-ranged 0–1 → 0–100 in place, so an old saved
+1.0 loads as 1% (near-single-particle — reset it); old `count` values clamp to
+150 and the default dropped 300 → 40.
 
 UI is Chromatik's default auto-generated control panel (no custom
 `UIDeviceControls`).
 
 ## Triggers
 
-Three non-meta triggers spanning small → large. With Sync on, all three defer
-to the next TempoDiv boundary (see Tempo mapping); repeat fires within one
-window coalesce. All operate on the live (Count) window only.
+Three non-meta triggers spanning small → large, all executing immediately
+(alignment is the composition timeline's job). All operate on the live (Count)
+window only.
 
-- `tint` (small) — the base hue steps by 0.382 (golden-ratio conjugate) around
-  the perceptual wheel, wrapping in [0, 1). Instant recolor of heads; trails
-  cross-fade to the new hue over one trail half-life. Repeated tints visit the
-  whole wheel without early repeats. `CURATE:` step size should read as a clear
-  but non-jarring recolor.
+- `tint` (small) — a **one-beat crossfade** of every particle from its palette
+  color to the next swatch color (`+1 mod` swatch size), implemented as a
+  global committed offset plus a blend phase: the ≤5 cached swatch colors are
+  RGB-lerped toward their successors once per frame, and on completion the
+  offset advances. Retriggering mid-fade commits the in-flight target and
+  restarts toward the next color (hammering Tint walks the swatch, never
+  snaps back). With a 1-color swatch it is a no-op. `CURATE:` confirm the
+  one-beat fade reads as a musical recolor.
 - `kick` (large) — every particle is offset by a uniform random vector in ±25
   units. The screen explodes into scattered dust, then the attractor's strong
   transverse contraction pulls the swarm back onto the butterfly — visibly
@@ -238,10 +239,12 @@ updated during curation.
 | Param | Jump range | Status | Notes |
 |---|---|---|---|
 | `rho` | [24, 40] | candidate | regime-hopping — best jump in the suite |
-| `yRotSpd` | [0.15, 1.0] | candidate | floor avoids a dead-stop rotation jump |
+| `yRotDiv` | [4 bars, 16 bars] | candidate | ordinal window over the slow divisions; never jumps to Off or the fast end (replaces the old yRotSpd [0.15, 1.0]) |
 | `trails` | full [0, 1] | candidate | |
 | `speed` | [1.5, 3.5] | candidate | re-ranged 2026-07-05 from [0.6, 1.4] into the rebaselined units — same musical window, keeps dt stable and avoids a frozen jump |
-| `hue` | full [0, 1] | candidate | |
+
+(`hue` was a jump candidate until 2026-07-06, removed with the knob — color now
+comes from the palette.)
 
 Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [a,b]`.
 
@@ -253,28 +256,33 @@ a glitch (mass die-off, blackout, attractor teleport), not a musical hit.
 **Lobe orbit tempo** (`CURATE:` the rebaselined `SIM_RATE_AT_SPEED_1 = 0.045`):
 one orbit around a lobe takes ≈ 0.73 Lorenz time units at ρ=28 (measured: mean
 z-maximum period 0.727 over 2,752 loops). `simRate = 0.045 × (Speed +
-bassSpd·pulse·max(Speed, 1))` with `pulse = bassPulseRaw` (0..1, trough-
-referenced bass rise); wall time = 0.73 / simRate:
+16·bassSpd·drive·max(Speed, 1))` with `drive = bassFast` (0..1, level-based
+smoothed bass); wall time = 0.73 / simRate:
 
-- Default (Speed 2.5, silence or depth 0): simRate = 0.1125 → orbit ≈ **6.5 s**
-  — numerically the old default (0.113), inside the 4–8 s target. Speed 1
-  (100%) = old knob minimum → 16.2 s. Speed 0 = frozen moment (integration
-  skipped entirely; rotation, trails, triggers and mini-kicks still run).
+- Default (Speed 2.5, silence or BassSpd 0): simRate = 0.1125 → orbit ≈
+  **6.5 s** — numerically the old default (0.113), inside the 4–8 s target.
+  Speed 1 (100%) = old knob minimum → 16.2 s. Speed 0 = frozen moment
+  (integration skipped entirely; rotation, trails, triggers and mini-kicks
+  still run).
 - Speed knob max (8 = 2× old fastest): simRate = 0.36 → orbit 2.0 s, heads
   ≈ 58 px/s at ρ=28 — *below* the previously analyzed extreme (0.466 / 75
   px/s), so the prior analysis holds: this is local orbiting confined within
   one ≈48-column view, texture rather than sculpture traversal.
-- Absolute max (Speed 8 + BassSpd 1 + saturated pulse): simRate =
-  0.045 × 16 = 0.72 → orbit ≈ 1.0 s, heads ≈ 115 px/s — above the previously
-  analyzed sustained extreme (75 px/s), but only for the duration of a kick
-  transient (the pulse decays with the raw meter, ≲100 ms), still confined
-  within one ≈48-column view, and the baseline (between kicks) is the plain
-  Speed rate. `CURATE:` confirm the bass surge reads as pulsing-forward, not
-  strobing, at high Speed.
+- Absolute max (Speed 8 + BassSpd 1 + saturated bass): simRate =
+  0.045 × (8 + 16×8) = 6.12 → the swarm blurs into streaks for the duration
+  of the bass (the 85 ms release returns it to the plain Speed rate between
+  hits). This is the deliberate 16× "bass slams the swarm forward" read Jeff
+  asked for; still confined within one ≈48-column view. Default Speed 2.5 at
+  full BassSpd + saturated bass: simRate 1.91, orbit ≈ 0.4 s. `CURATE:`
+  confirm the surge reads as slamming-forward, not strobing, and that
+  moderate BassSpd values (~0.2–0.5) give the musical middle ground.
 
-**Rotation** (the only true full-sculpture sustained motion): max
-`ROTATION_MAX_REV_PER_SEC = 1/30` → one full revolution = full horizontal
-traversal in **30 s ≥ 5 s** even at YRotSpd=1; default 0.75 → 40 s.
+**Rotation** (the only true full-sculpture sustained motion): tempo-relative
+via YRotDiv, one quarter turn per division — a full revolution takes 4
+divisions: at 120 BPM, 1/4 → 8 s/rev (the fastest choice; still ≥ 5 s), the
+4-bar default → 32 s/rev (≈ the old default 40 s), 16 bars → 128 s/rev. At
+extreme BPM the 1/4 choice can dip below 5 s/rev (e.g. 180 BPM → 5.3 s/rev is
+still fine; `CURATE:` avoid 1/4 at very high BPM if it strobes).
 
 **Kick re-convergence ≈ 5 s** (measured off-line: 100 particles kicked ±25 off
 a settled swarm at rate 0.113 sim/s — numerically the current default;
@@ -291,16 +299,20 @@ Average error is sub-pixel by ~5 s (1 Lorenz unit ≈ 0.7 px at cube scale).
 sculpture.
 
 **Integration stability**: forward Euler at h ≤ 0.004 sim units with a
-12-substep/frame cap and an escape-guard respawn. Verified off-line: zero
-escapes over 300 particles × 900 sim units at both ρ=28 and ρ=40. The absolute
-max simRate (0.72) stays well inside the substep cap (0.004 × 12 = 0.048 sim
-units/frame supports simRate ≤ ~2.9 at 60 FPS before time dilation).
+32-substep/frame cap and an escape-guard respawn. Verified off-line: zero
+escapes over 300 particles × 900 sim units at both ρ=28 and ρ=40 (the original
+stability run; per-substep h is unchanged). The absolute max simRate (6.12)
+stays inside the raised substep cap (0.004 × 32 = 0.128 sim units/frame
+supports simRate ≤ ~7.7 at 60 FPS before time dilation); worst-case cost is
+26 substeps × 150 particles ≈ the old 12 × 300, so CPU is unchanged.
 
 **Contrast / brightness**: bold point-swarm forms, no fine texture. Brightness
 by particle speed with a 0.3 floor (slow lobe-center particles stay visible at
-LED distance); fast heads desaturate toward white-hot (Desat knob), slow
-particles stay saturated; small perceptual hue spread (0.12) across the
-attractor's height for depth cueing. Trails decay equal-channel (hue-preserving)
+LED distance); fast heads desaturate toward white-hot (Desat knob) relative to
+their palette color's own saturation, slow particles stay saturated; a small
+hue spread (±12°, `HUE_SPREAD_DEG = 24` `CURATE:`) centered on each particle's
+palette hue across the attractor's height for depth cueing. Trails decay
+equal-channel (hue-preserving)
 and truncate fully to black; max half-life is capped at 1.2 s so trails never
 wash into gray mush. The bass brightness pump multiplies output up to 1.6×
 (clamped at 255 per channel in `copyTo`).
@@ -314,3 +326,4 @@ wash into gray mush. The bass brightness pump multiplies output up to 1.6×
 | 2026-07-05 | Integration pass: util request granted — `TriggerBag.setJumpScheduler` added, and Meta parameter jumps now defer to the TempoDiv grid via the same pending mechanism as the triggers (`requestJump`/`pendingJump`, latest-wins coalescing, released immediately on Sync off). CURATE: unverified visually — confirm a deferred rho hop landing on a HALF boundary reads as a musical hit | Lorre agent + reviewer both requested the TriggerBag deferral hook; wired it end-to-end |
 | 2026-07-05 | Curation pass (Jeff's review): **Speed rebaselined** to 0–8 with exponent 2 (`SIM_RATE_AT_SPEED_1 = 0.045` absorbs the removed energy/silence factors; 0 = frozen moment, 1 = old slowest, 2.5 = default = old look, 8 = 2× old fastest; RndTrig jump range re-ranged to [1.5, 3.5]). **Renames** (labels + paths): Energy→`Desat` (now pure desaturation 0–1, default 0.55 ≈ old look; sim-rate and mini-kick couplings removed), Rotate→`YRotSpd`, Meta→`RndTrig`. **New params**: `Count` (1–300 ring window, kills oldest first, births copy a live particle + ±1 jitter — `CURATE:` jitter size; compute scales with count), `Vis` (density reveal, ring-order gating, hidden particles keep simulating — `CURATE:` linear vs vis² low end), `YPos` (±50% sculpture-height vertical offset), `BassSpd` (bass→timebase accumulation, `BASS_SPEED_GAIN = 4` `CURATE:`). **Audio punch**: dt level-breathing removed; added bass brightness pump (`BASS_PUMP = 0.6` `CURATE:`) and fixed mini-kick 10 × depth (`CURATE:`). All `CURATE:` items unverified on sculpture; saved project knobs for renamed/re-scaled params reset on load (accepted) | Jeff's curation review notes 2026-07-05 |
 | 2026-07-06 | **BassSpd rework**: additive-absolute smoothed-bass term (`0.045 × (Speed + 4·bassSpd·bass)`) → Speed-relative transient pulse (`0.045 × (Speed + bassSpd·pulse·max(Speed, 1))`, `pulse = bassPulseRaw`; `BASS_SPEED_MIN_BASE = 1` `CURATE:`). Signal switched from depth-gated `bass` (250 ms-release EMA — near-constant on sustained bass, and imperceptible as an absolute-units boost at high Speed) to the new **`bassPulseRaw`** tap in `AudioReactive`: depth-independent, trough-referenced bass rise saturating at `PULSE_FULL_RISE_DB = 6` dB — same trough reference as the 160 BPM hit-detection tuning, since ratio-vs-average signals starve at eighth-note density; attacks with the meter on a kick, decays (release 100 ms) before the next beat, sustained bass wobble (1–2 dB) reads ~0. No new decay knob needed. **Decoupled from Audio** (Jeff's request): BassSpd is its own depth control; default dropped 0.5 → 0 so default knobs remain a pure screensaver. `max(Speed, 1)` floor preserves the Speed-0 lurch. New absolute max simRate 0.72 (transient-only), still inside the substep cap | Jeff: BassSpd imperceptible on bass-heavy 160 BPM music — must scale relative to current Speed (~2× at full), visibly jump on each kick settling before the next beat, and act independently of the Audio knob |
+| 2026-07-06 | Curation pass 2 (Jeff's review): **YRotSpd → `YRotDiv`** (pattern-local RotDiv enum: Off + 1/4…16 bars; one quarter turn per division, incremental phase accumulation so BPM/division changes never snap the angle; default 4 bars ≈ old rate; jump window [4 bars, 16 bars]). **Hue removed — palette color**: per-particle random swatch index dealt at birth/reseed/respawn (`COLOR_INDEX_WRAP = 60` = LCM(1..5), mod swatch size at draw); swatch cached + h/s/b-decomposed once per frame; `HUE_SPREAD_DEG = 24` `CURATE:`. **Tint** is now a one-beat crossfade advancing every particle +1 swatch color (retrigger commits + restarts). **Count** max 300 → 150, default 40. **Vis → Vis%** (0–100, `Units.PERCENT`, default 50). **BassSpd ×16** (`BASS_SPEED_GAIN = 16` `CURATE:`): drive switched `bassPulseRaw` → new level-based `AudioReactive.bassFast` (attack 15 ms / release 85 ms, both < a 160 BPM 16th note) so sustained bass holds the speed-up instead of decaying with the trough tracker; `MAX_SUBSTEPS` 12 → 32 so the surge clears the dt clamp (max simRate 6.12 < cap 7.7). **Sync/TempoDiv removed** with the whole deferral mechanism — triggers and RndTrig jumps fire immediately (composition timeline aligns them). **Param order**: RndTrig moved up to 4th, right after the triggers (series convention). .lxp fallout accepted: hue/sync/tempoDiv/yRotSpd paths dropped, vis re-ranged in place (old 1.0 → 1%) | Jeff's curation review notes 2026-07-06: BassSpd still way too subtle (16× forward progress, sustained bass must hold); palette-driven color; triggers aligned in composition |

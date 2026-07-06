@@ -5,17 +5,15 @@ import java.util.Random;
 import apotheneum.Apotheneum;
 import apotheneum.ApotheneumPattern;
 import apotheneum.jvyduna.util.AudioReactive;
-import apotheneum.jvyduna.util.PerceptualHue;
 import apotheneum.jvyduna.util.Ranges;
 import apotheneum.jvyduna.util.SurfaceCanvas;
-import apotheneum.jvyduna.util.TempoLock;
 import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
 import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
-import heronarts.lx.parameter.BooleanParameter;
+import heronarts.lx.color.LXSwatch;
 import heronarts.lx.parameter.CompoundParameter;
 import heronarts.lx.parameter.DiscreteParameter;
 import heronarts.lx.parameter.EnumParameter;
@@ -26,7 +24,7 @@ import heronarts.lx.parameter.TriggerParameter;
  * of particles tracing the two-lobed Lorenz butterfly attractor, slowly rotating
  * about its vertical axis, with speed-lit fading trails.
  *
- * Up to 300 particles (Count) integrate the Lorenz ODE (sigma = 10, beta = 8/3, rho adjustable)
+ * Up to 150 particles (Count) integrate the Lorenz ODE (sigma = 10, beta = 8/3, rho adjustable)
  * in its natural coordinates, are rotated about the attractor's vertical z axis,
  * and are orthographically projected into two SurfaceCanvases (cube exterior ring
  * 200x45, cylinder 120x43). The cube canvas holds four views of the same attractor
@@ -37,17 +35,22 @@ import heronarts.lx.parameter.TriggerParameter;
  * Signature move: the Kick trigger punts every particle off the attractor and the
  * swarm visibly re-converges onto the butterfly over a few seconds.
  *
+ * Color comes from the active palette swatch: each particle is dealt a random
+ * swatch color at birth, and the Tint trigger crossfades every particle to its
+ * next swatch color (mod swatch size) over one beat.
+ *
  * Audio reactivity is gated by the standard Audio depth knob (default 0 = pure
  * screensaver): bass pumps the output brightness and bass transients fire
  * mini-kicks. BassSpd is deliberately independent of the Audio knob and acts
- * as its own depth control: it turns bass transients (depth-independent
- * bassPulseRaw, the trough-referenced rise of the bass band) into a momentary
- * speed surge relative to the current Speed, so particles pulse forward on
- * drumbeats at any orbit tempo. Both knobs default to 0 = pure screensaver.
- * With Sync on, trigger
- * moments (Kick/Reseed/Tint, including RndTrig-fired ones) are deferred to the
- * next TempoDiv grid boundary; the continuous orbit and rotation are never
- * retimed.
+ * as its own depth control: it turns the bass level (depth-independent
+ * bassFast, a fast-attack/fast-release smoothed band level) into a speed
+ * surge of up to ~17x the current Speed, so particles lurch forward on
+ * drumbeats and stay accelerated under sustained bass. Both knobs default
+ * to 0 = pure screensaver.
+ *
+ * Triggers (Kick/Reseed/Tint, including RndTrig-fired ones) execute
+ * immediately; alignment to the music happens in the composition timeline.
+ * Y rotation is tempo-relative: one quarter turn per YRotDiv division.
  *
  * See Lorre.md (beside this file) for the full design note.
  */
@@ -59,7 +62,7 @@ public class Lorre extends ApotheneumPattern {
   // ---- Lorenz system --------------------------------------------------------
 
   /** Maximum swarm particles; the Count knob activates 1..NUM_PARTICLES of them */
-  private static final int NUM_PARTICLES = 300;
+  private static final int NUM_PARTICLES = 150;
 
   private static final double SIGMA = 10;         // classic Lorenz sigma
   private static final double BETA = 8.0 / 3.0;   // classic Lorenz beta
@@ -80,8 +83,12 @@ public class Lorre extends ApotheneumPattern {
    */
   private static final double MAX_SUBSTEP_DT = 0.004;
 
-  /** Max substeps per frame; longer frames dilate sim time instead of exploding */
-  private static final int MAX_SUBSTEPS = 12;
+  /**
+   * Max substeps per frame; longer frames dilate sim time instead of exploding.
+   * Sized so the worst case (Speed 8 + saturated bass at full BassSpd,
+   * simDt ~ 0.102 at 60 fps) clears the clamp with headroom.
+   */
+  private static final int MAX_SUBSTEPS = 32;
 
   /** Respawn a particle if it strays this far from the origin (attractor lives within ~100 even at rho = 45) */
   private static final double ESCAPE_RADIUS = 250;
@@ -106,21 +113,21 @@ public class Lorre extends ApotheneumPattern {
   private static final double MINI_KICK_MAGNITUDE = 10;
 
   /**
-   * Tint trigger: perceptual hue step. Golden-ratio conjugate, so repeated tints
-   * walk the whole wheel without early repeats. CURATE: step should read as a
-   * clear but non-jarring recolor.
-   */
-  private static final double TINT_STEP = 0.382;
-
-  /**
-   * Floor on the Speed value the BassSpd pulse scales against, preserving the
-   * frozen-swarm lurch: at Speed 0 a kick still adds up to 1 speed unit. The
-   * pulse itself (AudioReactive.bassPulseRaw) is 0..1, saturating on a real
-   * kick, so at BassSpd = 1 a kick momentarily runs the sim at 2x the current
-   * Speed -- relative to Speed, so it stays perceptible at any orbit tempo,
-   * and independent of the Audio depth knob. CURATE.
+   * Floor on the Speed value the BassSpd drive scales against, preserving the
+   * frozen-swarm lurch: at Speed 0 full bass still adds speed. Relative to
+   * Speed, so the surge stays perceptible at any orbit tempo, and independent
+   * of the Audio depth knob. CURATE.
    */
   private static final double BASS_SPEED_MIN_BASE = 1;
+
+  /**
+   * Bass drive to sim-rate gain: at BassSpd = 1, saturated bass runs the sim
+   * at up to (1 + 16)x the current Speed -- 16x the forward progress of the
+   * old 2x ceiling. The drive (AudioReactive.bassFast) is level-based, not
+   * trough-referenced, so sustained bass keeps the sim accelerated while its
+   * fast attack/release still resolves 16th-note hits at 160 BPM. CURATE.
+   */
+  private static final double BASS_SPEED_GAIN = 16;
 
   /** Output brightness pump per unit of depth-scaled bass: up to a 1.6x flash. CURATE. */
   private static final double BASS_PUMP = 0.6;
@@ -132,11 +139,6 @@ public class Lorre extends ApotheneumPattern {
 
   /** Jitter (Lorenz units) applied to a newborn particle copied off a live one. CURATE. */
   private static final double BIRTH_JITTER = 1;
-
-  // ---- Motion caps ------------------------------------------------------------
-
-  /** Fastest Y rotation (Rotate = 1): one full revolution in 30 s (>= 30 s per brief) */
-  private static final double ROTATION_MAX_REV_PER_SEC = 1.0 / 30.0;
 
   // ---- Projection ---------------------------------------------------------------
 
@@ -171,8 +173,20 @@ public class Lorre extends ApotheneumPattern {
   /** Brightness floor so slow (lobe-center) particles stay visible at LED distance */
   private static final double BRIGHTNESS_FLOOR = 0.3;
 
-  /** Perceptual hue spread across the attractor's height, for depth cueing. CURATE. */
-  private static final double HUE_SPREAD = 0.12;
+  /**
+   * Hue spread (degrees) across the attractor's height, centered on each
+   * particle's palette hue, for depth cueing. +-12 degrees keeps every
+   * particle unambiguously "its" swatch color. CURATE.
+   */
+  private static final double HUE_SPREAD_DEG = 24;
+
+  /**
+   * Per-particle color indices are dealt in [0, 60) and reduced mod the swatch
+   * size at draw time; 60 = LCM(1..5) keeps the deal uniform for any swatch
+   * size up to LXSwatch.MAX_COLORS, so the swatch can grow or shrink live
+   * without re-dealing.
+   */
+  private static final int COLOR_INDEX_WRAP = 60;
 
   // ---- Trails ------------------------------------------------------------------
 
@@ -182,19 +196,48 @@ public class Lorre extends ApotheneumPattern {
 
   // ---- Parameters ----------------------------------------------------------------
 
+  /** Y-rotation rate choices: one quarter turn per division period, or frozen */
+  public enum RotDiv {
+    OFF("Off", null),
+    QUARTER("1/4", Tempo.Division.QUARTER),
+    HALF("1/2", Tempo.Division.HALF),
+    WHOLE("1 bar", Tempo.Division.WHOLE),
+    DOUBLE("2 bars", Tempo.Division.DOUBLE),
+    FOUR("4 bars", Tempo.Division.FOUR),
+    EIGHT("8 bars", Tempo.Division.EIGHT),
+    SIXTEEN("16 bars", Tempo.Division.SIXTEEN);
+
+    public final String label;
+    public final Tempo.Division division; // null = frozen
+
+    RotDiv(String label, Tempo.Division division) {
+      this.label = label;
+      this.division = division;
+    }
+
+    @Override
+    public String toString() {
+      return this.label;
+    }
+  }
+
   private final TriggerBag bag = new TriggerBag("Lorre");
 
   public final TriggerParameter kick = bag.register(
-    new TriggerParameter("Kick", this::requestKick)
+    new TriggerParameter("Kick", this::kickSwarm)
     .setDescription("Punt every particle off the attractor; the swarm re-converges over ~5s"));
 
   public final TriggerParameter reseed = bag.register(
-    new TriggerParameter("Reseed", this::requestReseed)
+    new TriggerParameter("Reseed", this::reseedSwarm)
     .setDescription("Re-scatter all particles uniformly in the attractor's bounding box"));
 
   public final TriggerParameter tint = bag.register(
-    new TriggerParameter("Tint", this::requestTint)
-    .setDescription("Rotate the base hue by a golden-ratio step of the perceptual wheel"));
+    new TriggerParameter("Tint", this::tintSwarm)
+    .setDescription("Crossfade every particle to its next palette color over one beat"));
+
+  public final TriggerParameter rndTrig =
+    new TriggerParameter("RndTrig", bag::fire)
+    .setDescription("Randomly fire a trigger or jump a parameter");
 
   public final CompoundParameter desat =
     new CompoundParameter("Desat", 0.55)
@@ -209,66 +252,62 @@ public class Lorre extends ApotheneumPattern {
     .setDescription("Orbit tempo: 0 = frozen moment, 1 = 100% (slowest orbit), 8 = 800%");
 
   public final DiscreteParameter count =
-    new DiscreteParameter("Count", NUM_PARTICLES, 1, NUM_PARTICLES + 1)
+    new DiscreteParameter("Count", 40, 1, NUM_PARTICLES + 1)
     .setDescription("Simulated particles: decreases kill oldest first, increases birth out of the live swarm");
 
   public final CompoundParameter vis =
-    new CompoundParameter("Vis", 1)
-    .setDescription("Density reveal (#vis): 0 = a single particle and its trail, 1 = the whole swarm; hidden particles keep simulating");
+    new CompoundParameter("Vis%", 50, 0, 100)
+    .setUnits(CompoundParameter.Units.PERCENT)
+    .setDescription("Density reveal: 0 = a single particle and its trail, 100 = the whole swarm; hidden particles keep simulating");
 
   public final CompoundParameter yPos =
     new CompoundParameter("YPos", 0, -0.5, 0.5)
     .setDescription("Attractor vertical position: -0.5 = 50% below the sculpture, +0.5 = 50% above");
 
-  public final CompoundParameter yRotSpd =
-    new CompoundParameter("YRotSpd", 0.75, 0, 1)
-    .setDescription("Y-rotation speed: 0 = none, 1 = one revolution per 30s");
+  public final EnumParameter<RotDiv> yRotDiv =
+    new EnumParameter<RotDiv>("YRotDiv", RotDiv.FOUR)
+    .setDescription("Y-rotation rate: one quarter turn per division; Off freezes rotation");
 
   public final CompoundParameter trails =
     new CompoundParameter("Trails", 0.5, 0, 1)
     .setDescription("Trail persistence: half-life 150ms - 1.2s");
 
-  public final CompoundParameter hue =
-    new CompoundParameter("Hue", 0.58, 0, 1)
-    .setDescription("Base hue (perceptual position; default is Lorenz-classic blue)");
-
   public final CompoundParameter audioDepth =
     new CompoundParameter("Audio", 0)
-    .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
+    .setDescription("Audio depth: bass hits mini-kick the swarm, bass pumps output brightness, treble shortens trails; 0 = pure screensaver");
 
   public final CompoundParameter bassSpd =
     new CompoundParameter("BassSpd", 0)
-    .setDescription("Bass transient to speed pulse, independent of the Audio knob: a kick momentarily multiplies the orbit tempo, up to 2x at full");
-
-  public final BooleanParameter sync =
-    new BooleanParameter("Sync", true)
-    .setDescription("Lock motion events to the tempo grid; off restores free-running timing");
-
-  public final EnumParameter<Tempo.Division> tempoDiv =
-    new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.HALF)
-    .setDescription("Tempo division that motion events land on when Sync is enabled");
-
-  public final TriggerParameter rndTrig =
-    new TriggerParameter("RndTrig", bag::fire)
-    .setDescription("Randomly fire a trigger or jump a parameter");
+    .setDescription("Bass level to speed, independent of the Audio knob: drives the orbit tempo up to ~17x the current Speed at full, holding under sustained bass");
 
   // ---- State (all preallocated; zero allocation in render) ----------------------
 
   private final AudioReactive audio;
-  private final TempoLock tempoLock;
   private final Random random = new Random();
-
-  /** Sync-deferred triggers pending execution on the next tempo-grid boundary */
-  private boolean pendingKick, pendingReseed, pendingTint;
-
-  /** Sync-deferred RndTrig parameter jump (latest wins), or null if none pending */
-  private Runnable pendingJump = null;
 
   /** Particle positions in Lorenz coordinates: [axis x/y/z][particle] */
   private final double[][] pos = new double[3][NUM_PARTICLES];
 
   /** Last integration-step speed |v| per particle, for brightness */
   private final double[] spd = new double[NUM_PARTICLES];
+
+  /** Per-particle palette color index in [0, COLOR_INDEX_WRAP), dealt at birth */
+  private final int[] colorIndex = new int[NUM_PARTICLES];
+
+  /** Committed global shift applied to every colorIndex, advanced by Tint */
+  private int tintOffset = 0;
+
+  /** In-flight Tint crossfade (one beat, captured at trigger time) */
+  private boolean tintActive = false;
+  private double tintElapsedMs = 0;
+  private double tintDurationMs = 1;
+
+  // Per-frame cache of the active swatch, tint-blended and decomposed once
+  // (at most LXSwatch.MAX_COLORS entries) so the per-particle path stays flat
+  private final int[] palColor = new int[LXSwatch.MAX_COLORS];
+  private final float[] palHue = new float[LXSwatch.MAX_COLORS];
+  private final float[] palSat = new float[LXSwatch.MAX_COLORS];
+  private final float[] palBri = new float[LXSwatch.MAX_COLORS];
 
   /**
    * Live-particle ring window: slots (head + k) % NUM_PARTICLES for
@@ -294,7 +333,6 @@ public class Lorre extends ApotheneumPattern {
   public Lorre(LX lx) {
     super(lx);
     this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
-    this.tempoLock = new TempoLock(lx);
 
     // Fine control near the frozen end; 0/1/2/4/8 are the meaningful stops
     this.speed.setExponent(2);
@@ -302,31 +340,23 @@ public class Lorre extends ApotheneumPattern {
     addParameter("kick", this.kick);
     addParameter("reseed", this.reseed);
     addParameter("tint", this.tint);
+    addParameter("rndTrig", this.rndTrig);
     addParameter("desat", this.desat);
     addParameter("rho", this.rho);
     addParameter("speed", this.speed);
     addParameter("count", this.count);
     addParameter("vis", this.vis);
     addParameter("yPos", this.yPos);
-    addParameter("yRotSpd", this.yRotSpd);
+    addParameter("yRotDiv", this.yRotDiv);
     addParameter("trails", this.trails);
-    addParameter("hue", this.hue);
     addParameter("audio", this.audioDepth);
     addParameter("bassSpd", this.bassSpd);
-    addParameter("sync", this.sync);
-    addParameter("tempoDiv", this.tempoDiv);
-    addParameter("rndTrig", this.rndTrig);
 
     // Jump candidates -- each line mirrors a row in Lorre.md's Jump-candidates table
     bag.jumpable(this.rho, 24, 40);          // regime-hopping, best jump in the suite
-    bag.jumpable(this.yRotSpd, 0.15, 1.0);   // avoid a dead-stop jump
+    bag.jumpable(this.yRotDiv, RotDiv.FOUR.ordinal(), RotDiv.SIXTEEN.ordinal()); // slow window, never Off
     bag.jumpable(this.trails);               // full range
     bag.jumpable(this.speed, 1.5, 3.5);      // capped: keeps orbit tempo in a musical window (was [0.6, 1.4] pre-rebaseline)
-    bag.jumpable(this.hue);                  // full range
-
-    // RndTrig parameter jumps defer to the tempo grid exactly like the triggers:
-    // rho regime hops especially should land as musical hits, not off-grid
-    bag.setJumpScheduler(this::requestJump);
 
     // Scatter, then integrate silently so frame one already shows the butterfly
     reseedSwarm();
@@ -339,56 +369,23 @@ public class Lorre extends ApotheneumPattern {
 
   // ---- Triggers ------------------------------------------------------------------
 
-  // With Sync on, trigger actions are deferred to the next TempoDiv grid boundary
-  // (executed in render()); with Sync off they fire immediately. Repeat fires
-  // within one deferral window coalesce into a single action.
-
-  private void requestKick() {
-    if (this.sync.isOn()) {
-      this.pendingKick = true;
-    } else {
-      kickSwarm();
-    }
-  }
-
-  private void requestReseed() {
-    if (this.sync.isOn()) {
-      this.pendingReseed = true;
-    } else {
-      reseedSwarm();
-    }
-  }
-
-  private void requestTint() {
-    if (this.sync.isOn()) {
-      this.pendingTint = true;
-    } else {
-      tintSwarm();
-    }
-  }
-
-  /**
-   * RndTrig-fired parameter jumps route here via TriggerBag.setJumpScheduler
-   * and get the same grid deferral as the triggers; repeat RndTrig fires within
-   * one deferral window coalesce (latest jump wins). Event-rate, not per-frame.
-   */
-  private void requestJump(Runnable jump) {
-    if (this.sync.isOn()) {
-      this.pendingJump = jump;
-    } else {
-      jump.run();
-    }
-  }
+  // Triggers execute immediately; alignment to the music is the composition
+  // timeline's job, not the pattern's.
 
   /** Kick: perturb every particle by a random offset; the attractor pulls them back */
   private void kickSwarm() {
     perturb(KICK_MAGNITUDE);
   }
 
-  /** Tint: step the base hue by the golden-ratio conjugate, wrapping in [0, 1) */
+  /** Tint: start a one-beat crossfade of every particle to its next palette color */
   private void tintSwarm() {
-    final double h = this.hue.getValue() + TINT_STEP;
-    this.hue.setValue((h >= 1) ? h - 1 : h);
+    if (this.tintActive) {
+      // Retrigger mid-fade: commit the in-flight target, restart toward the next
+      this.tintOffset = (this.tintOffset + 1) % COLOR_INDEX_WRAP;
+    }
+    this.tintActive = true;
+    this.tintElapsedMs = 0;
+    this.tintDurationMs = Math.max(1, this.lx.engine.tempo.period.getValue());
   }
 
   /** Array index of the k-th live particle in the ring window */
@@ -417,6 +414,7 @@ public class Lorre extends ApotheneumPattern {
       this.pos[1][i] = this.pos[1][src] + (2 * this.random.nextDouble() - 1) * BIRTH_JITTER;
       this.pos[2][i] = this.pos[2][src] + (2 * this.random.nextDouble() - 1) * BIRTH_JITTER;
       this.spd[i] = 0;
+      this.colorIndex[i] = this.random.nextInt(COLOR_INDEX_WRAP);
       ++this.activeCount;
     }
   }
@@ -429,6 +427,7 @@ public class Lorre extends ApotheneumPattern {
       this.pos[0][i] = (2 * this.random.nextDouble() - 1) * 0.8 * rhoNow;
       this.pos[1][i] = (2 * this.random.nextDouble() - 1) * rhoNow;
       this.pos[2][i] = this.random.nextDouble() * 0.75 * (Z_MAX_SLOPE * rhoNow + Z_MAX_OFFSET);
+      this.colorIndex[i] = this.random.nextInt(COLOR_INDEX_WRAP);
     }
   }
 
@@ -450,6 +449,7 @@ public class Lorre extends ApotheneumPattern {
     this.pos[1][i] = sign * wing + (2 * this.random.nextDouble() - 1) * 3;
     this.pos[2][i] = (rhoNow - 1) + (2 * this.random.nextDouble() - 1) * 3;
     this.spd[i] = 0;
+    this.colorIndex[i] = this.random.nextInt(COLOR_INDEX_WRAP);
   }
 
   // ---- Integration -----------------------------------------------------------------
@@ -486,36 +486,6 @@ public class Lorre extends ApotheneumPattern {
   protected void render(double deltaMs) {
     this.audio.tick(deltaMs);
 
-    // Tempo grid gate. Called unconditionally every frame (not just when Sync is
-    // on and a trigger is pending) so the gate never goes stale: a lapsed call
-    // pattern would report any old boundary as "crossed" and fire a deferred
-    // trigger immediately instead of on the grid.
-    final boolean gridBoundary = this.tempoLock.crossed(this.tempoDiv.getEnum());
-
-    // Execute sync-deferred triggers and RndTrig jumps on the boundary; if Sync
-    // was turned off while one was pending, release it immediately
-    if (this.pendingKick || this.pendingReseed || this.pendingTint || (this.pendingJump != null)) {
-      if (gridBoundary || !this.sync.isOn()) {
-        if (this.pendingKick) {
-          this.pendingKick = false;
-          kickSwarm();
-        }
-        if (this.pendingReseed) {
-          this.pendingReseed = false;
-          reseedSwarm();
-        }
-        if (this.pendingTint) {
-          this.pendingTint = false;
-          tintSwarm();
-        }
-        if (this.pendingJump != null) {
-          final Runnable jump = this.pendingJump;
-          this.pendingJump = null;
-          jump.run(); // boundary event-rate: picks the value, logs, sets the param
-        }
-      }
-    }
-
     final double rhoNow = this.rho.getValue();
 
     // Reconcile the live-particle window to the Count knob before any physics
@@ -528,16 +498,17 @@ public class Lorre extends ApotheneumPattern {
       perturb(MINI_KICK_MAGNITUDE * this.audio.depth());
     }
 
-    // Integration dt: Speed knob (0 = frozen moment) plus a BassSpd transient
-    // pulse. bassPulseRaw (trough-referenced dB rise, 0..1) saturates on a
-    // kick and decays with the raw meter before the next beat; it scales the
-    // *current* Speed, so full BassSpd reads as a ~2x surge at any orbit
-    // tempo. Independent of the Audio depth knob -- BassSpd is its own depth
-    // control for this coupling. Silence-safe: pulse ~0 with no audio input.
-    final double bassPulse = this.audio.bassPulseRaw;
+    // Integration dt: Speed knob (0 = frozen moment) plus the BassSpd drive.
+    // bassFast (level-based, fast attack/release, 0..1) rises on a kick within
+    // ~15 ms and holds under sustained bass; it scales the *current* Speed by
+    // up to BASS_SPEED_GAIN, so full BassSpd reads as a hard lurch at any
+    // orbit tempo. Independent of the Audio depth knob -- BassSpd is its own
+    // depth control for this coupling. Silence-safe: drive ~0 with no input.
+    final double bassDrive = this.audio.bassFast;
     final double speedNow = this.speed.getValue();
     final double simRate = SIM_RATE_AT_SPEED_1
-      * (speedNow + this.bassSpd.getValue() * bassPulse * Math.max(speedNow, BASS_SPEED_MIN_BASE));
+      * (speedNow + BASS_SPEED_GAIN * this.bassSpd.getValue() * bassDrive
+         * Math.max(speedNow, BASS_SPEED_MIN_BASE));
 
     // Clamped-dt integration: fixed-size substeps; overlong frames dilate sim time
     double simDt = deltaMs * .001 * simRate;
@@ -552,10 +523,28 @@ public class Lorre extends ApotheneumPattern {
       }
     }
 
-    // Slow rotation about the attractor's vertical z axis
-    this.rotationAngle += deltaMs * .001 * this.yRotSpd.getValue() * ROTATION_MAX_REV_PER_SEC * 2 * Math.PI;
+    // Tempo-relative rotation about the attractor's vertical z axis: one
+    // quarter turn per YRotDiv division. Incremental accumulation, so BPM or
+    // division changes only change the rate -- the angle never snaps.
+    final Tempo.Division rotDiv = this.yRotDiv.getEnum().division;
+    if (rotDiv != null) {
+      final double divMs = this.lx.engine.tempo.period.getValue() / rotDiv.multiplier;
+      this.rotationAngle += (deltaMs / divMs) * (Math.PI / 2);
+    }
     if (this.rotationAngle > 2 * Math.PI) {
       this.rotationAngle -= 2 * Math.PI;
+    }
+
+    // Advance the Tint crossfade; on completion commit the +1 shift for all
+    double tintBlend = 0;
+    if (this.tintActive) {
+      this.tintElapsedMs += deltaMs;
+      if (this.tintElapsedMs >= this.tintDurationMs) {
+        this.tintActive = false;
+        this.tintOffset = (this.tintOffset + 1) % COLOR_INDEX_WRAP;
+      } else {
+        tintBlend = this.tintElapsedMs / this.tintDurationMs;
+      }
     }
 
     // Trail decay: Trails knob sets the half-life; busy treble shortens it (crisper).
@@ -566,7 +555,7 @@ public class Lorre extends ApotheneumPattern {
     this.cubeCanvas.decay(decayMult);
     this.cylinderCanvas.decay(decayMult);
 
-    plot(rhoNow);
+    plot(rhoNow, tintBlend);
 
     // Exterior surfaces from the canvases (door columns guarded inside copyTo);
     // bass pumps output brightness so the whole swarm flashes with the low end.
@@ -585,7 +574,7 @@ public class Lorre extends ApotheneumPattern {
   }
 
   /** Rotate, orthographically project, and plot the visible swarm into both canvases */
-  private void plot(double rhoNow) {
+  private void plot(double rhoNow, double tintBlend) {
     // Per-view rotation: view v sees the attractor from a heading 360/N * v away,
     // so all views are one coherent 3D object at the center of the building.
     for (int v = 0; v < CUBE_VIEWS; ++v) {
@@ -611,7 +600,23 @@ public class Lorre extends ApotheneumPattern {
 
     final double speedFull = SPEED_FULL_PER_RHO * rhoNow;
     final double whiteHot = this.desat.getValue();
-    final double hueBase = this.hue.getValue();
+
+    // Cache the active swatch once per frame: tint-blend toward each color's
+    // successor, then decompose to h/s/b, so the per-particle path is flat
+    // array reads. At most MAX_COLORS entries; swatch size changes just change n.
+    final LXSwatch swatch = this.lx.engine.palette.swatch;
+    final int n = Math.min(swatch.colors.size(), LXSwatch.MAX_COLORS);
+    for (int c = 0; c < n; ++c) {
+      this.palColor[c] = swatch.getColor(c).getColor();
+    }
+    for (int c = 0; c < n; ++c) {
+      final int col = (tintBlend > 0)
+        ? LXColor.lerp(this.palColor[c], this.palColor[(c + 1) % n], tintBlend)
+        : this.palColor[c];
+      this.palHue[c] = LXColor.h(col);
+      this.palSat[c] = LXColor.s(col);
+      this.palBri[c] = LXColor.b(col);
+    }
 
     // YPos slides the attractor by up to half the surface height; off-canvas
     // rows are silently dropped by SurfaceCanvas.set(). Positive = up, and
@@ -625,7 +630,7 @@ public class Lorre extends ApotheneumPattern {
     // instant reveal. Ring order is uncorrelated with spatial position
     // (chaotic mixing), so density thins uniformly across the attractor.
     // CURATE: linear map; consider vis^2 if the low end needs finer control
-    final int visibleCount = 1 + (int) Math.round(this.vis.getValue() * (this.activeCount - 1));
+    final int visibleCount = 1 + (int) Math.round((this.vis.getValue() / 100) * (this.activeCount - 1));
 
     for (int k = 0; k < visibleCount; ++k) {
       final int i = slot(k);
@@ -633,11 +638,15 @@ public class Lorre extends ApotheneumPattern {
       final double y = this.pos[1][i];
       final double z = this.pos[2][i];
 
-      // Brightness by particle speed; fast heads run white-hot, slow ones stay colored
+      // Brightness by particle speed; fast heads run white-hot, slow ones stay
+      // colored. Hue/sat/bri come from the particle's palette color (mod n at
+      // draw time, so swatch resizes are safe) with the speed ramps and a
+      // small vertical hue spread applied on top; LXColor.hsb wraps any hue.
       final double b = Math.min(1, this.spd[i] / speedFull);
-      final float hueDeg = PerceptualHue.toSpectralHue((float) (hueBase + HUE_SPREAD * z / zMax));
-      final float sat = (float) (100 * (1 - whiteHot * b * b));
-      final float bri = (float) (100 * (BRIGHTNESS_FLOOR + (1 - BRIGHTNESS_FLOOR) * b));
+      final int ci = (this.colorIndex[i] + this.tintOffset) % n;
+      final float hueDeg = (float) (this.palHue[ci] + HUE_SPREAD_DEG * (z / zMax - 0.5));
+      final float sat = (float) (this.palSat[ci] * (1 - whiteHot * b * b));
+      final float bri = (float) (this.palBri[ci] * (BRIGHTNESS_FLOOR + (1 - BRIGHTNESS_FLOOR) * b));
       final int argb = LXColor.hsb(hueDeg, sat, bri);
 
       final int cubeY = (int) Math.round(VERTICAL_MARGIN + (zMax - z) * cubeVScale + cubeYOff);

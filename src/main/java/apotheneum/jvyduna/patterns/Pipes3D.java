@@ -236,8 +236,8 @@ public class Pipes3D extends ApotheneumPattern {
     new EnumParameter<Beats>("OnBeats", Beats.ONE)
     .setDescription("Beat-grid interval that every cap/turn lands on, counted from pattern load or the end of a drain");
 
-  public final TriggerParameter meta =
-    new TriggerParameter("Meta", bag::fire)
+  public final TriggerParameter rndTrig =
+    new TriggerParameter("RndTrig", bag::fire)
     .setDescription("Randomly fire a trigger or jump a parameter");
 
   // ---- Preallocated state (zero-alloc render path) ---------------------------
@@ -329,6 +329,7 @@ public class Pipes3D extends ApotheneumPattern {
     addParameter("pipes", this.pipes);
     addParameter("sparkle", this.sparkle);
     addParameter("rstRot", this.rstRot);
+    addParameter("rndTrig", this.rndTrig);
     addParameter("speed", this.speed);
     addParameter("thickness", this.thickness);
     addParameter("density", this.density);
@@ -337,7 +338,6 @@ public class Pipes3D extends ApotheneumPattern {
     addParameter("rotY", this.rotY);
     addParameter("audio", this.audioDepth);
     addParameter("onBeats", this.onBeats);
-    addParameter("meta", this.meta);
 
     bag.jumpable(this.thickness);
     bag.jumpable(this.density);

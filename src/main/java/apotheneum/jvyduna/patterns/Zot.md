@@ -123,14 +123,17 @@ trigger, the `Storm` burst, or the audio detector. The detector reads the 16-ban
 
 ## Parameters
 
-UI order: triggers first, algorithm, surface counts, pattern params, timing, White,
-audio, Meta last. (No inherited face toggles — the base-class switch dropped them.)
+UI order (2026-07-06 series convention): triggers first with RndTrig
+immediately after them, then algorithm, surface counts, pattern params,
+timing, White, audio. (No inherited face toggles — the base-class switch
+dropped them.)
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
 | `strike` | Strike | TriggerParameter | — | — | strike one bolt now |
 | `storm` | Storm | TriggerParameter | — | — | burst of 3–5 bolts over ~2 s |
 | `nextAlgo` | NextAlgo | TriggerParameter | — | — | cycle the generator algorithm |
+| `rndTrig` | RndTrig | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
 | `algorithm` | Algo | EnumParameter&lt;Algo&gt; | MIDPOINT | 4 values | Midpoint / L-System / RRT / Physical |
 | `eSurfs` | ESurfs | DiscreteParameter | 2 | 0..5 | external surfaces per strike |
 | `iSurfs` | ISurfs | DiscreteParameter | 1 | 0..5 | internal surfaces per strike |
@@ -144,7 +147,9 @@ audio, Meta last. (No inherited face toggles — the base-class switch dropped t
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | FFT floor (0 = audio strikes off) |
 | `audFreq` | AudFreq | DiscreteParameter | 0 | 0..14 | which FFT bin-pair to watch |
 | `emaDur` | EMADur | DiscreteParameter | 3 | 0..16 | EMA/refractory window in beats |
-| `meta` | Meta | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
+
+Series RndTrig pass (2026-07-06): `meta` → `rndTrig` (label Meta → RndTrig),
+moved up to 4th, immediately after the triggers.
 
 ### `branch`/`jag` mapping per algorithm
 
@@ -163,7 +168,7 @@ audio, Meta last. (No inherited face toggles — the base-class switch dropped t
   one frame, glow decays over FadeTime.
 - `storm` (large) — 3–5 bolts, free-run spacing 300–700 ms. Late storm bolts recycle
   the oldest active slot if all 16 are busy.
-- `meta` — one random action from the bag (3 triggers + 6 jumps below).
+- `rndTrig` — one random action from the bag (3 triggers + 6 jumps below).
 
 ## Jump candidates
 
@@ -209,3 +214,4 @@ is long.
 | 2026-07-04 | Initial implementation | — |
 | 2026-07-05 | Review pass: MIDPOINT_START_SPREAD 0.9→0.1; empty-generation retire; added Audio depth knob, Sync/TempoDiv (TempoLock). | Series-wide Audio/Sync/TempoDiv + bug hunt |
 | 2026-07-06 | Major reconception: switched base to `ApotheneumPattern`; added cylinder int/ext surfaces and 10-surface per-strike routing via `ISurfs`/`ESurfs` (load-balanced, fewest-displayed first); cylinder strikes render a wrapped random half-ring. Replaced Sync/TempoDiv/Glow with `StrkTime`/`FadeTime` tempo-division durations (strikes fire immediately). New audio model: `Audio` = FFT floor, `AudFreq` = bin-pair, `EMADur` = EMA+blackout refractory (Audio=0 disables). Removed random/ambient strikes and Energy/Ambient/Thresh. Added `White` boolean with per-strike random palette color via doved post-tint. | User-directed reconception |
+| 2026-07-06 | Series RndTrig ordering: `meta` → `rndTrig` (label RndTrig), moved from last to 4th, immediately after the triggers; `.lxp` values on the old `meta` path are dropped on load | Series convention: TriggerBag meta trigger sits right after the other trigger params |

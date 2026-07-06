@@ -199,8 +199,8 @@ public class UnknownPleasures extends ApotheneumPattern {
     new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.QUARTER)
     .setDescription("Tempo division on which lines emerge from the entry edge; with Spacing, sets the scroll speed");
 
-  public final TriggerParameter meta =
-    new TriggerParameter("Meta", bag::fire)
+  public final TriggerParameter rndTrig =
+    new TriggerParameter("RndTrig", bag::fire)
     .setDescription("Randomly fire one trigger or jump one parameter");
 
   // ---- Line store (ring buffer keyed by integer birth index) ----------------
@@ -251,6 +251,7 @@ public class UnknownPleasures extends ApotheneumPattern {
     addParameter("reseed", this.reseed);
     addParameter("flip", this.flip);
     addParameter("pulse", this.pulse);
+    addParameter("rndTrig", this.rndTrig);
     addParameter("spacing", this.spacing);
     addParameter("amplitude", this.amplitude);
     addParameter("jaggedness", this.jaggedness);
@@ -261,7 +262,6 @@ public class UnknownPleasures extends ApotheneumPattern {
     addParameter("audio", this.audioDepth);
     addParameter("decay", this.decay);
     addParameter("tempoDiv", this.tempoDiv);
-    addParameter("meta", this.meta);
 
     bag.jumpable(this.spacing, 2, 8);
     bag.jumpable(this.amplitude, 4, 12);
