@@ -164,8 +164,8 @@ public class Mystify extends ApotheneumPattern {
     .setDescription("Number of independent polylines (1 or 2)");
 
   public final DiscreteParameter vertices =
-    new DiscreteParameter("Vertices", 4, 3, MAX_VERTS + 1)
-    .setDescription("Vertices per polyline (3-5)");
+    new DiscreteParameter("Vertices", 4, 2, MAX_VERTS + 1)
+    .setDescription("Vertices per polyline (2 = a single open line, 3-5 = closed polygon)");
 
   public final CompoundParameter speed =
     new CompoundParameter("Speed", 1, 0, 5)
@@ -183,6 +183,10 @@ public class Mystify extends ApotheneumPattern {
   public final BooleanParameter wu =
     new BooleanParameter("Wu", false)
     .setDescription("Draw lines with Xiaolin Wu antialiasing (smooth, slightly softer) instead of Bresenham");
+
+  public final BooleanParameter mirror =
+    new BooleanParameter("Mirror", false)
+    .setDescription("Draw a mirrored copy of every line and bass-flash cross across the geometry's reflection axis (local centerline on Faces, the verified X=Z world diagonal on CubeRing/Cylinder)");
 
   public final EnumParameter<BounceGrid> bounceOnBeats =
     new EnumParameter<BounceGrid>("BounceOnBeats", BounceGrid.ONE)
@@ -274,6 +278,7 @@ public class Mystify extends ApotheneumPattern {
     addParameter("trails", this.trails);
     addParameter("timeGap", this.timeGap);
     addParameter("wu", this.wu);
+    addParameter("mirror", this.mirror);
     addParameter("bounceOnBeats", this.bounceOnBeats);
     addParameter("audio", this.audioDepth);
     addParameter("meta", this.meta);
@@ -407,15 +412,15 @@ public class Mystify extends ApotheneumPattern {
     // Stamp a leftover line into the trail on each TimeGap crossing — the
     // source of the gapped-moire look. The live shape itself never persists.
     if (stampNow) {
-      drawShapeLines(trail, wrapX);
+      drawShapeLines(trail, geom);
     }
     if (this.flash > 0.01) {
-      stampFlash(trail, wrapX, e); // pops land in the trail so they decay out
+      stampFlash(trail, geom, e); // pops land in the trail so they decay out
     }
 
     // Composite: fading leftovers underneath, live shape fresh on top
     scratch.copyFrom(trail);
-    drawShapeLines(scratch, wrapX);
+    drawShapeLines(scratch, geom);
 
     // Output: paint the active surface exterior, then mirror to its interior.
     // The other component stays dark (see Mystify.md for the rationale).
@@ -619,61 +624,117 @@ public class Mystify extends ApotheneumPattern {
    * scratch (the live shape). Both line styles composite with per-channel max
    * (lighten), so crossings never punch dark notches through brighter fading
    * lines — that union-of-brightness is what preserves the moire structure.
+   * At Vertices=2 the "polygon" is a single open line (one edge), not a
+   * degenerate closed 2-gon. When Mirror is on, every edge gets a second
+   * reflected copy (same color) across the geometry's mirror axis.
    */
-  private void drawShapeLines(SurfaceCanvas canvas, boolean wrapX) {
+  private void drawShapeLines(SurfaceCanvas canvas, Geometry geom) {
     final int w = canvas.width;
     final int h = canvas.height;
+    final boolean wrapX = (geom != Geometry.FACES);
     final int nShapes = this.shapes.getValuei();
     final int nVerts = this.vertices.getValuei();
+    final int edgeCount = (nVerts == 2) ? 1 : nVerts;
     final boolean smooth = this.wu.isOn();
+    final boolean mirrorOn = this.mirror.isOn();
 
     for (int s = 0; s < nShapes; ++s) {
       final int base = s * MAX_VERTS;
       final int colorA = this.shapeColor[2 * s];
       final int colorB = this.shapeColor[2 * s + 1];
-      for (int i = 0; i < nVerts; ++i) {
+      for (int i = 0; i < edgeCount; ++i) {
         final int j = (i + 1) % nVerts;
         final int argb = ((i & 1) == 0) ? colorA : colorB;
         if (smooth) {
           final double x0 = pixelXf(this.posX[base + i], w, wrapX);
           final double y0 = pixelYf(this.posY[base + i], h);
-          double x1 = pixelXf(this.posX[base + j], w, wrapX);
+          final double x1 = pixelXf(this.posX[base + j], w, wrapX);
           final double y1 = pixelYf(this.posY[base + j], h);
-          if (wrapX) {
-            // Take the short way around the ring; SurfaceCanvas wraps x for us
-            final double dx = x1 - x0;
-            if (dx > w / 2.0) {
-              x1 -= w;
-            } else if (dx < -w / 2.0) {
-              x1 += w;
-            }
+          drawEdgeWu(canvas, x0, y0, x1, y1, argb, wrapX);
+          if (mirrorOn) {
+            drawEdgeWu(canvas, mirrorPixelXf(x0, geom, w), y0,
+                               mirrorPixelXf(x1, geom, w), y1, argb, wrapX);
           }
-          canvas.lineWu(x0, y0, x1, y1, argb, wrapX);
         } else {
           final int x0 = pixelX(this.posX[base + i], w, wrapX);
           final int y0 = pixelY(this.posY[base + i], h);
-          int x1 = pixelX(this.posX[base + j], w, wrapX);
+          final int x1 = pixelX(this.posX[base + j], w, wrapX);
           final int y1 = pixelY(this.posY[base + j], h);
-          if (wrapX) {
-            final int dx = x1 - x0;
-            if (dx > w / 2) {
-              x1 -= w;
-            } else if (dx < -w / 2) {
-              x1 += w;
-            }
+          drawEdgeBresenham(canvas, x0, y0, x1, y1, argb, wrapX);
+          if (mirrorOn) {
+            drawEdgeBresenham(canvas, mirrorPixelX(x0, geom, w), y0,
+                                       mirrorPixelX(x1, geom, w), y1, argb, wrapX);
           }
-          canvas.lineMax(x0, y0, x1, y1, argb);
         }
       }
     }
   }
 
+  /** One Wu edge: takes the short way around the ring (re-derived here so a
+   *  mirrored copy's own short way, which can differ from the original's, is
+   *  computed independently), then plots. */
+  private static void drawEdgeWu(SurfaceCanvas canvas, double x0, double y0, double x1, double y1, int argb, boolean wrapX) {
+    final double w = canvas.width;
+    if (wrapX) {
+      final double dx = x1 - x0;
+      if (dx > w / 2.0) {
+        x1 -= w;
+      } else if (dx < -w / 2.0) {
+        x1 += w;
+      }
+    }
+    canvas.lineWu(x0, y0, x1, y1, argb, wrapX);
+  }
+
+  /** Bresenham counterpart of drawEdgeWu. */
+  private static void drawEdgeBresenham(SurfaceCanvas canvas, int x0, int y0, int x1, int y1, int argb, boolean wrapX) {
+    final int w = canvas.width;
+    if (wrapX) {
+      final int dx = x1 - x0;
+      if (dx > w / 2) {
+        x1 -= w;
+      } else if (dx < -w / 2) {
+        x1 += w;
+      }
+    }
+    canvas.lineMax(x0, y0, x1, y1, argb);
+  }
+
+  /**
+   * Mirror a pixel x-coordinate across the Mirror reflection axis. Faces and
+   * CubeRing both reflect at (width-1)-x: for Faces that is a local flip
+   * across the face's own vertical centerline; for CubeRing it is the
+   * verified physical X=Z world diagonal (through the front-left and
+   * back-right corner posts), which happens to land at the same formula
+   * because those two corners sit exactly at the ring's column-0 seam and
+   * column-~99.5 seam. Cylinder differs because it is angularly (not
+   * arc-length) parameterized, so its diagonal lands at 0.75*width instead.
+   */
+  private static int mirrorPixelX(int px, Geometry geom, int width) {
+    if (geom == Geometry.CYLINDER) {
+      return Math.floorMod((3 * width / 4) - px, width); // 90 for width=120
+    }
+    return (width - 1) - px;
+  }
+
+  /** Fractional counterpart of mirrorPixelX for the Wu path — the underlying
+   *  world-geometry algebra is linear/exact, so it extends continuously. */
+  private static double mirrorPixelXf(double px, Geometry geom, int width) {
+    if (geom == Geometry.CYLINDER) {
+      return LXUtils.wrap(0.75 * width - px, 0, width);
+    }
+    return (width - 1) - px;
+  }
+
   /** Bass-hit flash: a bright white cross at every active vertex, stamped
    *  into the trail canvas so the pop decays out with the trails. Max-blend;
-   *  on the bounce topology out-of-range x is dropped, not wrapped. */
-  private void stampFlash(SurfaceCanvas canvas, boolean wrapX, double energyValue) {
+   *  on the bounce topology out-of-range x is dropped, not wrapped. Mirrored
+   *  alongside the shape when Mirror is on. */
+  private void stampFlash(SurfaceCanvas canvas, Geometry geom, double energyValue) {
     final int w = canvas.width;
     final int h = canvas.height;
+    final boolean wrapX = (geom != Geometry.FACES);
+    final boolean mirrorOn = this.mirror.isOn();
     final int nShapes = this.shapes.getValuei();
     final int nVerts = this.vertices.getValuei();
     final int flashColor = LXColor.gray(100 * this.flash * Ranges.lin(energyValue, 0.6, 1.0));
@@ -682,20 +743,29 @@ public class Mystify extends ApotheneumPattern {
       for (int i = 0; i < nVerts; ++i) {
         final int px = pixelX(this.posX[base + i], w, wrapX);
         final int py = pixelY(this.posY[base + i], h);
-        if (wrapX) {
-          canvas.setMax(px, py, flashColor);
-          canvas.setMax(px, py - 1, flashColor);
-          canvas.setMax(px, py + 1, flashColor);
-          canvas.setMax(px - 1, py, flashColor);
-          canvas.setMax(px + 1, py, flashColor);
-        } else {
-          canvas.setMaxClamped(px, py, flashColor);
-          canvas.setMaxClamped(px, py - 1, flashColor);
-          canvas.setMaxClamped(px, py + 1, flashColor);
-          canvas.setMaxClamped(px - 1, py, flashColor);
-          canvas.setMaxClamped(px + 1, py, flashColor);
+        stampFlashCross(canvas, px, py, flashColor, wrapX);
+        if (mirrorOn) {
+          stampFlashCross(canvas, mirrorPixelX(px, geom, w), py, flashColor, wrapX);
         }
       }
+    }
+  }
+
+  /** One bass-flash cross: five max-blended pixels, x wrapped on wrap
+   *  topologies, x clamped (dropped) on Faces. */
+  private static void stampFlashCross(SurfaceCanvas canvas, int px, int py, int flashColor, boolean wrapX) {
+    if (wrapX) {
+      canvas.setMax(px, py, flashColor);
+      canvas.setMax(px, py - 1, flashColor);
+      canvas.setMax(px, py + 1, flashColor);
+      canvas.setMax(px - 1, py, flashColor);
+      canvas.setMax(px + 1, py, flashColor);
+    } else {
+      canvas.setMaxClamped(px, py, flashColor);
+      canvas.setMaxClamped(px, py - 1, flashColor);
+      canvas.setMaxClamped(px, py + 1, flashColor);
+      canvas.setMaxClamped(px - 1, py, flashColor);
+      canvas.setMaxClamped(px + 1, py, flashColor);
     }
   }
 
