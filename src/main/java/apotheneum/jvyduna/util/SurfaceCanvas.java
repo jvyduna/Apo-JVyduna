@@ -41,36 +41,88 @@ public class SurfaceCanvas {
   }
 
   /**
+   * Per-channel compositing modes for blended pixel writes, computed on each
+   * RGB channel a (existing) vs c (incoming) in [0, 255]:
+   *
+   * <ul>
+   * <li>{@link #MAX} — lighten: {@code max(a, c)}. A dim pixel never darkens
+   *     a brighter one; crossings become the union of brightness.</li>
+   * <li>{@link #XOR} — continuous XOR: {@code a + c - 2ac/255}. Bright over
+   *     bright goes BLACK — drawing across an existing bright line erases it
+   *     at the crossing, the classic interference-moire look.</li>
+   * <li>{@link #DIFF} — difference: {@code |a - c|}. A softer inversion.</li>
+   * <li>{@link #ADD} — clamped sum: {@code min(255, a + c)}. Bright buildup
+   *     at crossings.</li>
+   * </ul>
+   */
+  public enum Blend {
+    MAX("Max"),
+    XOR("Xor"),
+    DIFF("Diff"),
+    ADD("Add");
+
+    public final String label;
+    private Blend(String label) { this.label = label; }
+
+    @Override
+    public String toString() { return this.label; }
+  }
+
+  /**
+   * Set a pixel with the given per-channel blend against the existing value.
+   * X wraps, out-of-range y is ignored.
+   */
+  public void setBlend(int x, int y, int argb, Blend blend) {
+    if (y < 0 || y >= this.height) {
+      return;
+    }
+    blendPixel(y * this.width + Math.floorMod(x, this.width), argb, blend);
+  }
+
+  /**
+   * setBlend variant that drops out-of-range x instead of wrapping it, for
+   * bounce topologies where a fringe at one face edge must not land on the
+   * opposite edge.
+   */
+  public void setBlendClamped(int x, int y, int argb, Blend blend) {
+    if (x < 0 || x >= this.width || y < 0 || y >= this.height) {
+      return;
+    }
+    blendPixel(y * this.width + x, argb, blend);
+  }
+
+  /**
    * Set a pixel with per-channel max (lighten) blending: each RGB channel
    * keeps the brighter of the existing and incoming values. A dim pixel
    * (e.g. an antialiasing fringe) never darkens a brighter pixel already
    * there — trail crossings stay intact. X wraps, out-of-range y is ignored.
    */
   public void setMax(int x, int y, int argb) {
-    if (y < 0 || y >= this.height) {
-      return;
-    }
-    maxBlend(y * this.width + Math.floorMod(x, this.width), argb);
+    setBlend(x, y, argb, Blend.MAX);
   }
 
-  /**
-   * setMax variant that drops out-of-range x instead of wrapping it, for
-   * bounce topologies where a fringe at one face edge must not land on the
-   * opposite edge.
-   */
+  /** setMax variant that drops out-of-range x instead of wrapping it */
   public void setMaxClamped(int x, int y, int argb) {
-    if (x < 0 || x >= this.width || y < 0 || y >= this.height) {
-      return;
-    }
-    maxBlend(y * this.width + x, argb);
+    setBlendClamped(x, y, argb, Blend.MAX);
   }
 
-  private void maxBlend(int idx, int argb) {
+  private void blendPixel(int idx, int argb, Blend blend) {
     final int c = this.pixels[idx];
-    final int r = Math.max((c >> 16) & 0xff, (argb >> 16) & 0xff);
-    final int g = Math.max((c >> 8) & 0xff, (argb >> 8) & 0xff);
-    final int b = Math.max(c & 0xff, argb & 0xff);
+    final int r = blendChannel((c >> 16) & 0xff, (argb >> 16) & 0xff, blend);
+    final int g = blendChannel((c >> 8) & 0xff, (argb >> 8) & 0xff, blend);
+    final int b = blendChannel(c & 0xff, argb & 0xff, blend);
     this.pixels[idx] = 0xff000000 | (r << 16) | (g << 8) | b;
+  }
+
+  /** One channel of the blend math; a and c in [0, 255], result in [0, 255]
+   *  by construction for every mode (no clamps needed except ADD's min) */
+  private static int blendChannel(int a, int c, Blend blend) {
+    switch (blend) {
+      case XOR: return a + c - (2 * a * c) / 255;
+      case DIFF: return Math.abs(a - c);
+      case ADD: return Math.min(255, a + c);
+      default: return Math.max(a, c);
+    }
   }
 
   /** Get a pixel; x wraps, out-of-range y reads black */
@@ -139,19 +191,26 @@ public class SurfaceCanvas {
   }
 
   /**
-   * Integer Bresenham line plotted with {@link #setMax} (lighten blending)
-   * instead of overwrite — crossings with existing content keep the brighter
-   * channel values. Same endpoint semantics as {@link #line}.
+   * Integer Bresenham line plotted with the given per-channel blend. Same
+   * endpoint semantics as {@link #line} (x wraps, off-canvas y dropped).
+   *
+   * @param halfOpen Skip the final pixel (x1, y1). For closed polylines
+   *                 drawn edge-by-edge with a self-inverting blend (XOR,
+   *                 DIFF), half-open edges plot each shared vertex exactly
+   *                 once instead of erasing it on the second write.
    */
-  public void lineMax(int x0, int y0, int x1, int y1, int argb) {
+  public void lineBlend(int x0, int y0, int x1, int y1, int argb, Blend blend, boolean halfOpen) {
     int dx = Math.abs(x1 - x0);
     int dy = -Math.abs(y1 - y0);
     int sx = (x0 < x1) ? 1 : -1;
     int sy = (y0 < y1) ? 1 : -1;
     int err = dx + dy;
     while (true) {
-      setMax(x0, y0, argb);
-      if ((x0 == x1) && (y0 == y1)) {
+      final boolean last = (x0 == x1) && (y0 == y1);
+      if (!(halfOpen && last)) {
+        setBlend(x0, y0, argb, blend);
+      }
+      if (last) {
         break;
       }
       final int e2 = 2 * err;
@@ -167,17 +226,27 @@ public class SurfaceCanvas {
   }
 
   /**
-   * Xiaolin Wu antialiased line with fractional endpoints, composited with
-   * per-channel max (lighten) blending: coverage scales the incoming color's
-   * RGB, so a partial fringe brightens dark pixels without ever darkening a
-   * brighter (e.g. fading-trail) pixel beneath it.
+   * Integer Bresenham line plotted with {@link #setMax} (lighten blending)
+   * instead of overwrite — crossings with existing content keep the brighter
+   * channel values. Same endpoint semantics as {@link #line}.
+   */
+  public void lineMax(int x0, int y0, int x1, int y1, int argb) {
+    lineBlend(x0, y0, x1, y1, argb, Blend.MAX, false);
+  }
+
+  /**
+   * Xiaolin Wu antialiased line with fractional endpoints and per-channel
+   * blend compositing: coverage scales the incoming color's RGB BEFORE the
+   * blend op (so under MAX a partial fringe brightens dark pixels without
+   * ever darkening a brighter pixel; under XOR a full-coverage crossing over
+   * a bright pixel goes black).
    *
    * @param wrapX True on wrap topologies (x floorMod-wraps, matching set());
    *              false on bounce topologies, where fringe pixels outside
    *              [0, width) are dropped rather than wrapped onto the
    *              opposite face edge
    */
-  public void lineWu(double x0, double y0, double x1, double y1, int argb, boolean wrapX) {
+  public void lineWu(double x0, double y0, double x1, double y1, int argb, boolean wrapX, Blend blend) {
     final boolean steep = Math.abs(y1 - y0) > Math.abs(x1 - x0);
     if (steep) {
       double t = x0; x0 = y0; y0 = t;
@@ -196,8 +265,8 @@ public class SurfaceCanvas {
     double xgap = 1 - fpart(x0 + 0.5);
     final int xpxl1 = (int) xend;
     final int ypxl1 = ipart(yend);
-    plotWu(xpxl1, ypxl1, argb, (1 - fpart(yend)) * xgap, steep, wrapX);
-    plotWu(xpxl1, ypxl1 + 1, argb, fpart(yend) * xgap, steep, wrapX);
+    plotWu(xpxl1, ypxl1, argb, (1 - fpart(yend)) * xgap, steep, wrapX, blend);
+    plotWu(xpxl1, ypxl1 + 1, argb, fpart(yend) * xgap, steep, wrapX, blend);
     double intery = yend + gradient;
 
     // Second endpoint
@@ -206,19 +275,24 @@ public class SurfaceCanvas {
     xgap = fpart(x1 + 0.5);
     final int xpxl2 = (int) xend;
     final int ypxl2 = ipart(yend);
-    plotWu(xpxl2, ypxl2, argb, (1 - fpart(yend)) * xgap, steep, wrapX);
-    plotWu(xpxl2, ypxl2 + 1, argb, fpart(yend) * xgap, steep, wrapX);
+    plotWu(xpxl2, ypxl2, argb, (1 - fpart(yend)) * xgap, steep, wrapX, blend);
+    plotWu(xpxl2, ypxl2 + 1, argb, fpart(yend) * xgap, steep, wrapX, blend);
 
     for (int x = xpxl1 + 1; x < xpxl2; ++x) {
-      plotWu(x, ipart(intery), argb, 1 - fpart(intery), steep, wrapX);
-      plotWu(x, ipart(intery) + 1, argb, fpart(intery), steep, wrapX);
+      plotWu(x, ipart(intery), argb, 1 - fpart(intery), steep, wrapX, blend);
+      plotWu(x, ipart(intery) + 1, argb, fpart(intery), steep, wrapX, blend);
       intery += gradient;
     }
   }
 
-  /** Plot one Wu pixel: coverage-scaled color, max-blended. In steep mode the
+  /** lineWu with max (lighten) blending */
+  public void lineWu(double x0, double y0, double x1, double y1, int argb, boolean wrapX) {
+    lineWu(x0, y0, x1, y1, argb, wrapX, Blend.MAX);
+  }
+
+  /** Plot one Wu pixel: coverage-scaled color, blended. In steep mode the
    *  traversal axes are swapped back to canvas coordinates here. */
-  private void plotWu(int x, int y, int argb, double coverage, boolean steep, boolean wrapX) {
+  private void plotWu(int x, int y, int argb, double coverage, boolean steep, boolean wrapX, Blend blend) {
     if (coverage <= 0) {
       return;
     }
@@ -233,9 +307,9 @@ public class SurfaceCanvas {
     final int b = (int) ((argb & 0xff) * coverage);
     final int c = 0xff000000 | (r << 16) | (g << 8) | b;
     if (wrapX) {
-      setMax(x, y, c);
+      setBlend(x, y, c, blend);
     } else {
-      setMaxClamped(x, y, c);
+      setBlendClamped(x, y, c, blend);
     }
   }
 
