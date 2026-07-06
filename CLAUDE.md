@@ -1,0 +1,96 @@
+# CLAUDE.md — Apo-JVyduna package
+
+Claude Code guidance for Jeff Vyduna's `apotheneum.jvyduna.*` Chromatik package.
+This repo is personal, so these notes live directly in `CLAUDE.md` — no more
+`CLAUDE.notes.md` + gitignored-stub indirection from the fork days.
+
+## Package Overview
+
+The `apotheneum.jvyduna` package contains patterns and audio work by Jeff Vyduna
+for the Apotheneum LED installation.
+
+Jeff's goal is to compose a 20 minute piece for Apotheneum that is tightly
+choreographed to the music in `audio/songs/`. At the same time he uses the beta
+`arrange` branch of LXStudio (and LX/GLX) to provide helpful feedback on new
+features that allow artists to compose timeline-based compositions in Chromatik,
+as an alternative to the Ableton-based workflows most artists currently use.
+
+## Repo relationships
+
+- **This repo** (`~/Code/jvyduna/Apo-JVyduna`) — the LX package: patterns, utils,
+  design docs. Most development happens here. Builds
+  `jvyduna-apotheneum-<version>.jar` into `~/Chromatik/Packages`.
+- **`~/Code/Apotheneum`** (fork of Apotheneum/Apotheneum) — upstream code plus
+  `.lxp` project files only (`src/main/resources/projects/jvyduna/`). PRs to
+  upstream are `.lxp`-only. Its `pom.xml` stays pristine at upstream's
+  `lx.version` (1.2.1); the arrange override happens at build invocation (below).
+- **Host app from source** — `~/Code/mcslee/LXStudio` + `~/Code/heronarts/LX` +
+  `~/Code/heronarts/GLX`, all on branch `arrange`, all `1.2.2-SNAPSHOT`.
+
+## Layout
+
+- `src/main/java/apotheneum/jvyduna/patterns/` — pattern classes
+- `audio/` (repo root, gitignored) — audio assets used while developing/performing
+  (e.g. `audio/songs/`), ~258 MB of copyrighted reference tracks. Excluded via the
+  committed `.gitignore`; never `git add` audio.
+- Design docs live next to the code they describe, as `<PatternName>.md` in the
+  same directory as the `.java` file.
+
+## Reference skills
+
+- **`te-patterns`** (personal skill) — idioms for writing native-Java LX/Chromatik
+  patterns, distilled from the TitanicsEnd team's example code. Useful cross-repo
+  reference when authoring Apotheneum patterns (same LX framework; different
+  geometry). It should surface automatically for pattern work; invoke it
+  explicitly if it doesn't.
+
+## Preferences
+
+- **Avoid custom UI; prefer the default auto-generated control panel.** Patterns
+  should rely on Chromatik's automatic UI — just register parameters with
+  `addParameter(...)` — and should **not** implement `UIDeviceControls` /
+  `buildDeviceControls` unless absolutely necessary. If custom UI is ever truly
+  required, keep **max 3 controls per column**.
+- Use `LX.log("...")` for debugging output, not `System.out.println` (println
+  won't appear in `~/Chromatik/Logs`).
+- Build/deploy with `mvn -Pinstall install` (not just `mvn compile` — patterns
+  load from the deployed jar).
+- No `new` allocations in render loops; reuse collections.
+
+## Debugging against the `arrange` LXStudio build
+
+The host app is launched **from source in IntelliJ** and this project loads into
+it as a **package jar**. Package vs. host: this project is a plugin;
+LXStudio/GLX/LX are the host.
+
+Setup (one-time, in IntelliJ):
+- One IntelliJ window rooted at **this repo**, with LXStudio, LX, GLX, and
+  Apotheneum attached as Maven projects (`Add Maven Project` on each `pom.xml`)
+  so breakpoints bind across the whole stack from source.
+- The committed shared run config **"Chromatik (arrange)"**
+  (`.idea/runConfigurations/Chromatik.xml`) does the full cycle:
+  1. builds the Apotheneum fork with `install -Pinstall
+     -Dlx.version=1.2.2-SNAPSHOT` (the `-D` override targets the arrange host
+     while the fork's committed pom stays at upstream's 1.2.1 — the old
+     committed-lx.version-bump policy is RETIRED),
+  2. builds this package with `install -Pinstall`,
+  3. launches `heronarts.lx.studio.Chromatik` from source (module `glxstudio`,
+     Temurin 21, `-XstartOnFirstThread`, `--warnings`, working dir
+     `~/Code/mcslee/LXStudio`).
+
+Iteration loop (the important part):
+- **Patterns register from the deployed jar, not IntelliJ's compiled module
+  classes.** After editing, rerun the "Chromatik (arrange)" config (or
+  `mvn -Pinstall install` + restart). Editing source alone will NOT update the
+  running app.
+- **Keep only one `jvyduna-apotheneum-*.jar` in `~/Chromatik/Packages`.** LX
+  loads packages alphabetically and the first-loaded class wins; a leftover
+  older-versioned jar shadows the current build (log: "Ignoring duplicate
+  class"). Delete stale jars. Same rule applies to the upstream
+  `apotheneum-*.jar`.
+- **Quit any standalone Chromatik.app before launching from IntelliJ** — a
+  second instance grabs the OSC port ("[OSC] ... Address already in use") and
+  reads the same Packages dir.
+- Keep this pom's `<lx.version>` matching the arrange host (currently
+  `1.2.2-SNAPSHOT`). `lx.package`'s `lxVersion` is filtered from it; a stale
+  value triggers a "built for an older version" warning at load.

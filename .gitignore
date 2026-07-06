@@ -1,0 +1,18 @@
+# Build output
+target/
+
+# Audio assets: large, potentially copyrighted reference tracks stay local-only
+/audio/
+
+# OS / editor noise
+.DS_Store
+*.class
+
+# IntelliJ: per-user state only. .idea/runConfigurations IS committed (shared run configs).
+/.idea/workspace.xml
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# JVM crash logs
+hs_err_pid*

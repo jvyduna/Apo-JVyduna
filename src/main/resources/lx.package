@@ -1,0 +1,15 @@
+{
+  name: "Apotheneum JVyduna",
+  mediaDir: "JVyduna",
+  author: "Jeff Vyduna",
+  url: "https://github.com/jvyduna/Apo-JVyduna",
+
+  build: {
+    name: "@project.name@",
+    version: "@project.version@",
+    groupId: "@project.groupId@",
+    artifactId: "@project.artifactId@",
+    lxVersion: "@lx.version@",
+    buildTimestamp: "@maven.build.timestamp@"
+  }
+}
