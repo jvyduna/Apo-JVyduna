@@ -43,6 +43,16 @@ as an alternative to the Ableton-based workflows most artists currently use.
 - **Minimal remote activity.** When a turn of improvements is done, merge it
   back into the **local** `main` branch. Do not push worktree branches, create
   remote branches, or open PRs; `git push` of main happens only when Jeff asks.
+- **Rebase on main at the start of every turn.** Before making new edits, run
+  `git rebase main` in the worktree so the session builds on the latest merged
+  state and current CLAUDE.md. Only rebase a clean tree — commit (or stash)
+  first, never mid-edit. Worktree branches are single-session and local-only,
+  so rebasing is always safe here.
+- Keep each session scoped to its own pattern's files. Shared utils
+  (`SurfaceCanvas`, `AudioReactive`, `TempoLock`) are the conflict hotspot:
+  keep util edits small and additive, call them out in the merge commit body,
+  and merge finished turns promptly so other sessions pick them up on their
+  next rebase.
 - When a session's work is approved: commit it on the worktree branch with a
   descriptive message summarizing the curation pass, then merge into main
   from the repo root with a merge commit —
