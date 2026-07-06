@@ -74,51 +74,102 @@ variant to the cylinder is a follow-up curation item.
   scratch `int[6]`, elbow ring buffer (16). The render path allocates nothing.
   Event-rate exceptions (all noted): `Arrays.fill` room clears at drain end,
   `LX.log` strings at drain start/end and from `TriggerBag.fire()`.
-- **Door columns**: buffers are computed for the full 50×45 grid; the blit
-  iterates `column.points.length` so door-shortened columns just clip the
-  bottom rows.
+- **Door columns**: cube face columns always carry the full 45 points (the
+  `Apotheneum.Cube.Face` constructor enforces exactly `GRID_HEIGHT` points per
+  column — doors are exposed via `available()`, **not** shorter point arrays),
+  so the blit writes every row of the 50×45 buffer directly. (Earlier revisions
+  of this doc claimed door columns had fewer points; that was wrong.)
 
 ## Audio mapping
+
+**Audio depth knob**: `CompoundParameter("Audio", 0)` (key `audio`), attached
+via `audio.setDepth(audioDepth)`. **Default 0 = pure screensaver**: all taps
+read exactly their silence values and hits never fire, so the pattern grows on
+timers alone — the silence behavior below is the default behavior. Raising the
+knob restores, continuously:
 
 - **`level`** → growth rate: extrusion rate is multiplied by
   `1 + 0.3·level` (chosen over highlight brightness, because shading is baked
   into the persistent buffers — a level-driven highlight couldn't reach
-  already-committed pixels). Modest by design; stays inside the motion cap.
-- **`bassHit()`** → at energy > 0.6, new segment starts are gated: a completed
-  pipe holds until the next `tempo.beat()` **or** bass transient (1.5 s safety
-  timeout), so growth pulses land on the music.
+  already-committed pixels). Scales linearly with depth; modest by design, and
+  the traversal-cap floor budgets for the full ×1.3 boost.
+- **`bassHit()`** → at Sync on + energy > 0.6, a completed pipe holding for the
+  next TempoDiv grid boundary is released early by a bass transient, so growth
+  pulses land on the music between grid points.
 - **`trebleHit()`** → sparkle: the 16 most recent elbows flash white (a 5 px
   plus, depth-tested against the wall buffers so occluded elbows don't flash),
-  decaying over 500 ms.
-- **Silence behavior**: level = 0 → base growth rate; hits never fire → no
-  sparkle, and beat gating still opens on `tempo.beat()` (the internal tempo
-  always runs). Pipes grow on timers and the pattern is fully presentable with
-  zero audio.
+  decaying over 500 ms. The flash amplitude scales with `audio.depth()`; the
+  manual `Sparkle` trigger fires it at full brightness regardless of the knob.
+- **Silence / depth-0 behavior**: level = 0 → base growth rate; hits never
+  fire → no audio sparkle (the `Sparkle` trigger still works), and with Sync on
+  the high-energy gate still opens on TempoDiv grid crossings (the internal
+  tempo always runs). Fully presentable with zero audio.
+
+## Tempo mapping
+
+Default `TempoDiv` = **1/16**; `Sync` on by default. Three lock points, all via
+the shared `TempoLock`:
+
+1. **Segment durations quantize** (`nextSegmentMs`): the energy-interpolated
+   per-cell duration rounds **up** to a whole number of TempoDiv divisions
+   whenever Sync is on (previously this only happened above energy 0.6, against
+   the removed GrowDiv parameter, and was never phase-aligned).
+2. **Completions phase-align** (`beginSegment`): on the frame a segment's
+   growth actually starts (right after an advance, or when a gate-wait ends),
+   `retime(msUntil, tempoDiv)` nudges the duration (rate scale clamped to the
+   default [0.7, 1.4]) so the cell completes **exactly on a TempoDiv boundary
+   of the real engine beat** (`Tempo.getBasis`), not just a period multiple.
+   The arrival estimate folds in the audio level boost (`pSegMs / (1 +
+   0.3·level)`, level sampled at segment start), so alignment holds with the
+   Audio knob up too — exact for steady level, approximate while it changes.
+   Each segment re-aligns, so frame-overshoot and residual audio-boost drift
+   never accumulate. Because turns (elbow balls) happen at segment completions,
+   **elbows inherently land on the grid** — no separate turn lock needed.
+3. **High-energy start gate** (`updatePipes`): at Sync on + energy > 0.6, a
+   completed pipe holds until `crossed(tempoDiv)` fires (or a bass transient,
+   or the 1.5 s safety timeout), so growth pulses step on the grid. At 1/16
+   this reads as a near-continuous tick; set TempoDiv to 1/4 for the classic
+   beat-pulse feel. CURATE: whether 1/16 or 1/4 reads better as the default at
+   high energy on the sculpture.
+
+**Sync off** restores fully free-running timing: no duration quantization, no
+retime, no start gating at any energy — pipes grow on pure interpolated timers
+(note: the pre-2026-07-05 build always beat-gated above energy 0.6; that gating
+now lives behind Sync).
 
 ## Energy mapping
 
 | Quantity | Ambient (e=0) | Peak (e=1) | Curve (lin/exp) |
 |---|---|---|---|
-| Segment extrusion time (ms/cell) | 2000 | 1000 (then rounded **up** to a whole number of GrowDiv periods) | lin |
-| Beat gating of segment starts | off | on (threshold e > 0.6) | step |
+| Segment extrusion time (ms/cell) | 2000 | 1000, floored by `minSegMs = 5000·1.3·1.4/gx` (910 ms at density 10, 1517 ms at density 6), then with Sync on rounded **up** to whole TempoDiv divisions | lin |
+| Grid gating of segment starts (Sync on) | off | on (threshold e > 0.6) | step |
 
-Sustained motion respects the ≥5 s full-traversal cap even at e=1 (math below).
+Sustained motion respects the ≥5 s full-traversal cap even at e=1 at **every
+density** (math below).
 
 ## Parameters
 
-UI order: triggers first, Energy, pattern parameters, Meta last (9 total).
+UI/registration order: triggers, Energy, pattern params, Audio, Sync, TempoDiv,
+Meta last (12 total).
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
 | `drain` | Drain | TriggerParameter | — | — | fade the room out over 3 s, clear, restart in the next palette color |
 | `teleport` | Teleport | TriggerParameter | — | — | one random growing pipe caps and jumps to a random free cell (the classic) |
 | `newPipe` | NewPipe | TriggerParameter | — | — | spawn another concurrent pipe (max 3) |
-| `energy` | Energy | CompoundParameter | 0.35 | 0..1 | 0–0.4 ambient crawl; 0.6–1.0 beat-gated high-energy growth |
+| `sparkle` | Sparkle | TriggerParameter | — | — | flash the recent elbow joints white at full brightness (manual treble sparkle) |
+| `energy` | Energy | CompoundParameter | 0.35 | 0..1 | 0–0.4 ambient crawl; 0.6–1.0 grid-gated high-energy growth |
 | `thickness` | Thick | CompoundParameter | 3.5 | 3..5 | pipe thickness in px (applies to newly drawn segments; clamped to cell size) |
 | `density` | Density | DiscreteParameter | 10 | 6..12 | room grid cells per axis; **takes effect at the next drain** |
 | `hue` | Hue | CompoundParameter | 0 | 0..360 | hue offset (degrees) added to the palette-derived pipe color |
-| `growthDiv` | GrowDiv | EnumParameter&lt;Growth&gt; | 1/4 | 1/8, 1/4, 1/2, 4/4 | beat division quantizing segment duration/starts at high energy |
+| `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth: 0 = pure screensaver, 1 = full reactivity |
+| `sync` | Sync | BooleanParameter | true | — | lock growth to the tempo grid; off = free-running timers |
+| `tempoDiv` | TempoDiv | EnumParameter&lt;Tempo.Division&gt; | 1/16 | all LX divisions | grid that durations quantize to and starts gate on when Sync is on |
 | `meta` | Meta | TriggerParameter | — | — | randomly fire one trigger or jump one parameter (`TriggerBag`) |
+
+Removed 2026-07-05: `growthDiv` (GrowDiv, enum 1/8..4/4) — superseded by the
+standard `sync`/`tempoDiv` pair. Old `.lxp` files referencing it will restore
+every other parameter and log an unknown-parameter warning for this one.
 
 Pipe color: hue of the palette swatch color at index `drainCount % swatch.size()`
 (so each drain advances to the next palette color), plus the `hue` offset, plus
@@ -129,14 +180,20 @@ geometry keeps its look, like real pipes already installed).
 
 ## Triggers
 
-- `drain` — 3 s full-surface brightness fade (a fade, not motion), then the
-  occupancy and buffers clear, the pending density applies, the palette color
-  advances, and the same number of pipes respawn. Also fires automatically at
-  >60% fill, or if a teleport/spawn can find no free cell.
-- `teleport` — instant: a cap ball marks the disconnect point and the pipe
-  continues from a random free cell. Reads immediately (the classic NT gag).
-- `newPipe` — instant: a spawn ball appears at a free cell and a new pipe
-  starts growing from it (max 3 concurrent; ignored when full or draining).
+Four non-meta triggers, small → large:
+
+- `sparkle` — **small**: the ≤16 most recent elbow joints flash white and decay
+  over 500 ms; a stationary glitter accent, no state changes.
+- `teleport` — **medium**: instant; a cap ball marks the disconnect point and
+  the pipe continues from a random free cell. Reads immediately (the classic
+  NT gag).
+- `newPipe` — **medium**: instant; a spawn ball appears at a free cell and a
+  new pipe starts growing from it (max 3 concurrent; ignored when full or
+  draining).
+- `drain` — **large**: 3 s full-surface brightness fade (a fade, not motion),
+  then the occupancy and buffers clear, the pending density applies, the
+  palette color advances, and the same number of pipes respawn. Also fires
+  automatically at >60% fill, or if a teleport/spawn can find no free cell.
 
 ## Jump candidates
 
@@ -148,22 +205,33 @@ updated during curation.
 | `thickness` | 3..5 (full) | candidate | new segments only; visible drift in lattice weight |
 | `density` | 6..12 (full) | candidate | deferred to next drain — jump reads as a room-scale change after the clear |
 | `hue` | 0..360 (full) | candidate | new segments only; lattice becomes multicolored over time |
-| `growthDiv` | all 4 divisions | candidate | only audible at energy > 0.6 (quantization granularity) |
+| `tempoDiv` | SIXTEENTH..HALF (curated subrange) | candidate | CURATE: unverified visually — a grid jump should read as a groove change, not a stall |
 
 Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [a,b]`.
 
+`growthDiv` was jumpable and is removed. `tempoDiv` joins the pool only over
+the curated `SIXTEENTH..HALF` ordinal subrange (via the
+`TriggerBag.jumpable(param, lo, hi)` discrete overload): the full
+`Tempo.Division` range spans 1/16 up to 16 bars, and a jump into the
+multi-bar divisions would quantize a segment to tens of seconds.
+
 ## Simulation-principles compliance
 
-Fastest sustained motion is the extrusion tip crossing a wall:
+Fastest sustained motion is the extrusion tip crossing a wall (`gx` cells):
 
-- Cell size at default density 10: 50/10 = **5 px**. A wall crossing is 10 cells.
-- Default energy 0.35: segment time = lin(0.35, 2000, 1000) = **1650 ms/cell**
-  → 10 × 1.65 s = **16.5 s** per 50 px wall crossing.
-- Energy 1: base 1000 ms/cell, rounded **up** to a whole number of GrowDiv
-  periods (at 160 BPM, 1/4 = 375 ms → 3 × 375 = 1125 ms/cell); with the maximum
-  audio-level boost ×1.3 → ≈ **865 ms/cell** worst case → ≈ **8.7 s** per wall
-  crossing. ≥5 s cap satisfied with margin, and a pipe rarely runs straight
-  across anyway (P_STRAIGHT = 0.55).
+- Cell size at default density 10: 50/10 = **5 px**; a wall crossing is 10 cells.
+- Default energy 0.35 (density 10): segment time = lin(0.35, 2000, 1000) =
+  1650 ms/cell, Sync-quantized up to whole 1/16s → ≥ 1650 ms → ≥ **16.5 s**
+  per 50 px wall crossing.
+- Energy 1, worst case at any density: `nextSegmentMs` floors the duration at
+  `minSegMs = TRAVERSAL_MIN_MS · (1 + LEVEL_RATE_BOOST) · DEFAULT_MAX_SCALE / gx
+  = 5000·1.3·1.4/gx`. The retime speed-up shrinks a duration by at most ×1.4
+  and the audio level boost accelerates by at most ×1.3, so effective per-cell
+  time ≥ 5000/gx ms → a full crossing of gx cells always takes ≥ **5.0 s**
+  exactly at the cap. Concretely: density 10 ≥ 5.5 s (floor inactive at
+  1000 ms/cell, retime+boost worst 549 ms/cell); density 6, floor 1517 ms/cell
+  → worst 833 ms/cell × 6 = 5.0 s. (Pre-2026-07-05 this was violated: 4.6 s at
+  density 6.) A pipe rarely runs straight across anyway (P_STRAIGHT = 0.55).
 - Drain: a 3 s full-surface **brightness ramp** — a fade, not motion, so the
   traversal cap does not apply; nothing translates during it.
 - Elbow sparkle: a **stationary** 500 ms brightness flash at fixed joints (like
@@ -174,10 +242,11 @@ Fastest sustained motion is the extrusion tip crossing a wall:
 Contrast/brightness: fully saturated pipes on true black; the only mid-tones
 are the depth cue (floor at 50% brightness so far pipes stay readable, not
 muddy) and the 1 px specular stripe. No fine texture; forms are ≥3 px thick by
-parameter floor (thickness clamps to the cell size at density 12, ≈4.2 px, so
-adjacent lattice cells stay distinct — `CURATE:` note in code).
+parameter floor (thickness clamps to `min(cw, ch)` — ≈4.1 px at density 12,
+where `ch` = 45/11 binds — so adjacent lattice cells stay distinct —
+`CURATE:` note in code).
 
-Time-to-fill at defaults (rough): 900 cells × 60% = 540 cells; 1 pipe at 1.65
+Time-to-fill at defaults (rough): 900 cells × 60% = 540 cells; 1 pipe at ~1.7
 s/cell ≈ 15 min to auto-drain (ambient — intentionally patient); 3 pipes at
 peak ≈ 4 min. The `drain` trigger and meta exist to short-circuit this live.
 `CURATE:` if ambient fills too slowly to ever drain in a set, lower
@@ -188,3 +257,6 @@ peak ≈ 4 min. The `drain` trigger and meta exist to short-circuit this live.
 | Date | Change | Why |
 |---|---|---|
 | 2026-07-04 | Initial implementation | First pass per approved plan; all CURATE: constants unverified on sculpture |
+| 2026-07-05 | Adversarial review pass: `beginSegment` retime estimate now folds in the audio level boost (`pSegMs/(1+0.3·level)`) — previously completions landed up to 23% (more than a whole 1/16 at ~1000 ms segments) early of the retimed boundary whenever the Audio knob was up; traversal-cap math unaffected (same [0.7,1.4] clamp). Corrected the thickness-clamp figure (binding clamp at density 12 is `ch` ≈ 4.1 px, not 4.2) | Verified improver's claims: all four claimed pre-existing bugs confirmed against HEAD; cap/quantization arithmetic checked; param keys/labels unchanged; render path allocation-free |
+| 2026-07-05 | Fixed sparkle overlay self-occlusion (visibility epsilon 0.001 was smaller than the elbow ball's own near-face depth offset ≈0.05 — sparkles never drew); enforced ≥5 s traversal cap at all densities via `minSegMs` floor (was 4.6 s at density 6/e=1/loud); added `audio` depth knob (default 0 = pure screensaver) wired through `AudioReactive.setDepth`, treble-sparkle response now scales with depth; migrated tempo handling to shared `TempoLock` with new `sync`/`tempoDiv` params — durations quantize AND phase-align to the engine grid via `retime` (old GrowDiv quantization was period-multiple only, and the start gate was hardcoded quarter-note `tempo.beat()`); removed `growthDiv`; added `Sparkle` manual trigger (4 non-meta triggers); corrected false door-column claim (cube columns are always 45 points) | Review session (Fable): bug fixes + series-convention upgrade |
+| 2026-07-05 | Integration pass: util request granted — `TriggerBag.jumpable(DiscreteParameter, lo, hi)` subrange overload added; `tempoDiv` now in the meta pool over the curated `SIXTEENTH..HALF` ordinal window (the SIXTEENTH..HALF span includes the triplet/dotted divisions between them — all sub-bar, all musical). Also fixed a stale-gate nit: `crossed()` now polls every frame instead of `syncOn && crossed()`, so re-enabling Sync can't spuriously open the growth gate off-grid. CURATE: tempoDiv jump unverified visually | Pipes3D agent's util request + series `crossed()` idiom |

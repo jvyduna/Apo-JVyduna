@@ -26,6 +26,10 @@ public class SurfaceCanvas {
     this.width = width;
     this.height = height;
     this.pixels = new int[width * height];
+    // Start opaque black (not transparent 0x00000000), consistent with
+    // fill()/decay()/get(), so a canvas drawn before any explicit fill()
+    // never copies alpha-0 pixels into the pattern color buffer.
+    fill(0xff000000);
   }
 
   /** Set a pixel; x wraps around the surface, out-of-range y is ignored */
@@ -51,9 +55,16 @@ public class SurfaceCanvas {
 
   /**
    * Multiply every pixel's RGB by mult (0..1), for trail effects. Alpha is
-   * forced opaque. Channels floor to 0, so trails fully extinguish.
+   * forced opaque. Channels floor to 0, so trails fully extinguish. Values
+   * outside 0..1 are clamped (a channel scaled past 255 would otherwise bleed
+   * into the neighboring channel's bits).
    */
   public void decay(double mult) {
+    if (mult > 1) {
+      mult = 1;
+    } else if (mult < 0) {
+      mult = 0;
+    }
     for (int i = 0; i < this.pixels.length; ++i) {
       final int c = this.pixels[i];
       if ((c & 0x00ffffff) == 0) {
@@ -123,7 +134,8 @@ public class SurfaceCanvas {
    *
    * @param orientation Target surface
    * @param colors Pattern color buffer (this.colors in the pattern)
-   * @param mult RGB multiplier, typically 0..1 for dimming, >1 to boost
+   * @param mult RGB multiplier, typically 0..1 for dimming, >1 to boost;
+   *             <=0 renders opaque black
    * @param flipY Read rows bottom-to-top (e.g. cave/inversion modes)
    */
   public void copyTo(Apotheneum.Orientation orientation, int[] colors, double mult, boolean flipY) {
@@ -140,7 +152,9 @@ public class SurfaceCanvas {
   }
 
   private static int scale(int argb, double mult) {
-    if ((argb & 0x00ffffff) == 0) {
+    // Negative mult would produce negative channel ints whose bits bleed
+    // across channel boundaries when shifted; render black instead
+    if ((mult <= 0) || ((argb & 0x00ffffff) == 0)) {
       return 0xff000000;
     }
     final int r = Math.min(255, (int) (((argb >> 16) & 0xff) * mult));

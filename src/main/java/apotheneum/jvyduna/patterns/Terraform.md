@@ -37,17 +37,20 @@ with zero mode switches.
   the diffusion stencil. All arrays, plus the `Random`, are allocated in the
   constructor — zero allocation in the render path.
 - **Per-pixel rule** (bottom-up, `elev` = rows above the physical ground,
-  computed as `fullHeight - 1 - yi` so door-shortened columns stay aligned):
+  computed as `fullHeight - 1 - yi`; see door-column handling below):
   - `elev ≤ sea` → water; the single top water row is the bright **waterline**
     accent (specular highlight). Water draws in front of submerged land, so the
     waterline is one continuous ring at the sea surface.
   - `sea < elev ≤ terrain` → land, banded by **absolute elevation**: sand /
     grass / rock / snow. Hard edges, no gradients.
   - above both → sky (black).
-- **Door-column handling**: door columns physically lack their lowest 11 rows;
-  since elevation is indexed from the column top, the sea surface and band
-  thresholds line up across doors, and rows below the door top are simply not
-  drawn (guarded by `column.points.length`).
+- **Door-column handling**: every cube/cylinder column carries the full point
+  count (the `Apotheneum` orientation constructors enforce 45/43 points per
+  column); door cutouts are masked globally by the core doors effect, not by
+  shorter columns. `points[0]` is the **top** row, so elevation is computed as
+  `fullHeight - 1 - yi`, which keeps the sea surface and band thresholds
+  aligned across all columns (and would remain correct even if door columns
+  were ever modeled short).
 
 ### Colors — fixed natural hues (decision)
 
@@ -76,22 +79,65 @@ CURATE: threshold fractions 0.30/0.55/0.80 unverified.
 
 ## Audio mapping
 
+All reactivity is gated by the **Audio depth knob** (`audio`, default **0**),
+attached via `AudioReactive.setDepth(audioDepth)`. At depth 0 every tap reads
+its silence value and hits never fire, so the depth-0 baseline *is* the
+silence behavior below. There is no per-site gating in the pattern — the
+depth scaling happens once inside `AudioReactive`.
+
 | Tap | Drives |
 |---|---|
 | `level` (slow-smoothed, τ = 4 s) | Sea level goal: `seaBias − 0.45 · slowLevel`, clamped to [0.05, 0.9]. Quiet → sea rises and drowns the land; loud → sea drains, mountains emerge. |
 | `bassHit()` + `bassRatio` | At energy ≥ 0.55: each bass transient raises a new mountain (uplift bump); amplitude scales with `bassRatio`. |
 | `treble` | Snowcap sparkle depth (with the `Sparkle` param), gated to energy > 0.5. |
 
-**Silence behavior**: all taps decay to 0 → the sea settles at `SeaBias`
-(default 0.55 ≈ mid-level), the Poisson uplift timer keeps slowly raising new
-mountains, and erosion keeps aging them — a calm, self-evolving archipelago.
-Designed to look good with zero audio.
+**Depth-0 baseline (default, = silence behavior)**: the sea settles at
+`SeaBias` (default 0.55 ≈ mid-level), the spontaneous uplift timer keeps
+slowly raising new mountains, and erosion keeps aging them — a calm,
+self-evolving archipelago. Designed to look good with zero audio.
+
+**Raising the knob restores**: the sea "breathing" (draining as sustained
+music level rises — the emotional core), bass-hit mountain births at high
+energy, and treble snow sparkle. Magnitude effects (sea swing, sparkle,
+bass-uplift amplitude via `bassRatio`) scale linearly with depth; bass-hit
+births start firing once depth > 0.01 at a floor amplitude of 0.6× (the
+`bassRatio` term supplies the remaining 0.4× as depth rises).
+
+## Tempo mapping
+
+Discrete formation events lock to the grid; continuous morphing (erosion,
+height chase, sea breathing) stays smooth and is never tempo-quantized.
+Default division: `QUARTER`.
+
+- **Spontaneous mountain births** — with `Sync` on, the free-running Poisson
+  timer is replaced by a `TempoLock.crossed(tempoDiv)` per-frame gate: on each
+  grid crossing a birth fires with probability
+  `upliftRate × divisionMs / 1000`, preserving the same expected rate as the
+  Poisson timer (capped at one birth per division cycle — at peak energy with
+  divisions longer than ~2 s the effective rate saturates at one per
+  division). Births land exactly on the beat; Energy still controls density.
+- **Flood ramp landing** — at the moment the `Flood` trigger fires, the sea
+  rise rate is scaled by `retime(msUntilFull, tempoDiv, 0.7, 1.0)` so the sea
+  tops out on a grid boundary. **Clamp override**: max scale 1.0 (slow-down
+  only) because `FLOOD_RAMP_SEC` = 5 s already sits exactly at the ≥ 5 s
+  full-traversal cap — the ramp may stretch to ~7.1 s but never quicken.
+  Retimed once, at trigger time (event-rate), not per frame.
+- **Not locked**: bass-hit births (already on the music), cataclysm/erupt/
+  reseed triggers (fire when pressed), erosion, subsidence, the height chase
+  and the ambient sea rate.
+
+`Sync` off restores exactly the previous free-running behavior: Poisson birth
+timer and the fixed 5 s flood ramp (`retime()` is not called; `crossed()` is
+still polled every frame with its result unused, so the gate stays fresh and
+re-enabling Sync cannot report a stale boundary and fire one spurious birth).
+CURATE: quarter-note default division for birth quantization
+unverified — at high BPM births may want `HALF`/`WHOLE` to stay stately.
 
 ## Energy mapping
 
 | Quantity | Ambient (e=0) | Peak (e=1) | Curve (lin/exp) |
 |---|---|---|---|
-| Spontaneous uplift rate (per surface) | 0.06 /s (~1 per 17 s) | 0.5 /s (~1 per 2 s) | exp |
+| Spontaneous uplift rate (one shared timer; each birth raises one bump on *both* surfaces at independent random columns) | 0.06 /s (~1 per 17 s) | 0.5 /s (~1 per 2 s) | exp |
 | Uplift amplitude factor (× `Uplift` param × height) | 0.40 | 0.90 | lin |
 | Uplift bump sigma (fraction of ring) | 0.02 (4 cube cols) | 0.045 (9 cube cols) | lin |
 | Diffusion coefficient (× `Erosion` param) | 0.4 /s | 2.0 /s | lin |
@@ -104,19 +150,24 @@ the ≥ 5 s full-traversal cap holds at every energy.
 
 ## Parameters
 
-UI order: triggers first, Energy, pattern parameters, Meta last.
+UI order: triggers first, Energy, pattern parameters, Audio, Sync, TempoDiv,
+Meta last.
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
 | `cataclysm` | Cataclysm | TriggerParameter | — | — | huge ridge + ≤ 0.5 s whole-ring shake, then settles |
 | `flood` | Flood | TriggerParameter | — | — | sea ramps to max, holds 2 s, drains back |
 | `reseed` | Reseed | TriggerParameter | — | — | morph to a fresh random terrain over ~5 s |
+| `erupt` | Erupt | TriggerParameter | — | — | raise one new mountain now, exactly as a spontaneous uplift would |
 | `energy` | Energy | CompoundParameter | 0.35 | 0..1 | master energy (0–0.4 ambient, 0.6–1.0 = 160 BPM regime) |
 | `upliftSize` | Uplift | CompoundParameter | 0.5 | 0..1 | amplitude of new mountain uplifts |
 | `erosion` | Erosion | CompoundParameter | 0.4 | 0..1 | diffusion + subsidence rate |
 | `seaBias` | SeaBias | CompoundParameter | 0.55 | 0.15..0.85 | sea level in silence (fraction of height); music lowers it |
 | `bandShift` | Bands | CompoundParameter | 0 | -0.2..0.2 | shift all band thresholds up/down (fraction of height) |
 | `sparkle` | Sparkle | CompoundParameter | 0.5 | 0..1 | treble snowcap shimmer (high energy only) |
+| `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth: 0 = pure screensaver, 1 = full reactivity |
+| `sync` | Sync | BooleanParameter | true | — | lock mountain births + flood landing to the tempo grid |
+| `tempoDiv` | TempoDiv | EnumParameter\<Tempo.Division\> | QUARTER | divisions | grid that synced events land on |
 | `meta` | Meta | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
 
 UI is Chromatik's default auto-generated control panel (no custom
@@ -124,6 +175,12 @@ UI is Chromatik's default auto-generated control panel (no custom
 
 ## Triggers
 
+Four non-meta triggers spanning small → large, all registered through the
+`TriggerBag` (so Meta can fire any of them):
+
+- `erupt` (small) — raises a single new mountain on each surface, exactly the
+  spontaneous-uplift recipe (Energy-scaled amplitude and sigma, random
+  columns). Reads in ~1.4 s at defaults; the subtlest permutation.
 - `cataclysm` — adds a mountain-range ridge (0.85 H central peak + two 0.55 H
   shoulders, σ = 5% of ring) to both surfaces' targets and starts the shake: a
   spatial sine ripple (±2.5 rows, 7 Hz, decaying) across every column for
@@ -135,7 +192,9 @@ UI is Chromatik's default auto-generated control panel (no custom
 - `flood` — sea goal overridden to 0.97 H at the flood rate (full sweep in 5 s;
   ~4 s from a typical drained sea), holds 2 s at max (near-total drowning, one
   bright waterline near the crown), then drains at the normal 8 s/full-sweep
-  rate back to the audio-driven level (~4 s for a typical drop).
+  rate back to the audio-driven level (~4 s for a typical drop). With `Sync`
+  on, the ramp rate is retimed (slow-down only, see Tempo mapping) so the sea
+  tops out on a `TempoDiv` boundary.
 - `reseed` — re-rolls both targets (random base 0.05–0.15 H plus 8 cube / 6
   cylinder random bumps, amp 0.25–0.8 H); displayed heights morph there under
   the rate limit, so the world transforms over ≤ 5 s.
@@ -147,7 +206,7 @@ updated during curation.
 
 | Param | Jump range | Status | Notes |
 |---|---|---|---|
-| `erosion` | 0..1 (full) | candidate | erosion rate |
+| `erosion` | 0.15..1 | re-ranged to [0.15, 1] | 2026-07-05: floor raised from 0 — a jump landing near erosion = 0 freezes aging while uplifts keep firing, and the ring saturates into a full-height snow plateau within minutes |
 | `upliftSize` | 0..1 (full) | candidate | uplift size |
 | `bandShift` | -0.12..0.12 | candidate | band offset; sub-range keeps snow ≥ ~4 rows |
 | `seaBias` | 0.3..0.75 | candidate | sea level bias; sub-range avoids near-empty/near-full seas |
@@ -161,7 +220,9 @@ Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [
   cylinder), independent of energy. A full-height (45-row) change therefore
   takes exactly **5 s** at default energy *and* at energy = 1. ✓
 - **Sea level**: normal rate = full sweep / 8 s; flood rate = full sweep / 5 s.
-  Both ≥ 5 s per full sculpture traversal at all energies. ✓
+  Both ≥ 5 s per full sculpture traversal at all energies. With `Sync` on the
+  flood retime clamp is [0.7, **1.0**] — slow-down only — so tempo locking can
+  stretch the ramp (to at most ~7.1 s) but never quicken it past the cap. ✓
 - **Uplift events**: a default-size bump (0.5 × 0.575 ≈ 0.29 H ≈ 13 rows) grows
   in ~1.4 s; worst case (Uplift = 1, e = 1: 0.9 H) in 4.5 s. These are localized
   event-like births (σ ≤ 9 of 200 columns) whose visual life continues for tens
@@ -183,8 +244,9 @@ Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [
 
 Other unverified constants: CURATE: `SEA_SWING` 0.45 and `SLOW_LEVEL_TAU_SEC`
 4 s (does the sea audibly "breathe" with song dynamics without pumping?).
-CURATE: Poisson rates 0.06→0.5 /s (is ambient lively enough / peak not
-cluttered?). CURATE: subsidence taus 120→30 s (do old ranges linger too long?).
+CURATE: spontaneous birth rates 0.06→0.5 /s, applied both as Poisson rate
+(Sync off) and per-crossing probability (Sync on) — is ambient lively enough /
+peak not cluttered? CURATE: subsidence taus 120→30 s (do old ranges linger too long?).
 CURATE: seed bump counts (8 cube / 6 cylinder) and base height 0.05–0.15 H.
 
 ## Curation log
@@ -192,3 +254,5 @@ CURATE: seed bump counts (8 cube / 6 cylinder) and base height 0.05–0.15 H.
 | Date | Change | Why |
 |---|---|---|
 | 2026-07-04 | Initial implementation | as planned; no visual verification yet |
+| 2026-07-05 | Review + upgrade session (code review, no visual verification): added `audio` depth knob (default 0) wired via `AudioReactive.setDepth` — no per-site gating needed, depth 0 reproduces silence behavior exactly; added `sync`/`tempoDiv` — spontaneous mountain births grid-gated via `crossed()` at rate-preserving probability, flood ramp retimed slow-down-only ([0.7, 1.0]) to land on the grid; added `erupt` small trigger (4th non-meta, registered in TriggerBag); factored shared uplift recipe into `spawnUplift(ampScale)` with named amp/sigma constants; re-ranged `erosion` meta-jump to [0.15, 1] (plateau-saturation guard); corrected door-column claim in doc + code comment (columns are always full-length; doors are a global mask, `points[0]` = top row) | audio-depth / tempo-sync series conventions; bug hunt found no functional render/indexing bugs — doc/comment drift only |
+| 2026-07-05 | Integration pass: fixed the Sync-re-enable stale-gate nit reported to the util queue — `crossed()` is now polled unconditionally every frame (was inside the Sync-on ternary branch), matching the series idiom, so re-enabling Sync no longer fires one spurious off-grid birth; `TempoLock.crossed()` javadoc now states the unconditional-poll contract | Terraform agent's util request; fixed at the call site rather than with a heuristic in-util guard |

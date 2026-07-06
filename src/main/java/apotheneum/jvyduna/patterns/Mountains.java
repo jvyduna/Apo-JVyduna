@@ -7,12 +7,16 @@ import apotheneum.ApotheneumPattern;
 import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.Ranges;
 import apotheneum.jvyduna.util.SurfaceCanvas;
+import apotheneum.jvyduna.util.TempoLock;
 import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
+import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
+import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundParameter;
+import heronarts.lx.parameter.EnumParameter;
 import heronarts.lx.parameter.TriggerParameter;
 import heronarts.lx.utils.LXUtils;
 
@@ -66,6 +70,20 @@ public class Mountains extends ApotheneumPattern {
 
   /** Residual brightness fraction targeted at the end of the restart fade */
   private static final double FADE_FLOOR = 0.004;
+
+  /**
+   * Seconds for the Glint trigger's brightness swell to settle back to the
+   * baseline lift. Event-like, no spatial motion; 2 s >= 1.5 s event minimum.
+   */
+  private static final double GLINT_SECONDS = 2;
+
+  /**
+   * Sync retime clamp for the reveal wipe: [0.7, 1.0]. The upper bound is 1
+   * (never faster than nominal) because REVEAL_SECONDS_PEAK sits exactly at
+   * the >= 5 s full-traversal cap — any speed-up at Energy = 1 would break it.
+   * Slowing by up to 30% stretches a reveal to at most 1.43x nominal.
+   */
+  private static final double REVEAL_RETIME_MAX = 1.0;
 
   // ---- Geography constants ---------------------------------------------------
 
@@ -136,6 +154,10 @@ public class Mountains extends ApotheneumPattern {
     new TriggerParameter("Invert", this::toggleInvert)
     .setDescription("Toggle cave mode: flip the whole render so ridges hang from the top"));
 
+  public final TriggerParameter glint = bag.register(
+    new TriggerParameter("Glint", this::glintNow)
+    .setDescription("Brightness swell: the whole field glows to full and settles back over 2s"));
+
   public final CompoundParameter energy =
     new CompoundParameter("Energy", 0.35)
     .setDescription("Master energy: 0-0.4 slow ambient accumulation, 0.6-1.0 beat-locked 160 BPM regime");
@@ -160,6 +182,18 @@ public class Mountains extends ApotheneumPattern {
     new CompoundParameter("Spawn", 1, 0.25, 4)
     .setDescription("Multiplier on ridge spawn rate (>1 = shorter gaps between ridges)");
 
+  public final CompoundParameter audioDepth =
+    new CompoundParameter("Audio", 0)
+    .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
+
+  public final BooleanParameter sync =
+    new BooleanParameter("Sync", true)
+    .setDescription("Lock ridge spawns and reveal completions to the tempo grid; off restores free-running timing");
+
+  public final EnumParameter<Tempo.Division> tempoDiv =
+    new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.QUARTER)
+    .setDescription("Tempo division that ridge spawns and reveal completions land on when Sync is enabled");
+
   public final TriggerParameter meta =
     new TriggerParameter("Meta", bag::fire)
     .setDescription("Randomly fire a trigger or jump a parameter");
@@ -167,32 +201,47 @@ public class Mountains extends ApotheneumPattern {
   // ---- State ------------------------------------------------------------------
 
   private final AudioReactive audio;
+  private final TempoLock tempoLock;
 
   /** Cave mode: mirror the render vertically so ridges hang from the top */
   private boolean inverted = false;
 
-  // Per-frame shared values computed once in render() and read by both fields
-  private double frameRevealMs;
-  private double frameSpawnIdleMs;
+  /** Glint trigger envelope: set to 1 on trigger, decays linearly to 0 */
+  private double glintLevel = 0;
+
+  // Per-frame shared values computed once in render(), always before the
+  // fields' advance() reads them. Initialized to their e=0 values because one
+  // reader can run pre-render: retime() inside a trigger-fired spawn() (e.g.
+  // MIDI NewRidge), which should see a real duration rather than 0 (retime
+  // guards 0 by returning 1, which would silently leave that reveal unsynced).
+  private double frameRevealMs = 1000 * REVEAL_SECONDS_AMBIENT;
+  private double frameSpawnIdleMs = 1000 * SPAWN_IDLE_SECONDS_AMBIENT;
   private boolean frameBassGated;
   private boolean frameBassHit;
+  private boolean frameSyncOn;
+  private boolean frameGridCross;
 
   private final Field cubeField = new Field("cube", 4 * Apotheneum.GRID_WIDTH, Apotheneum.GRID_HEIGHT);
   private final Field cylinderField = new Field("cylinder", Apotheneum.RING_LENGTH, Apotheneum.CYLINDER_HEIGHT);
 
   public Mountains(LX lx) {
     super(lx);
-    this.audio = new AudioReactive(lx);
+    this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
+    this.tempoLock = new TempoLock(lx);
 
     addParameter("wipe", this.wipe);
     addParameter("newRidge", this.newRidge);
     addParameter("invert", this.invert);
+    addParameter("glint", this.glint);
     addParameter("energy", this.energy);
     addParameter("roughness", this.roughness);
     addParameter("relief", this.relief);
     addParameter("bandOffset", this.bandOffset);
     addParameter("hueShift", this.hueShift);
     addParameter("spawnRate", this.spawnRate);
+    addParameter("audio", this.audioDepth);
+    addParameter("sync", this.sync);
+    addParameter("tempoDiv", this.tempoDiv);
     addParameter("meta", this.meta);
 
     // Jump candidates — mirrored 1:1 in the Mountains.md table
@@ -240,6 +289,13 @@ public class Mountains extends ApotheneumPattern {
     private double front = 0;   // wipe front in columns traveled
     private int painted = 0;    // columns committed so far
     private int wipeStart = 0;  // ring column where this ridge's wipe began
+
+    /**
+     * Reveal duration fixed at spawn when Sync is on, retimed so the wipe
+     * completes on a tempo-grid boundary; 0 = none (free-running: follow the
+     * live per-frame energy value, exactly the Sync-off behavior).
+     */
+    private double syncedRevealMs = 0;
     private int reliefRows = 0;
     private int t1, t2, t3;     // elevation band thresholds (rows above baseline)
     private final int[] bandColors = new int[4];
@@ -262,13 +318,17 @@ public class Mountains extends ApotheneumPattern {
           this.canvas.fill(LXColor.BLACK);
           this.baseline = -1;
           this.state = IDLE;
-          this.idleMs = 1e12; // restart immediately (still subject to bass gating)
+          this.idleMs = 1e12; // restart immediately (still subject to bass/grid gating)
           this.bassWaitMs = 0;
         }
         break;
 
       case REVEALING:
-        this.front += this.width * deltaMs / frameRevealMs;
+        // Sync on: per-ridge duration fixed at spawn (retimed onto the grid);
+        // Sync off (or spawned while off): live energy-driven duration
+        final double revealMs = (frameSyncOn && (this.syncedRevealMs > 0))
+          ? this.syncedRevealMs : frameRevealMs;
+        this.front += this.width * deltaMs / revealMs;
         final int target = (int) Math.min(this.front, this.width);
         while (this.painted < target) {
           paintColumn((this.wipeStart + this.painted) % this.width);
@@ -285,7 +345,18 @@ public class Mountains extends ApotheneumPattern {
       default: // IDLE
         this.idleMs = Math.min(this.idleMs + deltaMs, 1e12);
         if (this.idleMs >= frameSpawnIdleMs) {
-          if (isFull()) {
+          if (frameSyncOn) {
+            // Grid-locked regime: once due, spawn (or start the restart fade)
+            // exactly on the next TempoDiv boundary. This supersedes the
+            // bass-hit gate — the grid is the beat anchor when Sync is on.
+            if (frameGridCross) {
+              if (isFull()) {
+                startFade("field full");
+              } else {
+                spawn();
+              }
+            }
+          } else if (isFull()) {
             startFade("field full");
           } else if (!frameBassGated || frameBassHit || this.bassWaitMs >= BASS_GATE_FALLBACK_MS) {
             spawn();
@@ -344,6 +415,16 @@ public class Mountains extends ApotheneumPattern {
       this.wipeStart = this.random.nextInt(this.width);
       this.front = 0;
       this.painted = 0;
+      // Sync: fix this ridge's reveal duration now, stretched (never
+      // compressed — see REVEAL_RETIME_MAX) so the wipe closes the loop on a
+      // TempoDiv boundary. Spawns themselves land on a boundary when gated
+      // through advance(), so the whole reveal is grid-aligned end to end.
+      this.syncedRevealMs = 0;
+      if (sync.isOn()) {
+        final double s = tempoLock.retime(frameRevealMs, tempoDiv.getEnum(),
+          TempoLock.DEFAULT_MIN_SCALE, REVEAL_RETIME_MAX);
+        this.syncedRevealMs = frameRevealMs / s;
+      }
       this.state = REVEALING;
       LX.log("Mountains[" + this.name + "]: ridge baseline=" + this.baseline
         + " relief=" + this.reliefRows + " roughness=" + String.format("%.2f", effRoughness));
@@ -436,6 +517,10 @@ public class Mountains extends ApotheneumPattern {
     LX.log("Mountains: invert -> " + (this.inverted ? "cave (hanging)" : "normal (rising)"));
   }
 
+  private void glintNow() {
+    this.glintLevel = 1;
+  }
+
   // ---- Render --------------------------------------------------------------------
 
   @Override
@@ -449,11 +534,19 @@ public class Mountains extends ApotheneumPattern {
       / this.spawnRate.getValue();
     this.frameBassGated = (e >= BASS_GATE_ENERGY);
     this.frameBassHit = this.audio.bassHit();
+    this.frameSyncOn = this.sync.isOn();
+    // crossed() must tick every frame, even with Sync off, so re-enabling
+    // Sync doesn't misread a stale cycle count as an instant off-grid crossing
+    this.frameGridCross = this.tempoLock.crossed(this.tempoDiv.getEnum()) && this.frameSyncOn;
 
     this.cubeField.advance(deltaMs);
     this.cylinderField.advance(deltaMs);
 
-    final double lift = LIFT_BASE + LIFT_SPAN * Math.min(1, this.audio.level * LIFT_GAIN);
+    // Glint trigger: linear settle from full lift back to the baseline
+    this.glintLevel = Math.max(0, this.glintLevel - deltaMs / (GLINT_SECONDS * 1000));
+
+    final double audioLift = Math.min(1, this.audio.level * LIFT_GAIN);
+    final double lift = LIFT_BASE + LIFT_SPAN * Math.max(audioLift, this.glintLevel);
     this.cubeField.canvas.copyTo(Apotheneum.cube.exterior, this.colors, lift, this.inverted);
     this.cylinderField.canvas.copyTo(Apotheneum.cylinder.exterior, this.colors, lift, this.inverted);
 

@@ -3,6 +3,7 @@ package apotheneum.jvyduna.util;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
+import java.util.function.Consumer;
 
 import heronarts.lx.LX;
 import heronarts.lx.parameter.CompoundParameter;
@@ -77,15 +78,28 @@ public class TriggerBag {
 
   private static class DiscreteJump implements Action {
     private final DiscreteParameter parameter;
+    private final int lo, hi;
 
-    private DiscreteJump(DiscreteParameter parameter) {
+    private DiscreteJump(DiscreteParameter parameter, int lo, int hi) {
+      if ((lo < parameter.getMinValue()) || (hi > parameter.getMaxValue()) || (lo > hi)) {
+        throw new IllegalArgumentException(
+          "Bad jump subrange [" + lo + ", " + hi + "] for " + parameter.getLabel() +
+          " [" + parameter.getMinValue() + ", " + parameter.getMaxValue() + "]");
+      }
       this.parameter = parameter;
+      this.lo = lo;
+      this.hi = hi;
     }
 
     @Override
     public void execute(Random random, String logName) {
-      final int value = this.parameter.getMinValue() + random.nextInt((int) this.parameter.getRange());
-      LX.log("Meta[" + logName + "]: jump " + this.parameter.getLabel() + " -> " + value);
+      final int value = this.lo + random.nextInt(this.hi - this.lo + 1);
+      // Log the option label (e.g. enum name) when one exists, so curation
+      // logs read "jump Geometry -> Cylinder" rather than a bare index
+      final String[] options = this.parameter.getOptions();
+      final String display = (options != null) ?
+        options[value - this.parameter.getMinValue()] : String.valueOf(value);
+      LX.log("Meta[" + logName + "]: jump " + this.parameter.getLabel() + " -> " + display);
       this.parameter.setValue(value);
     }
   }
@@ -93,6 +107,7 @@ public class TriggerBag {
   private final String logName;
   private final Random random = new Random();
   private final List<Action> actions = new ArrayList<>();
+  private Consumer<Runnable> jumpScheduler = null;
 
   public TriggerBag(String logName) {
     this.logName = logName;
@@ -120,7 +135,37 @@ public class TriggerBag {
 
   /** Register a discrete/enum parameter jump over all its values */
   public TriggerBag jumpable(DiscreteParameter parameter) {
-    this.actions.add(new DiscreteJump(parameter));
+    return jumpable(parameter, parameter.getMinValue(), parameter.getMaxValue());
+  }
+
+  /**
+   * Register a discrete/enum parameter jump over a curated subrange of raw
+   * values, both inclusive. For an EnumParameter the raw values are the enum
+   * ordinals, so e.g. a Tempo.Division tempoDiv knob can join the meta pool
+   * restricted to a musical window:
+   * {@code jumpable(tempoDiv, Division.SIXTEENTH.ordinal(), Division.HALF.ordinal())}
+   * (the full Division range spans 1/16 up to 16 bars, which is unusable as a
+   * uniform jump).
+   */
+  public TriggerBag jumpable(DiscreteParameter parameter, int lo, int hi) {
+    this.actions.add(new DiscreteJump(parameter, lo, hi));
+    return this;
+  }
+
+  /**
+   * Optional hook: route jump executions through the pattern, e.g. to defer
+   * them to the next tempo-grid boundary the way trigger callbacks already
+   * can. When set, fire() hands each selected <em>jump</em> action to the
+   * scheduler as a Runnable instead of executing it inline; the pattern runs
+   * it immediately (Sync off) or stores it and runs it on the boundary (the
+   * jump value is chosen, and its Meta[...] line logged, when the Runnable
+   * runs). Trigger actions are unaffected — they already route through the
+   * pattern's own callbacks, which implement their own deferral.
+   *
+   * @param scheduler Jump execution hook, or null to restore inline execution
+   */
+  public TriggerBag setJumpScheduler(Consumer<Runnable> scheduler) {
+    this.jumpScheduler = scheduler;
     return this;
   }
 
@@ -133,6 +178,12 @@ public class TriggerBag {
       LX.log("Meta[" + this.logName + "]: nothing registered");
       return;
     }
-    this.actions.get(this.random.nextInt(this.actions.size())).execute(this.random, this.logName);
+    final Action action = this.actions.get(this.random.nextInt(this.actions.size()));
+    if ((this.jumpScheduler != null) && !(action instanceof TriggerAction)) {
+      // fire() is event-rate, so this small capture is acceptable allocation
+      this.jumpScheduler.accept(() -> action.execute(this.random, this.logName));
+    } else {
+      action.execute(this.random, this.logName);
+    }
   }
 }

@@ -1,4 +1,4 @@
-/m# CLAUDE.notes.md — jvyduna package (personal Claude memory)
+# CLAUDE.notes.md — jvyduna package (personal Claude memory)
 
 Personal Claude Code guidance for Jeff Vyduna's `apotheneum.jvyduna.*` work.
 
@@ -20,12 +20,12 @@ When Claude records new jvyduna guidance, edit **this** file, not the root
 The `apotheneum.jvyduna` package contains patterns and audio work by Jeff Vyduna
 for the Apotheneum LED installation.
 
-Jeff's goal is to compose a 20 minute piece for Apothneum that is tightly choreographed to the music in audio.songs/. At the same time he will use the beta 'arrange' branch of LXStudio (and LX/GLX) to provide helpful feedback on new features that allow artists to compose timeline-based compositions in Chromatik, as an alternative to the Ableton-based workflows most artists currently use to do this.  
+Jeff's goal is to compose a 20 minute piece for Apotheneum that is tightly choreographed to the music in audio.songs/. At the same time he will use the beta 'arrange' branch of LXStudio (and LX/GLX) to provide helpful feedback on new features that allow artists to compose timeline-based compositions in Chromatik, as an alternative to the Ableton-based workflows most artists currently use to do this.  
 
 ## Layout
 
 - `patterns/` — pattern classes
-- `audio/` — audio assets used while developing/performing (e.g. `audio/songs/`)
+- `audio/` — audio assets used while developing/performing (e.g. `audio/songs/`). These assets are intentionally locally excluded to prevent large, potentially copyrighted files from being pushed publicly.
 - Design docs live next to the code they describe, as `<PatternName>.md` in the
   same directory as the `.java` file (mirrors the `doved/` convention).
 
@@ -34,7 +34,7 @@ Jeff's goal is to compose a 20 minute piece for Apothneum that is tightly choreo
 - **`te-patterns`** (personal skill) — idioms for writing native-Java LX/Chromatik
   patterns, distilled from the TitanicsEnd team's example code. Useful cross-repo
   reference when authoring Apotheneum patterns (same LX framework; different
-  geometry). It surfaces automatically for pattern work; invoke it explicitly if it
+  geometry). It should surface automatically for pattern work; invoke it explicitly if it
   doesn't.
 
 ## Preferences
@@ -57,13 +57,15 @@ Jeff's goal is to compose a 20 minute piece for Apothneum that is tightly choreo
   IntelliJ or Claude the way I do. Only edit the shared/root files when explicitly
   told to.
 
-- **The `pom.xml` `lx.version` → `1.2.2-SNAPSHOT` bump stays UNSTAGED.** It is a
-  local working-tree change needed to build against the local `arrange`
-  LX/GLX/glxstudio artifacts. It must **not** enter any commit — not even on my fork
-  — because other contributors won't have `1.2.2-SNAPSHOT` in their `~/.m2` and it
-  would break their build. Carry it as a persistent unstaged modification; never
-  `git add pom.xml` for this change. (Revisit if/when arrange is released and the
-  version is one everyone has.)
+- **The `pom.xml` `lx.version` → `1.2.2-SNAPSHOT` bump is COMMITTED on my personal
+  branches** (e.g. `bliss`), so any build from committed state — worktrees, fresh
+  checkouts — targets the local `arrange` LX/GLX/glxstudio artifacts instead of
+  silently falling back to `1.2.1`. (Previously carried unstaged; that proved
+  fragile.) It must still **never** reach upstream or shared/PR-bound branches —
+  other contributors won't have `1.2.2-SNAPSHOT` in their `~/.m2` and it would
+  break their build — so revert `lx.version` to the upstream value when preparing
+  anything shared. (Revisit if/when arrange is released and the version is one
+  everyone has.)
 
 - **`audio/` is intentionally kept out of git.** The `jvyduna/audio/` folder holds
   ~258 MB of copyrighted reference tracks (the songs I'm choreographing to). It's

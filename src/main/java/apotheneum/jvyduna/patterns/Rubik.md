@@ -166,12 +166,15 @@ shared vertical sample `vy = ((p.y−cy)/sy − yCenter)/scale`, sliding the ima
 line, measured in the **same frame as the sticker rows** (so the floor tracks the
 image as `scale`/`yCenter` move it) and applied identically in both projection
 modes. The 3×3 rows occupy `vy ∈ [-1,-⅓]` (bottom), `[-⅓,⅓]` (middle), `[⅓,1]`
-(top). It is a **bipolar control centered at its 100% default**, linear
-`floor = -1 + yFloor·(2/3)`:
+(top). It is a **bipolar control spanning -100%..200%, default -100%**, linear
+`floor = -1 + yFloor·2` (so each 100% step is one full image height, i.e. three
+sticker rows):
 
-- `0%` — floor at `-1`: full image, nothing muted.
-- `100%` (default) — floor at `-⅓`: the bottom row is muted, middle and top remain.
-- `200%` — floor at `+⅓`: only the top row remains.
+- `-100%` (default) — floor at `-3`: three rows of headroom below the image; nothing
+  can be muted.
+- `0%` — floor at `-1`: just below the bottom row; the full image still shows.
+- `100%` — floor at `+1`: just above the top row; the whole image is muted.
+- `200%` — floor at `+3`: three rows above the image.
 
 Besides framing, this is the tool for hiding the top/bottom-cap leak that gnomonic
 projection produces at `scale < 100%` (the virtual cube's up/down faces reaching the
@@ -237,7 +240,7 @@ where it differs from the field name.
 | `beamMode` (Beam) | BooleanParameter | off | — | off = gnomonic perspective; on = orthographic collimated emitters (no bulge) |
 | `scale` (Scale) | CompoundParameter | 1.0 | 0..4 | projection scale (100% = full wall; Beam mode = literal emitter resize) |
 | `yCenter` (YCenter) | CompoundParameter | 0 | -1..1 | vertical center of the image (+ = up) |
-| `yFloor` (YFloor) | CompoundParameter | 1.0 | 0..2 | bipolar floor, default 100%; 0% = full image, 100% = below bottom row, 200% = only top row |
+| `yFloor` (YFloor) | CompoundParameter | -1.0 | -1..2 | bipolar floor, default -100%; -100% = 3 rows below image, 0% = just below bottom row, 100% = just above top row, 200% = 3 rows above image |
 | `surfaces` (Surface) | EnumParameter&lt;Surface&gt; | OUTER | — | OUTER / INNER / BOTH |
 
 UI is Chromatik's default auto-generated control panel (no custom

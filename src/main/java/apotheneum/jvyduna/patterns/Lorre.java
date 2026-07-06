@@ -8,12 +8,17 @@ import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.PerceptualHue;
 import apotheneum.jvyduna.util.Ranges;
 import apotheneum.jvyduna.util.SurfaceCanvas;
+import apotheneum.jvyduna.util.TempoLock;
 import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
+import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
+import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundParameter;
+import heronarts.lx.parameter.DiscreteParameter;
+import heronarts.lx.parameter.EnumParameter;
 import heronarts.lx.parameter.TriggerParameter;
 
 /**
@@ -21,7 +26,7 @@ import heronarts.lx.parameter.TriggerParameter;
  * of particles tracing the two-lobed Lorenz butterfly attractor, slowly rotating
  * about its vertical axis, with speed-lit fading trails.
  *
- * 300 particles integrate the Lorenz ODE (sigma = 10, beta = 8/3, rho adjustable)
+ * Up to 300 particles (Count) integrate the Lorenz ODE (sigma = 10, beta = 8/3, rho adjustable)
  * in its natural coordinates, are rotated about the attractor's vertical z axis,
  * and are orthographically projected into two SurfaceCanvases (cube exterior ring
  * 200x45, cylinder 120x43). The cube canvas holds four views of the same attractor
@@ -32,6 +37,14 @@ import heronarts.lx.parameter.TriggerParameter;
  * Signature move: the Kick trigger punts every particle off the attractor and the
  * swarm visibly re-converges onto the butterfly over a few seconds.
  *
+ * Audio reactivity is gated by the standard Audio depth knob (default 0 = pure
+ * screensaver): bass pumps the output brightness, bass transients fire
+ * mini-kicks, and the BassSpd coefficient accumulates bass energy into the
+ * timebase so particles pulse forward on drumbeats. With Sync on, trigger
+ * moments (Kick/Reseed/Tint, including RndTrig-fired ones) are deferred to the
+ * next TempoDiv grid boundary; the continuous orbit and rotation are never
+ * retimed.
+ *
  * See Lorre.md (beside this file) for the full design note.
  */
 @LXCategory("Apotheneum/jvyduna")
@@ -41,19 +54,21 @@ public class Lorre extends ApotheneumPattern {
 
   // ---- Lorenz system --------------------------------------------------------
 
-  /** Number of swarm particles */
+  /** Maximum swarm particles; the Count knob activates 1..NUM_PARTICLES of them */
   private static final int NUM_PARTICLES = 300;
 
   private static final double SIGMA = 10;         // classic Lorenz sigma
   private static final double BETA = 8.0 / 3.0;   // classic Lorenz beta
 
   /**
-   * Sim time units per wall second at Speed = 1, mid energy, mid audio level.
-   * One orbit around a lobe takes ~0.73 sim units at rho = 28 (measured), so this
-   * puts the lobe orbit at ~4.5 s with music, ~6.4 s in silence (brief: 4-8 s).
-   * CURATE: verify orbit tempo on the sculpture.
+   * Sim time units per wall second at Speed = 1 (100%). Calibrated to the old
+   * build's slowest effective rate (0.16 base x 0.4 knob min x 1.01 energy x
+   * 0.7 silence), so the rebaselined Speed knob preserves the old calibration:
+   * one lobe orbit (~0.73 sim units at rho = 28, measured) takes ~16 s at
+   * Speed 1, ~6.5 s at the default Speed 2.5 (the old default look), ~2.0 s at
+   * the Speed 8 max. CURATE: verify orbit tempo on the sculpture.
    */
-  private static final double BASE_SIM_RATE = 0.16;
+  private static final double SIM_RATE_AT_SPEED_1 = 0.045;
 
   /**
    * Max forward-Euler substep (sim units). Verified stable off-line: zero escapes
@@ -79,25 +94,38 @@ public class Lorre extends ApotheneumPattern {
    */
   private static final double KICK_MAGNITUDE = 25;
 
-  /** bassHit mini-kick magnitude (Lorenz units) at energy 0 / 1. CURATE: shimmer, not scatter. */
-  private static final double MINI_KICK_AMBIENT = 2;
-  private static final double MINI_KICK_PEAK = 6;
+  /**
+   * bassHit mini-kick magnitude (Lorenz units), scaled by audio depth. Raised
+   * ~2-3x from the original 2-6 so max Audio depth is unmistakable.
+   * CURATE: obvious punch at depth 1, but still short of the Kick trigger's 25.
+   */
+  private static final double MINI_KICK_MAGNITUDE = 10;
 
-  /** Audio level breathes integration dt by +-30% (brief-specified) */
-  private static final double DT_LEVEL_BREATHE = 0.3;
+  /**
+   * Tint trigger: perceptual hue step. Golden-ratio conjugate, so repeated tints
+   * walk the whole wheel without early repeats. CURATE: step should read as a
+   * clear but non-jarring recolor.
+   */
+  private static final double TINT_STEP = 0.382;
+
+  /**
+   * BassSpd gain: speed units (see SIM_RATE_AT_SPEED_1) added at BassSpd = 1
+   * and full depth-scaled bass. A strong bassline (bass ~0.5) adds ~2 speed
+   * units, ~+80% over the default Speed 2.5 -- particles audibly pulse forward
+   * on kicks and basslines. CURATE.
+   */
+  private static final double BASS_SPEED_GAIN = 4;
+
+  /** Output brightness pump per unit of depth-scaled bass: up to a 1.6x flash. CURATE. */
+  private static final double BASS_PUMP = 0.6;
 
   /** trebleRatio above its running average shortens trails by up to ~3.5x. CURATE: crispness under busy hi-hats. */
   private static final double TREBLE_DECAY_GAIN = 0.35;
 
-  // ---- Energy endpoints (ambient, peak) --------------------------------------
+  // ---- Particle lifecycle -------------------------------------------------------
 
-  /** Energy multiplies the sim rate: languid at ambient, urgent at peak */
-  private static final double SIM_RATE_ENERGY_AMBIENT = 0.8;
-  private static final double SIM_RATE_ENERGY_PEAK = 1.4;
-
-  /** Fast particles desaturate toward white-hot; energy raises the effect. CURATE. */
-  private static final double WHITE_HOT_AMBIENT = 0.4;
-  private static final double WHITE_HOT_PEAK = 0.8;
+  /** Jitter (Lorenz units) applied to a newborn particle copied off a live one. CURATE. */
+  private static final double BIRTH_JITTER = 1;
 
   // ---- Motion caps ------------------------------------------------------------
 
@@ -151,27 +179,43 @@ public class Lorre extends ApotheneumPattern {
   private final TriggerBag bag = new TriggerBag("Lorre");
 
   public final TriggerParameter kick = bag.register(
-    new TriggerParameter("Kick", this::kickSwarm)
+    new TriggerParameter("Kick", this::requestKick)
     .setDescription("Punt every particle off the attractor; the swarm re-converges over ~5s"));
 
   public final TriggerParameter reseed = bag.register(
-    new TriggerParameter("Reseed", this::reseedSwarm)
+    new TriggerParameter("Reseed", this::requestReseed)
     .setDescription("Re-scatter all particles uniformly in the attractor's bounding box"));
 
-  public final CompoundParameter energy =
-    new CompoundParameter("Energy", 0.35)
-    .setDescription("Master energy: 0-0.4 ambient drift, 0.6-1.0 high-energy show");
+  public final TriggerParameter tint = bag.register(
+    new TriggerParameter("Tint", this::requestTint)
+    .setDescription("Rotate the base hue by a golden-ratio step of the perceptual wheel"));
+
+  public final CompoundParameter desat =
+    new CompoundParameter("Desat", 0.55)
+    .setDescription("Fast-particle desaturation: 0 = fully saturated, 1 = white-hot pastel heads");
 
   public final CompoundParameter rho =
     new CompoundParameter("Rho", 28, 20, 45)
     .setDescription("Lorenz rho: chaotic butterfly near 28, regime hops across 24-40");
 
   public final CompoundParameter speed =
-    new CompoundParameter("Speed", 1, 0.4, 1.6)
-    .setDescription("Integration rate multiplier (scales the swarm's orbit tempo)");
+    new CompoundParameter("Speed", 2.5, 0, 8)
+    .setDescription("Orbit tempo: 0 = frozen moment, 1 = 100% (slowest orbit), 8 = 800%");
 
-  public final CompoundParameter rotate =
-    new CompoundParameter("Rotate", 0.75, 0, 1)
+  public final DiscreteParameter count =
+    new DiscreteParameter("Count", NUM_PARTICLES, 1, NUM_PARTICLES + 1)
+    .setDescription("Simulated particles: decreases kill oldest first, increases birth out of the live swarm");
+
+  public final CompoundParameter vis =
+    new CompoundParameter("Vis", 1)
+    .setDescription("Density reveal (#vis): 0 = a single particle and its trail, 1 = the whole swarm; hidden particles keep simulating");
+
+  public final CompoundParameter yPos =
+    new CompoundParameter("YPos", 0, -0.5, 0.5)
+    .setDescription("Attractor vertical position: -0.5 = 50% below the sculpture, +0.5 = 50% above");
+
+  public final CompoundParameter yRotSpd =
+    new CompoundParameter("YRotSpd", 0.75, 0, 1)
     .setDescription("Y-rotation speed: 0 = none, 1 = one revolution per 30s");
 
   public final CompoundParameter trails =
@@ -182,20 +226,51 @@ public class Lorre extends ApotheneumPattern {
     new CompoundParameter("Hue", 0.58, 0, 1)
     .setDescription("Base hue (perceptual position; default is Lorenz-classic blue)");
 
-  public final TriggerParameter meta =
-    new TriggerParameter("Meta", bag::fire)
+  public final CompoundParameter audioDepth =
+    new CompoundParameter("Audio", 0)
+    .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
+
+  public final CompoundParameter bassSpd =
+    new CompoundParameter("BassSpd", 0.5)
+    .setDescription("Bass-to-speed coefficient: accumulates bass energy into the timebase so particles pulse forward on drumbeats");
+
+  public final BooleanParameter sync =
+    new BooleanParameter("Sync", true)
+    .setDescription("Lock motion events to the tempo grid; off restores free-running timing");
+
+  public final EnumParameter<Tempo.Division> tempoDiv =
+    new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.HALF)
+    .setDescription("Tempo division that motion events land on when Sync is enabled");
+
+  public final TriggerParameter rndTrig =
+    new TriggerParameter("RndTrig", bag::fire)
     .setDescription("Randomly fire a trigger or jump a parameter");
 
   // ---- State (all preallocated; zero allocation in render) ----------------------
 
   private final AudioReactive audio;
+  private final TempoLock tempoLock;
   private final Random random = new Random();
+
+  /** Sync-deferred triggers pending execution on the next tempo-grid boundary */
+  private boolean pendingKick, pendingReseed, pendingTint;
+
+  /** Sync-deferred RndTrig parameter jump (latest wins), or null if none pending */
+  private Runnable pendingJump = null;
 
   /** Particle positions in Lorenz coordinates: [axis x/y/z][particle] */
   private final double[][] pos = new double[3][NUM_PARTICLES];
 
   /** Last integration-step speed |v| per particle, for brightness */
   private final double[] spd = new double[NUM_PARTICLES];
+
+  /**
+   * Live-particle ring window: slots (head + k) % NUM_PARTICLES for
+   * k < activeCount are simulated; Count decreases advance head (killing
+   * oldest first), increases birth at the tail. Compute scales with Count.
+   */
+  private int head = 0;
+  private int activeCount = NUM_PARTICLES;
 
   private final SurfaceCanvas cubeCanvas =
     new SurfaceCanvas(Apotheneum.Cube.Ring.LENGTH, Apotheneum.GRID_HEIGHT);
@@ -212,24 +287,40 @@ public class Lorre extends ApotheneumPattern {
 
   public Lorre(LX lx) {
     super(lx);
-    this.audio = new AudioReactive(lx);
+    this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
+    this.tempoLock = new TempoLock(lx);
+
+    // Fine control near the frozen end; 0/1/2/4/8 are the meaningful stops
+    this.speed.setExponent(2);
 
     addParameter("kick", this.kick);
     addParameter("reseed", this.reseed);
-    addParameter("energy", this.energy);
+    addParameter("tint", this.tint);
+    addParameter("desat", this.desat);
     addParameter("rho", this.rho);
     addParameter("speed", this.speed);
-    addParameter("rotate", this.rotate);
+    addParameter("count", this.count);
+    addParameter("vis", this.vis);
+    addParameter("yPos", this.yPos);
+    addParameter("yRotSpd", this.yRotSpd);
     addParameter("trails", this.trails);
     addParameter("hue", this.hue);
-    addParameter("meta", this.meta);
+    addParameter("audio", this.audioDepth);
+    addParameter("bassSpd", this.bassSpd);
+    addParameter("sync", this.sync);
+    addParameter("tempoDiv", this.tempoDiv);
+    addParameter("rndTrig", this.rndTrig);
 
     // Jump candidates -- each line mirrors a row in Lorre.md's Jump-candidates table
-    bag.jumpable(this.rho, 24, 40);        // regime-hopping, best jump in the suite
-    bag.jumpable(this.rotate, 0.15, 1.0);  // avoid a dead-stop jump
-    bag.jumpable(this.trails);             // full range
-    bag.jumpable(this.speed, 0.6, 1.4);    // capped: keeps orbit tempo in a musical window
-    bag.jumpable(this.hue);                // full range
+    bag.jumpable(this.rho, 24, 40);          // regime-hopping, best jump in the suite
+    bag.jumpable(this.yRotSpd, 0.15, 1.0);   // avoid a dead-stop jump
+    bag.jumpable(this.trails);               // full range
+    bag.jumpable(this.speed, 1.5, 3.5);      // capped: keeps orbit tempo in a musical window (was [0.6, 1.4] pre-rebaseline)
+    bag.jumpable(this.hue);                  // full range
+
+    // RndTrig parameter jumps defer to the tempo grid exactly like the triggers:
+    // rho regime hops especially should land as musical hits, not off-grid
+    bag.setJumpScheduler(this::requestJump);
 
     // Scatter, then integrate silently so frame one already shows the butterfly
     reseedSwarm();
@@ -242,24 +333,103 @@ public class Lorre extends ApotheneumPattern {
 
   // ---- Triggers ------------------------------------------------------------------
 
+  // With Sync on, trigger actions are deferred to the next TempoDiv grid boundary
+  // (executed in render()); with Sync off they fire immediately. Repeat fires
+  // within one deferral window coalesce into a single action.
+
+  private void requestKick() {
+    if (this.sync.isOn()) {
+      this.pendingKick = true;
+    } else {
+      kickSwarm();
+    }
+  }
+
+  private void requestReseed() {
+    if (this.sync.isOn()) {
+      this.pendingReseed = true;
+    } else {
+      reseedSwarm();
+    }
+  }
+
+  private void requestTint() {
+    if (this.sync.isOn()) {
+      this.pendingTint = true;
+    } else {
+      tintSwarm();
+    }
+  }
+
+  /**
+   * RndTrig-fired parameter jumps route here via TriggerBag.setJumpScheduler
+   * and get the same grid deferral as the triggers; repeat RndTrig fires within
+   * one deferral window coalesce (latest jump wins). Event-rate, not per-frame.
+   */
+  private void requestJump(Runnable jump) {
+    if (this.sync.isOn()) {
+      this.pendingJump = jump;
+    } else {
+      jump.run();
+    }
+  }
+
   /** Kick: perturb every particle by a random offset; the attractor pulls them back */
   private void kickSwarm() {
     perturb(KICK_MAGNITUDE);
   }
 
-  /** Reseed: re-scatter particles uniformly in the attractor's bounding box */
+  /** Tint: step the base hue by the golden-ratio conjugate, wrapping in [0, 1) */
+  private void tintSwarm() {
+    final double h = this.hue.getValue() + TINT_STEP;
+    this.hue.setValue((h >= 1) ? h - 1 : h);
+  }
+
+  /** Array index of the k-th live particle in the ring window */
+  private int slot(int k) {
+    return (this.head + k) % NUM_PARTICLES;
+  }
+
+  /**
+   * Reconcile the live window to the Count knob, called once per frame before
+   * any physics. Decreases advance head, killing the oldest particles (their
+   * trails fade out via canvas decay); increases birth at the tail by copying
+   * a random live particle plus a small jitter, so newborns visibly emerge
+   * from the swarm and diverge chaotically -- a sudden knob change reads as
+   * births/deaths, never a discontinuity.
+   */
+  private void reconcileCount() {
+    final int target = this.count.getValuei();
+    while (this.activeCount > target) {
+      this.head = (this.head + 1) % NUM_PARTICLES;
+      --this.activeCount;
+    }
+    while (this.activeCount < target) {
+      final int src = slot(this.random.nextInt(this.activeCount));
+      final int i = slot(this.activeCount);
+      this.pos[0][i] = this.pos[0][src] + (2 * this.random.nextDouble() - 1) * BIRTH_JITTER;
+      this.pos[1][i] = this.pos[1][src] + (2 * this.random.nextDouble() - 1) * BIRTH_JITTER;
+      this.pos[2][i] = this.pos[2][src] + (2 * this.random.nextDouble() - 1) * BIRTH_JITTER;
+      this.spd[i] = 0;
+      ++this.activeCount;
+    }
+  }
+
+  /** Reseed: re-scatter live particles uniformly in the attractor's bounding box */
   private void reseedSwarm() {
     final double rhoNow = this.rho.getValue();
-    for (int i = 0; i < NUM_PARTICLES; ++i) {
+    for (int k = 0; k < this.activeCount; ++k) {
+      final int i = slot(k);
       this.pos[0][i] = (2 * this.random.nextDouble() - 1) * 0.8 * rhoNow;
       this.pos[1][i] = (2 * this.random.nextDouble() - 1) * rhoNow;
       this.pos[2][i] = this.random.nextDouble() * 0.75 * (Z_MAX_SLOPE * rhoNow + Z_MAX_OFFSET);
     }
   }
 
-  /** Offset every particle by a uniform random vector in [-magnitude, magnitude]^3 */
+  /** Offset every live particle by a uniform random vector in [-magnitude, magnitude]^3 */
   private void perturb(double magnitude) {
-    for (int i = 0; i < NUM_PARTICLES; ++i) {
+    for (int k = 0; k < this.activeCount; ++k) {
+      final int i = slot(k);
       this.pos[0][i] += (2 * this.random.nextDouble() - 1) * magnitude;
       this.pos[1][i] += (2 * this.random.nextDouble() - 1) * magnitude;
       this.pos[2][i] += (2 * this.random.nextDouble() - 1) * magnitude;
@@ -278,10 +448,11 @@ public class Lorre extends ApotheneumPattern {
 
   // ---- Integration -----------------------------------------------------------------
 
-  /** One forward-Euler substep of h sim units for the whole swarm, with escape guard */
+  /** One forward-Euler substep of h sim units for the live swarm, with escape guard */
   private void step(double h, double rhoNow) {
     final double escapeSq = ESCAPE_RADIUS * ESCAPE_RADIUS;
-    for (int i = 0; i < NUM_PARTICLES; ++i) {
+    for (int k = 0; k < this.activeCount; ++k) {
+      final int i = slot(k);
       final double x = this.pos[0][i];
       final double y = this.pos[1][i];
       final double z = this.pos[2][i];
@@ -309,20 +480,54 @@ public class Lorre extends ApotheneumPattern {
   protected void render(double deltaMs) {
     this.audio.tick(deltaMs);
 
-    final double e = this.energy.getValue();
-    final double rhoNow = this.rho.getValue();
+    // Tempo grid gate. Called unconditionally every frame (not just when Sync is
+    // on and a trigger is pending) so the gate never goes stale: a lapsed call
+    // pattern would report any old boundary as "crossed" and fire a deferred
+    // trigger immediately instead of on the grid.
+    final boolean gridBoundary = this.tempoLock.crossed(this.tempoDiv.getEnum());
 
-    // bassHit -> mini-kick: a shimmer-scale version of the Kick trigger
-    if (this.audio.bassHit()) {
-      perturb(Ranges.lin(e, MINI_KICK_AMBIENT, MINI_KICK_PEAK));
+    // Execute sync-deferred triggers and RndTrig jumps on the boundary; if Sync
+    // was turned off while one was pending, release it immediately
+    if (this.pendingKick || this.pendingReseed || this.pendingTint || (this.pendingJump != null)) {
+      if (gridBoundary || !this.sync.isOn()) {
+        if (this.pendingKick) {
+          this.pendingKick = false;
+          kickSwarm();
+        }
+        if (this.pendingReseed) {
+          this.pendingReseed = false;
+          reseedSwarm();
+        }
+        if (this.pendingTint) {
+          this.pendingTint = false;
+          tintSwarm();
+        }
+        if (this.pendingJump != null) {
+          final Runnable jump = this.pendingJump;
+          this.pendingJump = null;
+          jump.run(); // boundary event-rate: picks the value, logs, sets the param
+        }
+      }
     }
 
-    // Integration dt: Speed knob x energy x level breathing (+-30%, brief-specified).
-    // Silence-safe: level = 0 just settles at 0.7x base rate.
-    final double simRate = BASE_SIM_RATE
-      * this.speed.getValue()
-      * Ranges.lin(e, SIM_RATE_ENERGY_AMBIENT, SIM_RATE_ENERGY_PEAK)
-      * (1 + DT_LEVEL_BREATHE * (2 * this.audio.level - 1));
+    final double rhoNow = this.rho.getValue();
+
+    // Reconcile the live-particle window to the Count knob before any physics
+    reconcileCount();
+
+    // bassHit -> mini-kick: a punchy small-scale version of the Kick trigger.
+    // Hits are boolean (fire at any depth > 0.01), so the response is scaled
+    // by depth(); works even on a frozen (Speed 0) swarm
+    if (this.audio.bassHit()) {
+      perturb(MINI_KICK_MAGNITUDE * this.audio.depth());
+    }
+
+    // Integration dt: Speed knob (0 = frozen moment) plus BassSpd accumulating
+    // depth-scaled bass energy into the timebase -- particles pulse forward off
+    // their baseline tempo when the low end hits. Silence-safe: bass = 0
+    // (silence, or Audio depth 0) leaves the Speed baseline untouched.
+    final double simRate = SIM_RATE_AT_SPEED_1
+      * (this.speed.getValue() + BASS_SPEED_GAIN * this.bassSpd.getValue() * this.audio.bass);
 
     // Clamped-dt integration: fixed-size substeps; overlong frames dilate sim time
     double simDt = deltaMs * .001 * simRate;
@@ -338,7 +543,7 @@ public class Lorre extends ApotheneumPattern {
     }
 
     // Slow rotation about the attractor's vertical z axis
-    this.rotationAngle += deltaMs * .001 * this.rotate.getValue() * ROTATION_MAX_REV_PER_SEC * 2 * Math.PI;
+    this.rotationAngle += deltaMs * .001 * this.yRotSpd.getValue() * ROTATION_MAX_REV_PER_SEC * 2 * Math.PI;
     if (this.rotationAngle > 2 * Math.PI) {
       this.rotationAngle -= 2 * Math.PI;
     }
@@ -351,18 +556,26 @@ public class Lorre extends ApotheneumPattern {
     this.cubeCanvas.decay(decayMult);
     this.cylinderCanvas.decay(decayMult);
 
-    plot(e, rhoNow);
+    plot(rhoNow);
 
-    // Exterior surfaces from the canvases (door columns guarded inside copyTo)...
-    this.cubeCanvas.copyTo(Apotheneum.cube.exterior, this.colors);
-    this.cylinderCanvas.copyTo(Apotheneum.cylinder.exterior, this.colors);
+    // Exterior surfaces from the canvases (door columns guarded inside copyTo);
+    // bass pumps output brightness so the whole swarm flashes with the low end.
+    // Silence/depth-0 (pump == 1) takes the plain copy -- bit-identical output
+    final double pump = 1 + BASS_PUMP * this.audio.bass;
+    if (pump > 1.001) {
+      this.cubeCanvas.copyTo(Apotheneum.cube.exterior, this.colors, pump, false);
+      this.cylinderCanvas.copyTo(Apotheneum.cylinder.exterior, this.colors, pump, false);
+    } else {
+      this.cubeCanvas.copyTo(Apotheneum.cube.exterior, this.colors);
+      this.cylinderCanvas.copyTo(Apotheneum.cylinder.exterior, this.colors);
+    }
     // ...then interiors mirror the exteriors
     copyCubeExterior();
     copyCylinderExterior();
   }
 
-  /** Rotate, orthographically project, and plot the swarm into both canvases */
-  private void plot(double e, double rhoNow) {
+  /** Rotate, orthographically project, and plot the visible swarm into both canvases */
+  private void plot(double rhoNow) {
     // Per-view rotation: view v sees the attractor from a heading 360/N * v away,
     // so all views are one coherent 3D object at the center of the building.
     for (int v = 0; v < CUBE_VIEWS; ++v) {
@@ -387,10 +600,25 @@ public class Lorre extends ApotheneumPattern {
     final double cylUScale = Math.min(cylVScale, (CYLINDER_VIEW_SPACING / 2 - 1) / uMax);
 
     final double speedFull = SPEED_FULL_PER_RHO * rhoNow;
-    final double whiteHot = Ranges.lin(e, WHITE_HOT_AMBIENT, WHITE_HOT_PEAK);
+    final double whiteHot = this.desat.getValue();
     final double hueBase = this.hue.getValue();
 
-    for (int i = 0; i < NUM_PARTICLES; ++i) {
+    // YPos slides the attractor by up to half the surface height; off-canvas
+    // rows are silently dropped by SurfaceCanvas.set(). Positive = up, and
+    // canvas y is top-down, so the offset is negated
+    final double yPosNow = this.yPos.getValue();
+    final double cubeYOff = -yPosNow * Apotheneum.GRID_HEIGHT;
+    final double cylYOff = -yPosNow * Apotheneum.CYLINDER_HEIGHT;
+
+    // Vis gate: only the first visibleCount window slots are drawn; the rest
+    // keep simulating invisibly (constant compute), so raising Vis is an
+    // instant reveal. Ring order is uncorrelated with spatial position
+    // (chaotic mixing), so density thins uniformly across the attractor.
+    // CURATE: linear map; consider vis^2 if the low end needs finer control
+    final int visibleCount = 1 + (int) Math.round(this.vis.getValue() * (this.activeCount - 1));
+
+    for (int k = 0; k < visibleCount; ++k) {
+      final int i = slot(k);
       final double x = this.pos[0][i];
       final double y = this.pos[1][i];
       final double z = this.pos[2][i];
@@ -402,13 +630,13 @@ public class Lorre extends ApotheneumPattern {
       final float bri = (float) (100 * (BRIGHTNESS_FLOOR + (1 - BRIGHTNESS_FLOOR) * b));
       final int argb = LXColor.hsb(hueDeg, sat, bri);
 
-      final int cubeY = (int) Math.round(VERTICAL_MARGIN + (zMax - z) * cubeVScale);
+      final int cubeY = (int) Math.round(VERTICAL_MARGIN + (zMax - z) * cubeVScale + cubeYOff);
       for (int v = 0; v < CUBE_VIEWS; ++v) {
         final double u = x * this.cubeCos[v] - y * this.cubeSin[v];
         this.cubeCanvas.set(CUBE_VIEW_CENTER + v * CUBE_VIEW_SPACING + (int) Math.round(u * cubeUScale), cubeY, argb);
       }
 
-      final int cylY = (int) Math.round(VERTICAL_MARGIN + (zMax - z) * cylVScale);
+      final int cylY = (int) Math.round(VERTICAL_MARGIN + (zMax - z) * cylVScale + cylYOff);
       for (int v = 0; v < CYLINDER_VIEWS; ++v) {
         final double u = x * this.cylinderCos[v] - y * this.cylinderSin[v];
         this.cylinderCanvas.set(CYLINDER_VIEW_CENTER + v * CYLINDER_VIEW_SPACING + (int) Math.round(u * cylUScale), cylY, argb);

@@ -15,10 +15,13 @@ import apotheneum.doved.lightning.PhysicallyBasedAlgorithm;
 import apotheneum.doved.lightning.RRTAlgorithm;
 import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.Ranges;
+import apotheneum.jvyduna.util.TempoLock;
 import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
+import heronarts.lx.Tempo;
+import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundParameter;
 import heronarts.lx.parameter.EnumParameter;
 import heronarts.lx.parameter.TriggerParameter;
@@ -28,10 +31,13 @@ import heronarts.lx.parameter.TriggerParameter;
  *
  * A thin wrapper over the {@code apotheneum.doved.lightning} generator library
  * (midpoint displacement / L-system / RRT / physically-based). Zot owns the
- * strike scheduling (manual trigger, bass transients, silence-safe ambient
- * Poisson storms) and the strike envelope (stepped leader draw-in, one-frame
- * return stroke, long afterglow); the doved generators own bolt geometry and
- * segment rendering, and are reused unmodified.
+ * strike scheduling (manual trigger, bass transients gated by the Audio depth
+ * knob, silence-safe ambient Poisson storms) and the strike envelope (stepped
+ * leader draw-in, one-frame return stroke, long afterglow); the doved
+ * generators own bolt geometry and segment rendering, and are reused
+ * unmodified. With Sync on, every return stroke lands on the TempoDiv grid
+ * (the leader duration is retimed), and ambient/storm launches quantize to
+ * grid crossings; with Sync off timing is fully free-running.
  *
  * See Zot.md (beside this file) for the full design note.
  */
@@ -121,7 +127,11 @@ public class Zot extends ApotheneumRasterPattern {
   // Fixed doved generator settings not worth a knob (curated defaults from
   // doved's Lightning.java, biased toward tall top-to-bottom strikes)
   private static final int MIDPOINT_DEPTH = 6;
-  private static final double MIDPOINT_START_SPREAD = 0.9;
+  // NB: doved's default startSpread (0.9) assumed a fixed center startX; Zot
+  // already randomizes startX per strike, and a wide spread re-scattered it
+  // across the full width where the generator's bounds clamp piled ~15% of
+  // strikes at exactly x=0/x=49. Keep just a small jitter here.
+  private static final double MIDPOINT_START_SPREAD = 0.1;
   private static final double MIDPOINT_END_SPREAD = 0.8;
   private static final double MIDPOINT_BRANCH_DISTANCE = 0.6;
   private static final double MIDPOINT_BRANCH_ANGLE = 0.5;
@@ -142,7 +152,8 @@ public class Zot extends ApotheneumRasterPattern {
   private static final double PHYS_CHARGE_DECAY = 0.02;
   private static final double PHYS_CONNECTION_DISTANCE = 10;
 
-  // ---- Parameters (UI order: triggers, energy, pattern params, meta last) ---
+  // ---- Parameters (UI order: triggers, energy, pattern params, audio,
+  // ---- sync, tempoDiv, meta last) --------------------------------------------
 
   private final TriggerBag bag = new TriggerBag("Zot");
 
@@ -194,6 +205,18 @@ public class Zot extends ApotheneumRasterPattern {
     new CompoundParameter("Flash", 0.15, 0, 0.5)
     .setDescription("Whole-face return-stroke flash brightness; 1 frame max, rate-limited to one per 8s; 0 = off");
 
+  public final CompoundParameter audioDepth =
+    new CompoundParameter("Audio", 0)
+    .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
+
+  public final BooleanParameter sync =
+    new BooleanParameter("Sync", true)
+    .setDescription("Lock strikes to the tempo grid; off restores free-running timing");
+
+  public final EnumParameter<Tempo.Division> tempoDiv =
+    new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.QUARTER)
+    .setDescription("Tempo division that return strokes and quantized launches land on when Sync is enabled");
+
   public final TriggerParameter meta =
     new TriggerParameter("Meta", bag::fire)
     .setDescription("Randomly fire a trigger or jump a parameter");
@@ -218,6 +241,7 @@ public class Zot extends ApotheneumRasterPattern {
 
   private final Random random = new Random();
   private final AudioReactive audio;
+  private final TempoLock tempoLock;
 
   private double msSinceAudioStrike = 1e9;
   private double msSinceFaceFlash = 1e9;
@@ -226,7 +250,8 @@ public class Zot extends ApotheneumRasterPattern {
 
   public Zot(LX lx) {
     super(lx);
-    this.audio = new AudioReactive(lx);
+    this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
+    this.tempoLock = new TempoLock(lx);
     for (int i = 0; i < MAX_BOLTS; ++i) {
       this.bolts[i] = new Bolt();
     }
@@ -243,6 +268,9 @@ public class Zot extends ApotheneumRasterPattern {
     addParameter("glow", this.glow);
     addParameter("ambient", this.ambient);
     addParameter("flash", this.flash);
+    addParameter("audio", this.audioDepth);
+    addParameter("sync", this.sync);
+    addParameter("tempoDiv", this.tempoDiv);
     addParameter("meta", this.meta);
 
     // Jump candidates — mirrored 1:1 in the Zot.md "Jump candidates" table
@@ -299,15 +327,26 @@ public class Zot extends ApotheneumRasterPattern {
     // zero-alloc render rule. See Zot.md.
     final Algo algo = this.algorithm.getEnum();
     bolt.segments.clear();
+    bolt.visible.clear();
     algo.generator.generateLightning(bolt.segments, buildParams(algo));
     if (bolt.segments.isEmpty()) {
+      // A recycled slot has already been wiped — retire it rather than leave
+      // an active husk holding an empty segment list until its old expiry
+      bolt.active = false;
       return;
     }
-    bolt.visible.clear();
     bolt.visible.ensureCapacity(bolt.segments.size());
     bolt.generator = algo.generator;
     bolt.leaderMs = LEADER_MIN_MS
       + this.random.nextDouble() * (LEADER_MAX_MS - LEADER_MIN_MS);
+    if (this.sync.isOn()) {
+      // Land the return stroke — the "Zot!" pop, the bolt's one salient
+      // instant — on the tempo grid. retime() returns a rate scale (apply as
+      // velocity *= s), so the leader duration divides by it; with the
+      // default [0.7, 1.4] clamp the leader stays within ~214-857 ms and the
+      // glow floor below still guarantees >= 1.5s total visual life.
+      bolt.leaderMs /= this.tempoLock.retime(bolt.leaderMs, this.tempoDiv.getEnum());
+    }
     final double glowMs = this.glow.getValue() * 1000
       * Ranges.lin(this.energy.getValue(), GLOW_SCALE_AMBIENT, GLOW_SCALE_PEAK);
     // Enforce the minimum total visual life (simulation principles)
@@ -375,10 +414,18 @@ public class Zot extends ApotheneumRasterPattern {
   protected void render(double deltaMs, Graphics2D graphics) {
     this.audio.tick(deltaMs);
     final double e = this.energy.getValue();
+    final boolean sync = this.sync.isOn();
+    final Tempo.Division div = this.tempoDiv.getEnum();
+    // Poll the grid gate every frame (even with Sync off) so it stays primed
+    // and re-enabling Sync doesn't see a spurious catch-up crossing
+    final boolean onGrid = this.tempoLock.crossed(div) && sync;
 
     // Strike source 1: audio bass transients over the ratio threshold,
     // gated by an energy-scaled minimum interval. Silence-safe: with no
-    // audio, bassHit() never fires and this path is simply inert.
+    // audio (or the Audio depth knob at 0) bassHit() never fires and this
+    // path is simply inert. Launch is immediate — the hit itself is the
+    // musical timing — and with Sync on the return stroke still lands on
+    // the grid via the leader retime in launchBolt().
     this.msSinceAudioStrike += deltaMs;
     final double audioGateMs = Ranges.exp(e, AUDIO_GATE_MS_AMBIENT, AUDIO_GATE_MS_PEAK);
     if (this.audio.bassHit()
@@ -388,25 +435,41 @@ public class Zot extends ApotheneumRasterPattern {
       launchBolt();
     }
 
-    // Strike source 2: ambient Poisson storm — mean interval from energy,
-    // scaled by the Ambient knob. Keeps storms rolling with no audio at all.
+    // Strike source 2: ambient storm — mean interval from energy, scaled by
+    // the Ambient knob. Keeps storms rolling with no audio at all. Free-run:
+    // per-frame Poisson. Sync: a Bernoulli draw at each grid crossing with
+    // matched mean rate (p = divisionMs / meanMs, saturating at one strike
+    // per division) — energy chooses how many grid slots strike, launches
+    // never drift off-grid.
     final double ambientRate = this.ambient.getValue();
     if (ambientRate > 0) {
       final double meanMs =
         Ranges.exp(e, AMBIENT_MEAN_MS_AMBIENT, AMBIENT_MEAN_MS_PEAK) / ambientRate;
-      if (this.random.nextDouble() < deltaMs / meanMs) {
+      if (sync) {
+        if (onGrid && (this.random.nextDouble() < this.tempoLock.divisionMs(div) / meanMs)) {
+          launchBolt();
+        }
+      } else if (this.random.nextDouble() < deltaMs / meanMs) {
         launchBolt();
       }
     }
 
-    // Strike source 3: pending storm-burst bolts
+    // Strike source 3: pending storm-burst bolts. Free-run: random 300-700ms
+    // spacing. Sync: one bolt per grid crossing until the burst is spent.
     if (this.stormRemaining > 0) {
-      this.stormNextMs -= deltaMs;
-      if (this.stormNextMs <= 0) {
-        --this.stormRemaining;
-        this.stormNextMs = STORM_SPACING_MIN_MS
-          + this.random.nextDouble() * (STORM_SPACING_MAX_MS - STORM_SPACING_MIN_MS);
-        launchBolt();
+      if (sync) {
+        if (onGrid) {
+          --this.stormRemaining;
+          launchBolt();
+        }
+      } else {
+        this.stormNextMs -= deltaMs;
+        if (this.stormNextMs <= 0) {
+          --this.stormRemaining;
+          this.stormNextMs = STORM_SPACING_MIN_MS
+            + this.random.nextDouble() * (STORM_SPACING_MAX_MS - STORM_SPACING_MIN_MS);
+          launchBolt();
+        }
       }
     }
 

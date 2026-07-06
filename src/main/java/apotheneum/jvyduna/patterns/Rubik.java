@@ -136,10 +136,10 @@ public class Rubik extends ApotheneumPattern {
     .setDescription("Vertical center of the projected image (0 = wall center; + moves it up)");
 
   public final CompoundParameter yFloor =
-    new CompoundParameter("YFloor", 1, 0, 2)
+    new CompoundParameter("YFloor", -1, -1, 2)
     .setUnits(CompoundParameter.Units.PERCENT_NORMALIZED)
     .setPolarity(LXParameter.Polarity.BIPOLAR)
-    .setDescription("Floor below which LEDs are muted, centered at 100% default: 0% = show full image; 100% = just below the bottom row; 200% = only the top row");
+    .setDescription("Floor below which LEDs are muted: -100% = 3 rows below the image; 0% = just below the bottom row; 100% = just above the top row; 200% = 3 rows above the image");
 
   public final EnumParameter<Surface> surfaces =
     new EnumParameter<Surface>("Surface", Surface.OUTER)
@@ -603,9 +603,10 @@ public class Rubik extends ApotheneumPattern {
 
     // YFloor mutes LEDs whose vertical vy falls below a floor line, measured in the
     // same frame as the sticker rows: rows span [-1,-1/3] (bottom), [-1/3,1/3]
-    // (middle), [1/3,1] (top). Bipolar, default 100%: 0% = -1 (full image); 100% =
-    // -1/3 (below bottom row); 200% = +1/3 (only the top row).
-    final double floorLine = -1.0 + this.yFloor.getValue() * (2.0 / 3.0);
+    // (middle), [1/3,1] (top). Bipolar, default -100%: -100% = -3 (3 rows of
+    // headroom below the image); 0% = -1 (just below the bottom row); 100% = +1
+    // (just above the top row); 200% = +3 (3 rows above the image).
+    final double floorLine = -1.0 + this.yFloor.getValue() * 2.0;
 
     for (Apotheneum.Cube.Face face : Apotheneum.cube.exterior.faces) {
       for (Apotheneum.Column column : face.columns) {

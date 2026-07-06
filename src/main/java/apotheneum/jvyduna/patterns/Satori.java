@@ -8,13 +8,16 @@ import apotheneum.ApotheneumPattern;
 import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.PerceptualHue;
 import apotheneum.jvyduna.util.Ranges;
+import apotheneum.jvyduna.util.TempoLock;
 import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
+import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
 import heronarts.lx.color.LXDynamicColor;
 import heronarts.lx.model.LXPoint;
+import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundDiscreteParameter;
 import heronarts.lx.parameter.CompoundParameter;
 import heronarts.lx.parameter.EnumParameter;
@@ -32,6 +35,10 @@ import heronarts.lx.parameter.TriggerParameter;
  * the project palette swatch (or a perceptual rainbow when the swatch is
  * sparse) and posterized into bold bands that stay legible through LED gaps
  * at sculpture scale.
+ *
+ * Audio reactivity is gated by the standard Audio depth knob (default 0 =
+ * pure screensaver). With Sync on, the band-advance period is quantized to
+ * the tempo grid and a radial breath pulse fires on each TempoDiv boundary.
  *
  * See Satori.md (beside this file) for the full design note.
  */
@@ -57,13 +64,16 @@ public class Satori extends ApotheneumPattern {
 
   // ---- Timing / shape constants ---------------------------------------------
 
-  /** One full color cycle takes 16s at ambient energy — even with the max +50% audio boost the drift period stays >= 10.7s (>= 8s required) */
+  /** One full color cycle takes 16s at ambient energy; worst-case ambient drift period is 16/(1.5 audio x 1.4 sync) = 7.6s */
   private static final double CYCLE_SEC_AMBIENT = 16;
 
-  /** One full color cycle takes 8s at peak energy — worst-case full-sculpture traversal 8/1.5 = 5.33s, above the 5s cap */
+  /** One full color cycle takes 8s at peak energy — the sync cap budget below pins worst-case traversal to exactly 5.0s */
   private static final double CYCLE_SEC_PEAK = 8;
 
-  /** Bass-hit radial phase pulse relaxes back to the base field over 2s (event visual life >= 1.5s) */
+  /** Series cap: sustained motion must take >= 5s to traverse the sculpture; sync retiming is budgeted against this */
+  private static final double TRAVERSAL_CAP_SEC = 5;
+
+  /** Radial phase pulse (bass hit / grid breath / manual trigger) relaxes over 2s (event visual life >= 1.5s) */
   private static final double PULSE_RELAX_MS = 2000;
 
   /** Radial pulse wavefront depth in LUT cycles at ambient energy */
@@ -105,6 +115,10 @@ public class Satori extends ApotheneumPattern {
     new TriggerParameter("Reverse", this::reverseDirection)
     .setDescription("Flip the direction of the color cycle"));
 
+  public final TriggerParameter pulse = bag.register(
+    new TriggerParameter("Pulse", this::firePulse)
+    .setDescription("Launch the radial phase pulse manually: bands warp outward from the seeded center, relaxing over 2s"));
+
   public final CompoundParameter energy = new CompoundParameter("Energy", 0.35)
     .setDescription("Master energy: 0-0.4 soothing ambient, 0.6-1.0 high-energy (cycle rate, pulse depth, treble shimmer)");
 
@@ -122,12 +136,23 @@ public class Satori extends ApotheneumPattern {
     new CompoundDiscreteParameter("Bands", 6, 2, 17)
     .setDescription("Posterize the color LUT into N bold bands; smooth gradients read as mud through LED gaps");
 
+  public final CompoundParameter audioDepth = new CompoundParameter("Audio", 0)
+    .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
+
+  public final BooleanParameter sync = new BooleanParameter("Sync", true)
+    .setDescription("Lock motion events to the tempo grid; off restores free-running timing");
+
+  public final EnumParameter<Tempo.Division> tempoDiv =
+    new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.WHOLE)
+    .setDescription("Tempo division that motion events land on when Sync is enabled");
+
   public final TriggerParameter meta = new TriggerParameter("Meta", bag::fire)
     .setDescription("Randomly fire a trigger or jump a parameter");
 
   // ---- State ------------------------------------------------------------------
 
   private final AudioReactive audio;
+  private final TempoLock tempoLock;
   private final Random random = new Random();
 
   // Phase field over all model points; only exterior indices are filled, the
@@ -161,15 +186,20 @@ public class Satori extends ApotheneumPattern {
 
   public Satori(LX lx) {
     super(lx);
-    this.audio = new AudioReactive(lx);
+    this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
+    this.tempoLock = new TempoLock(lx);
 
     addParameter("newField", this.newField);
     addParameter("reverse", this.reverse);
+    addParameter("pulse", this.pulse);
     addParameter("energy", this.energy);
     addParameter("fieldMode", this.fieldMode);
     addParameter("speed", this.speed);
     addParameter("spread", this.spread);
     addParameter("posterize", this.posterize);
+    addParameter("audio", this.audioDepth);
+    addParameter("sync", this.sync);
+    addParameter("tempoDiv", this.tempoDiv);
     addParameter("meta", this.meta);
 
     // Meta jump candidates — mirrored 1:1 in the Satori.md table
@@ -190,6 +220,11 @@ public class Satori extends ApotheneumPattern {
   /** Reverse: flip the direction of the palette rotation; the field is untouched */
   private void reverseDirection() {
     this.cycleDirection = -this.cycleDirection;
+  }
+
+  /** Pulse: launch the radial phase wave manually, at full strength regardless of audio depth */
+  private void firePulse() {
+    this.pulseEnv = 1;
   }
 
   @Override
@@ -293,11 +328,15 @@ public class Satori extends ApotheneumPattern {
         return d0 / this.wave0[s] - d1 / this.wave1[s];
       }
       case ANGULAR: {
-        // Mirrored azimuth sweep (triangle in x is seam-free at the wrap) plus
-        // a vertical pitch term => helical chevrons around the sculpture
-        final float u = x / (float) w;
-        final float tri = 1 - Math.abs(1 - 2 * u);
-        return this.arms[s] * tri + this.pitch[s] * (y / (float) h);
+        // 1-3 mirrored arms: triangle wave over arms copies of the azimuth
+        // (seam-free at the wrap for integer arms) plus a signed vertical
+        // pitch term => helical chevrons around the sculpture. NB: arms must
+        // fold the azimuth, not scale amplitude — the per-surface [0,1]
+        // normalization would absorb a constant scale into a no-op.
+        final float uu = x * this.arms[s] / (float) w;
+        final float fu = uu - (float) Math.floor(uu);
+        final float tri = 1 - Math.abs(1 - 2 * fu);
+        return tri + this.pitch[s] * (y / (float) h);
       }
       default: { // KALEIDO
         // Fold x into mirrored sectors and y about the vertical center; mix a
@@ -376,20 +415,55 @@ public class Satori extends ApotheneumPattern {
     updateLut();
 
     final double e = this.energy.getValue();
+    final int bands = this.posterize.getValuei();
 
     // Slow-smoothed level modulates cycle speed +/-50%; silence floors at 0.5x
-    // (slower than base = still cycling, never frozen, never faster)
+    // (slower than base = still cycling, never frozen, never faster). At audio
+    // depth 0 the level tap reads 0, so the default is the 0.5x floor.
     this.slowLevel += (this.audio.level - this.slowLevel) * (1 - Math.exp(-deltaMs / SLOW_LEVEL_MS));
     final double speedMul = 1 + AUDIO_SPEED_DEPTH * (2 * this.slowLevel - 1);
 
     final double cycleSec = Ranges.exp(e, CYCLE_SEC_AMBIENT, CYCLE_SEC_PEAK) / this.speed.getValue();
-    this.phase += this.cycleDirection * speedMul * deltaMs / (cycleSec * 1000);
+
+    // Tempo lock (sustained): quantize the band-advance period — the visible
+    // rhythm; each point flips to its next posterized band once per band
+    // period — to the nearest whole multiple (or unit fraction) of the sync
+    // division, via TempoLock.quantizePeriod(). Its internal harmonic latch
+    // only re-quantizes when the required rate scale leaves the [0.7, 1.4]
+    // window, so audio speed wobble near a rounding boundary cannot
+    // flip-flop the rate. Palette rotation has no globally-simultaneous
+    // event to phase-align (band flips are staggered across points by the
+    // field), so period quantization is the whole lock; the grid-breath
+    // pulse below carries the downbeat.
+    double syncScale = 1;
+    if (this.sync.isOn()) {
+      final double bandMs = 1000 * cycleSec / (speedMul * bands);
+      final double s = this.tempoLock.quantizePeriod(bandMs, this.tempoDiv.getEnum());
+      // Cap budget: speedMul * syncScale <= cycleSec / TRAVERSAL_CAP_SEC keeps
+      // worst-case traversal (spread = 1, e = 1, full audio boost) at >= 5.0s.
+      // cycleSec >= 8 and speedMul <= 1.5, so capMax >= 1.067 > minScale.
+      final double capMax = Math.min(TempoLock.DEFAULT_MAX_SCALE,
+        cycleSec / (TRAVERSAL_CAP_SEC * speedMul));
+      syncScale = Math.min(s, capMax);
+    }
+
+    this.phase += this.cycleDirection * speedMul * syncScale * deltaMs / (cycleSec * 1000);
     this.phase -= Math.floor(this.phase);
 
-    // Bass hit launches a radial phase pulse: the wavefront offset is
-    // proportional to distance from the pulse center and relaxes over ~2s
+    // Radial phase pulse: wavefront offset proportional to distance from the
+    // pulse center, relaxing over ~2s. Sources: the tempo-grid breath (full
+    // strength — it is a tempo feature, alive even at audio depth 0), bass
+    // hits (scaled by depth so a barely-open Audio knob pulses gently), and
+    // the manual Pulse trigger (sets pulseEnv directly at event rate).
+    // crossed() runs unconditionally so its counter never goes stale while
+    // Sync is off — re-enabling Sync must not fire a phantom pulse.
+    final boolean gridCross = this.tempoLock.crossed(this.tempoDiv.getEnum());
+    double pulseFire = (this.sync.isOn() && gridCross) ? 1 : 0;
     if (this.audio.bassHit()) {
-      this.pulseEnv = 1;
+      pulseFire = Math.max(pulseFire, this.audio.depth());
+    }
+    if (pulseFire > 0) {
+      this.pulseEnv = Math.max(this.pulseEnv, pulseFire);
     } else {
       this.pulseEnv = Math.max(0, this.pulseEnv - deltaMs / PULSE_RELAX_MS);
     }
@@ -407,7 +481,6 @@ public class Satori extends ApotheneumPattern {
     }
 
     final double spreadAmt = this.spread.getValue();
-    final int bands = this.posterize.getValuei();
     paint(Apotheneum.cube.exterior.columns, lut, spreadAmt, bands, pulseDepth);
     paint(Apotheneum.cylinder.exterior.columns, lut, spreadAmt, bands, pulseDepth);
 

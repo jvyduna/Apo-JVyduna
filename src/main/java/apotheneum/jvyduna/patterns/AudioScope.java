@@ -11,12 +11,15 @@ import heronarts.lx.color.LXColor;
 /**
  * Development smoke pattern for the screensaver series' audio plumbing.
  *
- * Cube: the 16 GraphicMeter bands as vertical bars around the exterior ring
- * (hue by band), with a full-ring white flash row on bassHit.
- * Cylinder: four wide bars — level, bass, mid, treble.
+ * Cube: the GraphicMeter bands (16 by default) as vertical bars around the
+ * exterior ring (hue by band), with a white flash on the top two rings on
+ * bassHit. Cylinder: four wide bars — level, bass, mid, treble.
+ *
+ * No Audio depth knob is attached, so AudioReactive runs at full depth and
+ * the scope always displays the real signal.
  *
  * If this pattern moves with music, AudioReactive is wired correctly and the
- * eight screensaver patterns can trust their audio taps.
+ * screensaver patterns in this series can trust their audio taps.
  */
 @LXCategory("Apotheneum/jvyduna")
 @LXComponent.Name("Audio Scope")

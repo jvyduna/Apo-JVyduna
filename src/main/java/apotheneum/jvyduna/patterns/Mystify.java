@@ -1,5 +1,6 @@
 package apotheneum.jvyduna.patterns;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 
@@ -9,12 +10,15 @@ import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.PerceptualHue;
 import apotheneum.jvyduna.util.Ranges;
 import apotheneum.jvyduna.util.SurfaceCanvas;
+import apotheneum.jvyduna.util.TempoLock;
 import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
+import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
 import heronarts.lx.color.LXDynamicColor;
+import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundParameter;
 import heronarts.lx.parameter.DiscreteParameter;
 import heronarts.lx.parameter.EnumParameter;
@@ -30,9 +34,10 @@ import heronarts.lx.utils.LXUtils;
  *
  * The simulation runs on a preallocated SurfaceCanvas in normalized [0,1]
  * coordinates, so switching geometry preserves the shapes. Edges alternate
- * between two palette hues per polyline; bass hits flash the vertices, level
- * breathes the speed within the traversal cap, and treble subtly shortens
- * the trails.
+ * between two palette hues per polyline. Audio reactivity (bass-hit vertex
+ * flashes, level speed-breath, treble trail-shortening) is gated by the Audio
+ * depth knob, default 0 = pure screensaver. With Sync on, each vertex's
+ * velocity is retimed per axis so wall bounces land on the TempoDiv grid.
  *
  * See Mystify.md (beside this file) for the full design note.
  */
@@ -65,8 +70,9 @@ public class Mystify extends ApotheneumPattern {
   /** Treble transients shorten trails by up to ~30% (1 + 0.15 * 2) — subtle */
   private static final double TREBLE_TRAIL_SHORTEN = 0.15;
 
-  /** Bass-hit vertex flash fades to black over this long — a visible pop that
-   *  clears before the next eighth-note-gated hit */
+  /** Bass-hit vertex flash fades to black over this long — a visible pop.
+   *  Hits gated closer together than this (the retrigger gate is ~an eighth
+   *  note) simply re-arm the envelope before it empties. */
   private static final double FLASH_DECAY_MS = 500;
 
   /** Structural maxima; all state is preallocated at these sizes */
@@ -91,6 +97,7 @@ public class Mystify extends ApotheneumPattern {
 
   private final TriggerBag bag = new TriggerBag("Mystify");
   private final AudioReactive audio;
+  private final TempoLock tempoLock;
   private final Random random = new Random();
 
   public final TriggerParameter scatter = bag.register(
@@ -129,6 +136,18 @@ public class Mystify extends ApotheneumPattern {
     new CompoundParameter("Trails", 0.5)
     .setDescription("Trail length: 0 = bare moving lines, 1 = seconds-long comets");
 
+  public final CompoundParameter audioDepth =
+    new CompoundParameter("Audio", 0)
+    .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
+
+  public final BooleanParameter sync =
+    new BooleanParameter("Sync", true)
+    .setDescription("Lock vertex wall-bounces to the tempo grid; off restores free-running timing");
+
+  public final EnumParameter<Tempo.Division> tempoDiv =
+    new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.QUARTER)
+    .setDescription("Tempo division that vertex bounces land on when Sync is enabled");
+
   public final TriggerParameter meta =
     new TriggerParameter("Meta", bag::fire)
     .setDescription("Randomly fire one of Mystify's triggers or jump a parameter");
@@ -140,12 +159,22 @@ public class Mystify extends ApotheneumPattern {
   private final double[] velX = new double[MAX_SHAPES * MAX_VERTS]; // canvas-widths/sec at cap=1
   private final double[] velY = new double[MAX_SHAPES * MAX_VERTS]; // canvas-heights/sec at cap=1
 
+  /** Per-axis tempo-sync rate scales (1 = unscaled). Applied multiplicatively
+   *  on top of velX/velY so Sync never mutates the free-running velocities;
+   *  each re-plan REPLACES the scale (scales never compound). */
+  private final double[] syncScaleX = new double[MAX_SHAPES * MAX_VERTS];
+  private final double[] syncScaleY = new double[MAX_SHAPES * MAX_VERTS];
+
   /** Two hues per polyline, refreshed from the palette each frame */
   private final int[] shapeColor = new int[MAX_SHAPES * 2];
   private int hueOffset = 0;
 
-  /** Bass-hit vertex flash envelope, 0..1 */
+  /** Bass-hit vertex flash envelope, 0..1 (armed to audio depth on each hit) */
   private double flash = 0;
+
+  /** This frame's rate in canvas-spans/sec at velocity magnitude 1; the basis
+   *  for sync planning (planScale) as well as integration */
+  private double rateSpansPerSec = 0;
 
   private final SurfaceCanvas facesCanvas =
     new SurfaceCanvas(Apotheneum.GRID_WIDTH, Apotheneum.GRID_HEIGHT);          // 50x45
@@ -155,10 +184,13 @@ public class Mystify extends ApotheneumPattern {
     new SurfaceCanvas(Apotheneum.Cylinder.Ring.LENGTH, Apotheneum.CYLINDER_HEIGHT); // 120x43
 
   private Geometry lastGeometry = null;
+  private boolean wasSync = false;
+  private Tempo.Division lastDivision = null;
 
   public Mystify(LX lx) {
     super(lx);
-    this.audio = new AudioReactive(lx);
+    this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
+    this.tempoLock = new TempoLock(lx);
 
     addParameter("scatter", this.scatter);
     addParameter("reverse", this.reverse);
@@ -169,6 +201,9 @@ public class Mystify extends ApotheneumPattern {
     addParameter("vertices", this.vertices);
     addParameter("speed", this.speed);
     addParameter("trails", this.trails);
+    addParameter("audio", this.audioDepth);
+    addParameter("sync", this.sync);
+    addParameter("tempoDiv", this.tempoDiv);
     addParameter("meta", this.meta);
 
     // Meta jump candidates — mirrored 1:1 in the Jump candidates table in Mystify.md
@@ -178,6 +213,8 @@ public class Mystify extends ApotheneumPattern {
     bag.jumpable(this.speed, 0.4, 1.0);
     bag.jumpable(this.shapes);
 
+    Arrays.fill(this.syncScaleX, 1);
+    Arrays.fill(this.syncScaleY, 1);
     scatter();
   }
 
@@ -191,6 +228,7 @@ public class Mystify extends ApotheneumPattern {
       this.velX[i] = randomVelocity();
       this.velY[i] = randomVelocity();
     }
+    replanIfSyncOn();
   }
 
   /** Random signed velocity component in [VEL_MIN, 1] canvas-spans/sec at cap=1 */
@@ -204,6 +242,7 @@ public class Mystify extends ApotheneumPattern {
       this.velX[i] = -this.velX[i];
       this.velY[i] = -this.velY[i];
     }
+    replanIfSyncOn();
   }
 
   private void hueJump() {
@@ -218,32 +257,54 @@ public class Mystify extends ApotheneumPattern {
     setColors(LXColor.BLACK);
 
     final Geometry geom = this.geometry.getEnum();
+    boolean geomChanged = false;
     if (geom != this.lastGeometry) {
       // Fresh start on the new topology; stale trails from the old mode vanish
       this.facesCanvas.fill(LXColor.BLACK);
       this.ringCanvas.fill(LXColor.BLACK);
       this.cylinderCanvas.fill(LXColor.BLACK);
       this.lastGeometry = geom;
+      geomChanged = true;
     }
     final SurfaceCanvas canvas = canvasFor(geom);
     final boolean wrapX = (geom != Geometry.FACES);
 
     // Speed: energy sets the traversal cap; audio level breathes +/-30% around a
     // nominal that is cap/1.3, so even at full level the cap is never exceeded.
+    // With the Audio knob at 0, level reads 0 and the rate is a steady 0.7x nominal.
     final double e = this.energy.getValue();
     final double capSpansPerSec = 1 / Ranges.lin(e, TRAVERSE_SEC_AMBIENT, TRAVERSE_SEC_PEAK);
     final double audioBreath = 1 + SPEED_AUDIO_DEPTH * (2 * LXUtils.constrain(this.audio.level, 0, 1) - 1);
-    final double rate = capSpansPerSec * this.speed.getValue() * audioBreath / (1 + SPEED_AUDIO_DEPTH);
-    advance(rate * deltaMs * 0.001, wrapX);
+    this.rateSpansPerSec = capSpansPerSec * this.speed.getValue() * audioBreath / (1 + SPEED_AUDIO_DEPTH);
+
+    // Tempo sync: re-plan the whole flock on sync engage, TempoDiv or geometry
+    // change, and on every division crossing (the crossing cadence cheaply
+    // absorbs live BPM changes and speed/energy knob moves between bounces).
+    // Individual bounces re-plan their own vertex axis inside advance().
+    final boolean syncOn = this.sync.isOn();
+    final Tempo.Division division = this.tempoDiv.getEnum();
+    if (syncOn) {
+      final boolean crossedNow = this.tempoLock.crossed(division);
+      if (crossedNow || !this.wasSync || (division != this.lastDivision) || geomChanged) {
+        replanAll(wrapX);
+      }
+    } else if (this.wasSync) {
+      resetSyncScales(); // Sync off: free-running timing, bit-identical to no sync
+    }
+    this.wasSync = syncOn;
+    this.lastDivision = division;
+
+    advance(this.rateSpansPerSec * deltaMs * 0.001, wrapX, syncOn);
 
     // Trails: decay once per frame (never clear); treble subtly shortens them
     double halfLifeMs = Ranges.exp(this.trails.getValue(), TRAIL_HALF_LIFE_MIN_MS, TRAIL_HALF_LIFE_MAX_MS);
     halfLifeMs /= 1 + TREBLE_TRAIL_SHORTEN * LXUtils.constrain(this.audio.trebleRatio - 1, 0, 2);
     canvas.decay(Math.pow(0.5, deltaMs / halfLifeMs));
 
-    // Bass-hit vertex flash envelope
+    // Bass-hit vertex flash envelope, armed to the audio depth so the pop
+    // scales with the knob (depth 1 = full white, matching pre-knob behavior)
     if (this.audio.bassHit()) {
-      this.flash = 1;
+      this.flash = this.audio.depth();
     } else {
       this.flash = Math.max(0, this.flash - deltaMs / FLASH_DECAY_MS);
     }
@@ -277,27 +338,89 @@ public class Mystify extends ApotheneumPattern {
     }
   }
 
-  /** Integrate vertex motion; du is this frame's travel in canvas-spans at cap=1 */
-  private void advance(double du, boolean wrapX) {
+  // ---- Tempo sync planning ------------------------------------------------------
+
+  /**
+   * Rate scale for one vertex axis so its next wall hit lands on a boundary of
+   * the current TempoDiv. msUntil is computed at the axis's base (unscaled)
+   * rate, and the result REPLACES the previous scale — scales never compound.
+   *
+   * Traversal-cap guarantee: the upper clamp is min(1.4, 1/|vel|). Velocity
+   * magnitudes are in cap units (<= 1), so |vel| * scale <= 1 always — a
+   * retimed vertex can never exceed the energy-set traversal cap. The fastest
+   * vertices (|vel| near 1) can therefore only be retimed by slowing down.
+   */
+  private double planScale(double pos, double vel) {
+    final double axisSpeed = Math.abs(vel) * this.rateSpansPerSec; // spans/sec, unscaled
+    if (!(axisSpeed > 0)) {
+      return 1; // degenerate (also construction time, before the first frame)
+    }
+    final double dist = (vel > 0) ? (1 - pos) : pos;
+    final double msUntil = 1000 * dist / axisSpeed;
+    final double maxScale = Math.min(TempoLock.DEFAULT_MAX_SCALE, 1 / Math.abs(vel));
+    return this.tempoLock.retime(msUntil, this.tempoDiv.getEnum(), TempoLock.DEFAULT_MIN_SCALE, maxScale);
+  }
+
+  /** Re-plan every vertex's sync scales. Event-rate only: sync engage, TempoDiv
+   *  or geometry change, scatter/reverse, and each division crossing. On the
+   *  wrapping topologies x has no bounce event, so its scale stays 1. */
+  private void replanAll(boolean wrapX) {
     for (int i = 0; i < this.posX.length; ++i) {
-      this.posX[i] += this.velX[i] * du;
-      this.posY[i] += this.velY[i] * du;
+      this.syncScaleX[i] = wrapX ? 1 : planScale(this.posX[i], this.velX[i]);
+      this.syncScaleY[i] = planScale(this.posY[i], this.velY[i]);
+    }
+  }
+
+  private void resetSyncScales() {
+    Arrays.fill(this.syncScaleX, 1);
+    Arrays.fill(this.syncScaleY, 1);
+  }
+
+  /** Trigger-handler hook: velocities just changed, so any active plan is stale */
+  private void replanIfSyncOn() {
+    if (this.sync.isOn()) {
+      replanAll(this.geometry.getEnum() != Geometry.FACES);
+    }
+  }
+
+  // ---- Simulation ----------------------------------------------------------------
+
+  /** Integrate vertex motion; du is this frame's travel in canvas-spans at
+   *  velocity magnitude 1. With sync on, per-axis sync scales retime each
+   *  vertex so wall hits land on the tempo grid, and every bounce immediately
+   *  re-plans that vertex's axis toward its next wall hit. */
+  private void advance(double du, boolean wrapX, boolean syncOn) {
+    for (int i = 0; i < this.posX.length; ++i) {
+      this.posX[i] += this.velX[i] * this.syncScaleX[i] * du;
+      this.posY[i] += this.velY[i] * this.syncScaleY[i] * du;
       if (wrapX) {
         this.posX[i] -= Math.floor(this.posX[i]);
       } else if (this.posX[i] < 0) {
         this.posX[i] = -this.posX[i];
         this.velX[i] = Math.abs(this.velX[i]);
+        if (syncOn) {
+          this.syncScaleX[i] = planScale(this.posX[i], this.velX[i]);
+        }
       } else if (this.posX[i] > 1) {
         this.posX[i] = 2 - this.posX[i];
         this.velX[i] = -Math.abs(this.velX[i]);
+        if (syncOn) {
+          this.syncScaleX[i] = planScale(this.posX[i], this.velX[i]);
+        }
       }
       // Vertical always bounces off top and bottom
       if (this.posY[i] < 0) {
         this.posY[i] = -this.posY[i];
         this.velY[i] = Math.abs(this.velY[i]);
+        if (syncOn) {
+          this.syncScaleY[i] = planScale(this.posY[i], this.velY[i]);
+        }
       } else if (this.posY[i] > 1) {
         this.posY[i] = 2 - this.posY[i];
         this.velY[i] = -Math.abs(this.velY[i]);
+        if (syncOn) {
+          this.syncScaleY[i] = planScale(this.posY[i], this.velY[i]);
+        }
       }
     }
   }
@@ -357,10 +480,17 @@ public class Mystify extends ApotheneumPattern {
           final int px = pixelX(this.posX[base + i], w, wrapX);
           final int py = pixelY(this.posY[base + i], h);
           canvas.set(px, py, flashColor);
-          canvas.set(px - 1, py, flashColor);
-          canvas.set(px + 1, py, flashColor);
           canvas.set(px, py - 1, flashColor);
           canvas.set(px, py + 1, flashColor);
+          // x-neighbors: SurfaceCanvas.set wraps x, which is wrong on the
+          // bounce topology — a face-edge flash must not smear onto the
+          // opposite edge of the face
+          if (wrapX || (px > 0)) {
+            canvas.set(px - 1, py, flashColor);
+          }
+          if (wrapX || (px < w - 1)) {
+            canvas.set(px + 1, py, flashColor);
+          }
         }
       }
     }

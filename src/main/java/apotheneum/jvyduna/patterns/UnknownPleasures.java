@@ -7,12 +7,16 @@ import apotheneum.Apotheneum;
 import apotheneum.ApotheneumPattern;
 import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.Ranges;
+import apotheneum.jvyduna.util.TempoLock;
 import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
+import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
+import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundParameter;
+import heronarts.lx.parameter.EnumParameter;
 import heronarts.lx.parameter.TriggerParameter;
 import heronarts.lx.utils.LXUtils;
 
@@ -51,6 +55,13 @@ public class UnknownPleasures extends ApotheneumPattern {
 
   /** Full-field traversal time at energy = 1: 45 rows in 6 s — never faster (sim cap is 5 s) */
   private static final double SCROLL_SEC_PEAK = 6;
+
+  /**
+   * Hard series cap on sustained motion: full-field traversal must never take
+   * less than 5 s, even after tempo-sync retiming. The retime() upper clamp is
+   * derived from this per call, so a 1.4x nudge at peak energy cannot break it.
+   */
+  private static final double SCROLL_SEC_CAP = 5;
 
   // ---- Line geometry --------------------------------------------------------
 
@@ -131,6 +142,18 @@ public class UnknownPleasures extends ApotheneumPattern {
     new CompoundParameter("TintAmt", 0, 0, 1)
     .setDescription("Stroke saturation: 0 = classic white lines, 1 = fully saturated Tint hue");
 
+  public final CompoundParameter audioDepth =
+    new CompoundParameter("Audio", 0)
+    .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
+
+  public final BooleanParameter sync =
+    new BooleanParameter("Sync", true)
+    .setDescription("Lock motion events to the tempo grid; off restores free-running timing");
+
+  public final EnumParameter<Tempo.Division> tempoDiv =
+    new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.QUARTER)
+    .setDescription("Tempo division that motion events land on when Sync is enabled");
+
   public final TriggerParameter meta =
     new TriggerParameter("Meta", bag::fire)
     .setDescription("Randomly fire one trigger or jump one parameter");
@@ -152,17 +175,28 @@ public class UnknownPleasures extends ApotheneumPattern {
   private final double[] synthScratch = new double[WIDTH]; // synthesized pulse shape
 
   private final AudioReactive audio;
+  private final TempoLock tempoLock;
   private final Random random = new Random();
 
   /** True = lines scroll downward (born at top); flipped by the Flip trigger */
   private boolean scrollDown = true;
 
-  /** Set on a bass transient; the next-born line gets BASS_BOOST amplitude */
-  private boolean bassBoostPending = false;
+  /**
+   * Amplitude multiplier armed for the next-born line. Set from a bass
+   * transient (scaled by audio depth toward BASS_BOOST); consumed at birth.
+   */
+  private double boostGain = 1;
+
+  /** Multiplier on the scroll rate while Sync is on; recomputed at each line birth */
+  private double syncScale = 1;
+
+  /** Pulse trigger deferred to the next tempo-grid boundary while Sync is on */
+  private boolean pulsePending = false;
 
   public UnknownPleasures(LX lx) {
     super(lx);
-    this.audio = new AudioReactive(lx);
+    this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
+    this.tempoLock = new TempoLock(lx);
 
     addParameter("reseed", this.reseed);
     addParameter("flip", this.flip);
@@ -173,6 +207,9 @@ public class UnknownPleasures extends ApotheneumPattern {
     addParameter("jaggedness", this.jaggedness);
     addParameter("tintHue", this.tintHue);
     addParameter("tintAmount", this.tintAmount);
+    addParameter("audio", this.audioDepth);
+    addParameter("sync", this.sync);
+    addParameter("tempoDiv", this.tempoDiv);
     addParameter("meta", this.meta);
 
     bag.jumpable(this.spacing, 2, 6);
@@ -200,7 +237,11 @@ public class UnknownPleasures extends ApotheneumPattern {
       line.alive = false;
     }
     final double spacing = this.spacing.getValue();
-    for (double b = HEIGHT; b >= -1; b -= spacing) {
+    // Fill the visible field plus, when scrolling up, the bottom entry margin:
+    // otherwise advance() would immediately birth mid-margin lines whose tall
+    // contours could already poke into view (a one-frame pop-in).
+    final double start = this.scrollDown ? HEIGHT : HEIGHT + MAX_RIDGE_ROWS;
+    for (double b = start; b >= -1; b -= spacing) {
       birth(b, 1, false);
     }
     LX.log("UnknownPleasures: reseed");
@@ -212,8 +253,21 @@ public class UnknownPleasures extends ApotheneumPattern {
     LX.log("UnknownPleasures: flip -> scrolling " + (this.scrollDown ? "down" : "up"));
   }
 
-  /** Inject one oversized synthesized pulse line at the birth edge, spacing-safe. */
+  /**
+   * Pulse trigger handler. With Sync on the launch is quantized: it arms a
+   * pending pulse that fires on the next tempo-grid boundary (in render());
+   * with Sync off it fires immediately, exactly the pre-sync behavior.
+   */
   private void injectPulse() {
+    if (this.sync.isOn()) {
+      this.pulsePending = true;
+      return;
+    }
+    firePulse();
+  }
+
+  /** Inject one oversized synthesized pulse line at the birth edge, spacing-safe. */
+  private void firePulse() {
     final double spacing = this.spacing.getValue();
     boolean any = false;
     double edge = 0;
@@ -260,15 +314,16 @@ public class UnknownPleasures extends ApotheneumPattern {
 
   /** Amplitude multiplier for the next normal birth, consuming a pending bass boost. */
   private double nextGain() {
-    if (this.bassBoostPending) {
-      this.bassBoostPending = false;
-      return BASS_BOOST;
-    }
-    return 1;
+    final double gain = this.boostGain;
+    this.boostGain = 1;
+    return gain;
   }
 
-  /** Scroll all lines by dRows, kill exited lines, and birth new ones at the entry edge. */
-  private void advance(double dRows) {
+  /**
+   * Scroll all lines by dRows, kill exited lines, and birth new ones at the
+   * entry edge. Returns true if any line was born (a sync retiming moment).
+   */
+  private boolean advance(double dRows) {
     final double delta = this.scrollDown ? dRows : -dRows;
     for (Line line : this.lines) {
       if (!line.alive) {
@@ -297,16 +352,19 @@ public class UnknownPleasures extends ApotheneumPattern {
         }
       }
     }
+    boolean born = false;
     if (this.scrollDown) {
       // Born just above the top edge; the baseline row appears first, the
       // contour forms as it scrolls in (background is black, so it is seamless).
       if (!any) {
         birth(-1, nextGain(), false);
         edge = -1;
+        born = true;
       }
       while (edge - spacing >= -1) {
         edge -= spacing;
         birth(edge, nextGain(), false);
+        born = true;
       }
     } else {
       // Born below the bottom edge, far enough out that even the tallest ridge
@@ -314,12 +372,15 @@ public class UnknownPleasures extends ApotheneumPattern {
       if (!any) {
         birth(HEIGHT, nextGain(), false);
         edge = HEIGHT;
+        born = true;
       }
       while (edge + spacing <= HEIGHT + MAX_RIDGE_ROWS) {
         edge += spacing;
         birth(edge, nextGain(), false);
+        born = true;
       }
     }
+    return born;
   }
 
   // ---- Shape generation (event-rate, uses preallocated scratch only) --------
@@ -380,12 +441,44 @@ public class UnknownPleasures extends ApotheneumPattern {
   protected void render(double deltaMs) {
     this.audio.tick(deltaMs);
     if (this.audio.bassHit()) {
-      this.bassBoostPending = true; // next-born line gets BASS_BOOST amplitude
+      // Arm the boost for the next-born line, scaled by the audio depth knob:
+      // full 1.5x at depth 1, fading to no boost as depth approaches 0
+      this.boostGain = 1 + (BASS_BOOST - 1) * this.audio.depth();
+    }
+
+    final boolean syncOn = this.sync.isOn();
+
+    // Quantized pulse launch: a pending Pulse fires on the next grid boundary.
+    // crossed() runs unconditionally so its cycle-count gate never goes stale
+    // across a Sync-off interval (a stale gate would return a spurious true
+    // on the first sync frame back, firing a just-armed pulse off-grid).
+    final boolean grid = this.tempoLock.crossed(this.tempoDiv.getEnum()) && syncOn;
+    boolean born = false;
+    if (this.pulsePending && (grid || !syncOn)) {
+      this.pulsePending = false;
+      firePulse();
+      born = true; // pulse birth is a retiming moment, same as a regular birth
     }
 
     final double e = this.energy.getValue();
-    final double rowsPerSec = Ranges.lin(e, HEIGHT / SCROLL_SEC_AMBIENT, HEIGHT / SCROLL_SEC_PEAK);
-    advance(rowsPerSec * deltaMs * 0.001);
+    final double nominalRowsPerSec = Ranges.lin(e, HEIGHT / SCROLL_SEC_AMBIENT, HEIGHT / SCROLL_SEC_PEAK);
+    if (!syncOn) {
+      this.syncScale = 1; // free-running: exact pre-sync behavior
+    }
+    born |= advance(nominalRowsPerSec * this.syncScale * deltaMs * 0.001);
+
+    if (syncOn && born) {
+      // A line was just born; the next birth is `spacing` rows away at the
+      // nominal rate. Nudge the scroll rate so that birth lands on the tempo
+      // grid. The scale is replaced (not compounded), so it always stays
+      // within the clamp of the nominal rate; the upper clamp is derived from
+      // the 5 s traversal cap so retiming can never break it.
+      final double msUntil = this.spacing.getValue() / nominalRowsPerSec * 1000;
+      final double maxScale = Math.min(
+        TempoLock.DEFAULT_MAX_SCALE, (HEIGHT / SCROLL_SEC_CAP) / nominalRowsPerSec);
+      this.syncScale = this.tempoLock.retime(
+        msUntil, this.tempoDiv.getEnum(), TempoLock.DEFAULT_MIN_SCALE, maxScale);
+    }
 
     // Back-to-front painter's order: ascending baseline. Lines lower on the
     // sculpture (larger baseline row) are nearer, painted last, and their black

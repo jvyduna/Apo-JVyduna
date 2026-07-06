@@ -8,12 +8,15 @@ import apotheneum.Apotheneum;
 import apotheneum.ApotheneumPattern;
 import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.Ranges;
+import apotheneum.jvyduna.util.TempoLock;
 import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
+import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
 import heronarts.lx.color.LXDynamicColor;
+import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundParameter;
 import heronarts.lx.parameter.DiscreteParameter;
 import heronarts.lx.parameter.EnumParameter;
@@ -54,16 +57,22 @@ public class Pipes3D extends ApotheneumPattern {
   /** Ms to extrude one ~5 px cell at energy 0 — a slow, meditative crawl */
   private static final double SEG_MS_AMBIENT = 2000;
 
-  /** Ms to extrude one cell at energy 1, before beat quantization rounds it up */
+  /** Ms to extrude one cell at energy 1, before tempo quantization rounds it up */
   private static final double SEG_MS_PEAK = 1000;
 
-  /** Above this energy, segment starts gate to the beat and durations quantize */
+  /** Above this energy (with Sync on), segment starts gate to the tempo grid */
   private static final double HIGH_ENERGY = 0.6;
+
+  /**
+   * Simulation-principles cap: a full wall crossing (gx cells) must take at
+   * least this long, even with the worst-case audio boost and retime speed-up.
+   */
+  private static final double TRAVERSAL_MIN_MS = 5000;
 
   /** Max growth-rate boost from the smoothed audio level (0..1) — modest push */
   private static final double LEVEL_RATE_BOOST = 0.3; // CURATE: subtle; raise if growth should visibly surge with loudness
 
-  /** Safety: a beat-gated pipe never waits longer than this for a beat/bass hit */
+  /** Safety: a grid-gated pipe never waits longer than this for a boundary/bass hit */
   private static final double BEAT_WAIT_TIMEOUT_MS = 1500;
 
   /** Full-room fade-out duration when draining (brightness ramp, not motion) */
@@ -90,6 +99,10 @@ public class Pipes3D extends ApotheneumPattern {
   /** Elbow ball: extra radius in px beyond the pipe half-thickness */
   private static final double BALL_EXTRA_PX = 1;
 
+  /** Thickness parameter bounds (px); THICK_MAX also sizes the sparkle
+   *  visibility tolerance in sparkleOverlay() */
+  private static final double THICK_MIN = 3, THICK_MAX = 5;
+
   /** Elbow ball saturation / brightness boost (reads as a shiny joint) */
   private static final float BALL_SAT = 70;        // CURATE
   private static final float BALL_BOOST = 1.15f;
@@ -113,21 +126,6 @@ public class Pipes3D extends ApotheneumPattern {
   private static final int[] DY = { 0, 0, -1, 1, 0, 0 };
   private static final int[] DZ = { 0, 0, 0, 0, -1, 1 };
 
-  /** Beat divisions for growth quantization at high energy */
-  public enum Growth {
-    EIGHTH("1/8", 0.5),
-    QUARTER("1/4", 1),
-    HALF("1/2", 2),
-    WHOLE("4/4", 4);
-
-    public final String label;
-    public final double beats;
-    private Growth(String label, double beats) { this.label = label; this.beats = beats; }
-
-    @Override
-    public String toString() { return this.label; }
-  }
-
   // ---- Parameters -----------------------------------------------------------
 
   private final TriggerBag bag = new TriggerBag("Pipes3D");
@@ -144,12 +142,16 @@ public class Pipes3D extends ApotheneumPattern {
     new TriggerParameter("NewPipe", this::spawnAnotherPipe)
     .setDescription("Spawn another concurrent pipe (max 3)"));
 
+  public final TriggerParameter sparkle = bag.register(
+    new TriggerParameter("Sparkle", this::flashSparkle)
+    .setDescription("Flash the recent elbow joints white (the treble sparkle, fired manually)"));
+
   public final CompoundParameter energy =
     new CompoundParameter("Energy", 0.35)
-    .setDescription("0-0.4 ambient crawl; 0.6-1.0 beat-gated high-energy growth");
+    .setDescription("0-0.4 ambient crawl; 0.6-1.0 grid-gated high-energy growth");
 
   public final CompoundParameter thickness =
-    new CompoundParameter("Thick", 3.5, 3, 5)
+    new CompoundParameter("Thick", 3.5, THICK_MIN, THICK_MAX)
     .setDescription("Pipe thickness in pixels (applies to newly drawn segments)");
 
   public final DiscreteParameter density =
@@ -160,9 +162,17 @@ public class Pipes3D extends ApotheneumPattern {
     new CompoundParameter("Hue", 0, 0, 360)
     .setDescription("Hue offset in degrees added to the palette-derived pipe color");
 
-  public final EnumParameter<Growth> growthDiv =
-    new EnumParameter<Growth>("GrowDiv", Growth.QUARTER)
-    .setDescription("Beat division that quantizes segment growth at high energy");
+  public final CompoundParameter audioDepth =
+    new CompoundParameter("Audio", 0)
+    .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
+
+  public final BooleanParameter sync =
+    new BooleanParameter("Sync", true)
+    .setDescription("Lock motion events to the tempo grid; off restores free-running timing");
+
+  public final EnumParameter<Tempo.Division> tempoDiv =
+    new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.SIXTEENTH)
+    .setDescription("Tempo division that segment growth quantizes and gates to when Sync is enabled");
 
   public final TriggerParameter meta =
     new TriggerParameter("Meta", bag::fire)
@@ -171,6 +181,7 @@ public class Pipes3D extends ApotheneumPattern {
   // ---- Preallocated state (zero-alloc render path) ---------------------------
 
   private final AudioReactive audio;
+  private final TempoLock tempoLock;
   private final Random random = new Random();
 
   /** Per-wall persistent color and depth buffers; completed geometry lives here */
@@ -184,6 +195,9 @@ public class Pipes3D extends ApotheneumPattern {
   // Current room dimensions in cells, and cell size in pixels
   private int gx, gy, gz;
   private double cw, ch;
+
+  /** Density-aware floor on segment duration enforcing the >=5s traversal cap */
+  private double minSegMs;
 
   // Pipe state (parallel arrays, MAX_PIPES slots)
   private final boolean[] pAlive = new boolean[MAX_PIPES];
@@ -203,7 +217,7 @@ public class Pipes3D extends ApotheneumPattern {
   private final float[] elbowY = new float[ELBOW_HISTORY];
   private final float[] elbowZ = new float[ELBOW_HISTORY];
   private int elbowCount = 0, elbowNext = 0;
-  private double sparkle = 0;
+  private double sparkleLevel = 0;
 
   // Drain state
   private boolean draining = false;
@@ -212,22 +226,30 @@ public class Pipes3D extends ApotheneumPattern {
 
   public Pipes3D(LX lx) {
     super(lx);
-    this.audio = new AudioReactive(lx);
+    this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
+    this.tempoLock = new TempoLock(lx);
 
     addParameter("drain", this.drain);
     addParameter("teleport", this.teleport);
     addParameter("newPipe", this.newPipe);
+    addParameter("sparkle", this.sparkle);
     addParameter("energy", this.energy);
     addParameter("thickness", this.thickness);
     addParameter("density", this.density);
     addParameter("hue", this.hue);
-    addParameter("growthDiv", this.growthDiv);
+    addParameter("audio", this.audioDepth);
+    addParameter("sync", this.sync);
+    addParameter("tempoDiv", this.tempoDiv);
     addParameter("meta", this.meta);
 
     bag.jumpable(this.thickness);
     bag.jumpable(this.density);
     bag.jumpable(this.hue);
-    bag.jumpable(this.growthDiv);
+    // Curated musical subrange only: full Division range runs up to 16 bars,
+    // which would quantize a segment to tens of seconds. CURATE: unverified
+    // visually — confirm a 1/16..1/2 grid jump reads as a groove change.
+    bag.jumpable(this.tempoDiv,
+      Tempo.Division.SIXTEENTH.ordinal(), Tempo.Division.HALF.ordinal());
 
     applyDensity();
     clearRoom();
@@ -243,6 +265,10 @@ public class Pipes3D extends ApotheneumPattern {
     this.gy = Math.round(this.gx * (float) H / W); // keeps cells ~square (10 -> 9)
     this.cw = (double) W / this.gx;
     this.ch = (double) H / this.gy;
+    // A wall crossing is gx cells; budget the per-cell floor so that even
+    // with the max audio boost (x1.3 rate) and a max retime speed-up (x1.4)
+    // the tip still needs >= TRAVERSAL_MIN_MS to cross a full wall
+    this.minSegMs = TRAVERSAL_MIN_MS * (1 + LEVEL_RATE_BOOST) * TempoLock.DEFAULT_MAX_SCALE / this.gx;
   }
 
   /** Clear buffers and occupancy. Event-rate only (construction / drain end). */
@@ -259,7 +285,7 @@ public class Pipes3D extends ApotheneumPattern {
     this.occupiedCount = 0;
     this.elbowCount = 0;
     this.elbowNext = 0;
-    this.sparkle = 0;
+    this.sparkleLevel = 0;
   }
 
   private boolean inBounds(int x, int y, int z) {
@@ -295,20 +321,41 @@ public class Pipes3D extends ApotheneumPattern {
   }
 
   /**
-   * Segment duration for a new segment: energy interpolates 2s -> 1s per cell;
-   * above HIGH_ENERGY the duration rounds up to a whole number of growth
-   * divisions so extrusion lands on the tempo grid.
+   * Nominal duration for a new segment: energy interpolates 2s -> 1s per
+   * cell, floored by the density-aware traversal cap. With Sync on, the
+   * duration additionally rounds up to a whole number of TempoDiv divisions;
+   * beginSegment() then phase-aligns it to the engine grid when growth
+   * actually starts.
    */
   private double nextSegmentMs() {
     final double e = this.energy.getValue();
-    double ms = Ranges.lin(e, SEG_MS_AMBIENT, SEG_MS_PEAK);
-    if (e > HIGH_ENERGY) {
-      double divMs = this.lx.engine.tempo.period.getValue() * this.growthDiv.getEnum().beats;
+    double ms = Math.max(Ranges.lin(e, SEG_MS_AMBIENT, SEG_MS_PEAK), this.minSegMs);
+    if (this.sync.isOn()) {
+      final double divMs = this.tempoLock.divisionMs(this.tempoDiv.getEnum());
       if (divMs > 1) {
         ms = Math.ceil(ms / divMs) * divMs;
       }
     }
     return ms;
+  }
+
+  /**
+   * Growth of the current segment is actually starting now (immediately after
+   * an advance, or on the frame a grid-gate wait ends). With Sync on, nudge
+   * the duration (rate scale clamped to [0.7, 1.4]) so the cell completes
+   * exactly on a TempoDiv boundary, phase-aligned to the real engine beat.
+   * Errors never accumulate: each segment re-aligns against Tempo.getBasis.
+   */
+  private void beginSegment(int i) {
+    if (this.sync.isOn()) {
+      // Estimate the actual arrival time: updatePipes grows at rate
+      // (1 + LEVEL_RATE_BOOST * level), so fold the boost in (level sampled
+      // now — exact for steady level, approximate while it changes). Without
+      // this, completion would land up to 23% early of the retimed boundary
+      // whenever the Audio knob is up; at Audio = 0 the divisor is 1.
+      final double msUntil = this.pSegMs[i] / (1 + LEVEL_RATE_BOOST * this.audio.level);
+      this.pSegMs[i] /= this.tempoLock.retime(msUntil, this.tempoDiv.getEnum());
+    }
   }
 
   /** Place pipe i at a fresh free cell: cap ball, degenerate segment; advance() picks a direction. */
@@ -361,6 +408,11 @@ public class Pipes3D extends ApotheneumPattern {
     if (!this.draining) {
       spawnPipe();
     }
+  }
+
+  // Trigger: manually fire the elbow sparkle flash at full brightness
+  private void flashSparkle() {
+    this.sparkleLevel = 1;
   }
 
   // Trigger: one random growing pipe jumps to a random free cell and continues
@@ -486,8 +538,13 @@ public class Pipes3D extends ApotheneumPattern {
     this.pFrac[i] = 0;
     this.pSegMs[i] = nextSegmentMs();
     this.pHue[i] = pipeHue(i);
-    this.pWaiting[i] = (this.energy.getValue() > HIGH_ENERGY);
+    // High energy with Sync on: hold the new segment for the next grid
+    // boundary (or bass hit); otherwise growth starts immediately
+    this.pWaiting[i] = this.sync.isOn() && (this.energy.getValue() > HIGH_ENERGY);
     this.pWaitMs[i] = 0;
+    if (!this.pWaiting[i]) {
+      beginSegment(i);
+    }
 
     if (this.occupiedCount > FILL_LIMIT * this.gx * this.gy * this.gz) {
       startDrain();
@@ -632,15 +689,16 @@ public class Pipes3D extends ApotheneumPattern {
       updatePipes(deltaMs);
     }
 
-    // Treble sparkle envelope on recent elbows
+    // Treble sparkle envelope on recent elbows; the hit response scales with
+    // the Audio depth knob (max() so a manual Sparkle trigger is not dimmed)
     if (this.audio.trebleHit()) {
-      this.sparkle = 1;
+      this.sparkleLevel = Math.max(this.sparkleLevel, this.audio.depth());
     } else {
-      this.sparkle = Math.max(0, this.sparkle - deltaMs / SPARKLE_MS);
+      this.sparkleLevel = Math.max(0, this.sparkleLevel - deltaMs / SPARKLE_MS);
     }
 
     blit(outputScale);
-    if (this.sparkle > 0 && this.elbowCount > 0) {
+    if (this.sparkleLevel > 0 && this.elbowCount > 0) {
       sparkleOverlay(outputScale);
     }
     copyCubeExterior(); // interior faces are copies of the exterior render
@@ -648,9 +706,18 @@ public class Pipes3D extends ApotheneumPattern {
 
   private void updatePipes(double deltaMs) {
     final double e = this.energy.getValue();
-    // Gate opens on a tempo beat or a bass transient; energy <= HIGH_ENERGY never waits
-    final boolean gateOpen = (e <= HIGH_ENERGY)
-      || this.lx.engine.tempo.beat()
+    final boolean syncOn = this.sync.isOn();
+    // Poll the grid gate every frame, even with Sync off (result unused), so
+    // its crossing state never goes stale — the old short-circuit form
+    // (syncOn && crossed()) reported a boundary that elapsed while Sync was
+    // off and opened the gate spuriously on re-enable
+    final boolean crossedNow = this.tempoLock.crossed(this.tempoDiv.getEnum());
+    final boolean gridCross = syncOn && crossedNow;
+    // Gate opens on a TempoDiv grid crossing or a bass transient; only Sync-on
+    // high energy ever waits (Sync off is fully free-running)
+    final boolean gateOpen = !syncOn
+      || (e <= HIGH_ENERGY)
+      || gridCross
       || this.audio.bassHit();
 
     for (int i = 0; i < MAX_PIPES; ++i) {
@@ -661,8 +728,9 @@ public class Pipes3D extends ApotheneumPattern {
         this.pWaitMs[i] += deltaMs;
         if (gateOpen || (this.pWaitMs[i] >= BEAT_WAIT_TIMEOUT_MS)) {
           this.pWaiting[i] = false;
+          beginSegment(i); // growth starts now: phase-align the duration
         } else {
-          continue; // holding for the beat
+          continue; // holding for the grid boundary
         }
       }
       // Audio level gives growth a modest push; silence -> base rate
@@ -684,8 +752,11 @@ public class Pipes3D extends ApotheneumPattern {
       final int[] cBuf = this.colorBuf[w];
       final Apotheneum.Column[] cols = faces[w].columns;
       for (int u = 0; u < W; ++u) {
+        // NB: cube face columns always carry GRID_HEIGHT points (the Face
+        // constructor enforces it); door openings are not shorter columns,
+        // so writing every row is correct. Bounded loop kept for safety.
         final heronarts.lx.model.LXPoint[] pts = cols[u].points;
-        final int n = pts.length; // door-shortened columns have fewer points
+        final int n = Math.min(pts.length, H);
         for (int v = 0; v < n; ++v) {
           this.colors[pts[v].index] = scaleColor(cBuf[v * W + u], scale);
         }
@@ -696,8 +767,13 @@ public class Pipes3D extends ApotheneumPattern {
   /** White flash on recent elbow joints, drawn over the blit (depth-tested). */
   private void sparkleOverlay(double scale) {
     final Apotheneum.Cube.Face[] faces = Apotheneum.cube.exterior.faces;
-    final float b = (float) (SPARKLE_BRIGHTNESS * this.sparkle * scale);
+    final float b = (float) (SPARKLE_BRIGHTNESS * this.sparkleLevel * scale);
     final int flash = LXColor.hsb(0, 0, b);
+    // Visibility tolerance: the elbow's own ball wrote the depth buffer with
+    // its NEAR-face depth — up to (THICK_MAX/2 + BALL_EXTRA_PX) px nearer
+    // than the cell-center depth tested here. Anything nearer than that
+    // margin is a genuinely occluding pipe (occluders are >= 1 cell nearer).
+    final float tol = (float) (((0.5 * THICK_MAX + BALL_EXTRA_PX) / this.cw + 0.05) / this.gz);
     for (int e = 0; e < this.elbowCount; ++e) {
       final double x = this.elbowX[e], y = this.elbowY[e], z = this.elbowZ[e];
       for (int w = 0; w < WALLS; ++w) {
@@ -715,7 +791,7 @@ public class Pipes3D extends ApotheneumPattern {
           continue;
         }
         // Only sparkle elbows that are visible on this wall (not occluded)
-        if (dn > this.depthBuf[w][v * W + u] + 0.001f) {
+        if (dn > this.depthBuf[w][v * W + u] + tol) {
           continue;
         }
         final Apotheneum.Column[] cols = faces[w].columns;

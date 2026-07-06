@@ -7,12 +7,16 @@ import apotheneum.Apotheneum;
 import apotheneum.ApotheneumPattern;
 import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.Ranges;
+import apotheneum.jvyduna.util.TempoLock;
 import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
+import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
+import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundParameter;
+import heronarts.lx.parameter.EnumParameter;
 import heronarts.lx.parameter.TriggerParameter;
 import heronarts.lx.utils.LXUtils;
 
@@ -22,11 +26,14 @@ import heronarts.lx.utils.LXUtils;
  * columns). Each column is rendered bottom-up as hard elevation bands — water,
  * sand, grass, rock, snow — with a bright one-row waterline at the sea surface.
  *
- * Mountains are born by uplift (bass hits at high energy, a Poisson timer at
- * ambient), age by erosion (neighbor diffusion + slow subsidence), and drown
- * or emerge as the sea breathes with the slow-smoothed music level: quiet
- * music raises the ocean over the land; loud music drains it and the peaks
- * come out. Treble shimmers the snowcaps at high energy.
+ * Mountains are born by uplift (bass hits at high energy, a spontaneous
+ * timer at ambient), age by erosion (neighbor diffusion + slow subsidence),
+ * and drown or emerge as the sea breathes with the slow-smoothed music level:
+ * quiet music raises the ocean over the land; loud music drains it and the
+ * peaks come out. Treble shimmers the snowcaps at high energy. All audio
+ * reactivity is gated by the Audio depth knob (default 0 = pure screensaver).
+ * With Sync on, spontaneous mountain births land on the tempo grid and the
+ * Flood trigger's sea ramp is retimed to top out on a grid boundary.
  *
  * See Terraform.md (beside this file) for the full design note.
  */
@@ -43,7 +50,7 @@ public class Terraform extends ApotheneumPattern {
   /** Ambient sea level full sweep (bottom to top) in 8 s */
   private static final double SEA_RAMP_SEC = 8;
 
-  /** Flood trigger sea sweep: full range in 5 s (the >= 5 s cap; ~4 s from a typical mid sea) */
+  /** Flood trigger sea sweep: full range in 5 s (the >= 5 s cap; ~4 s from a typical drained sea) */
   private static final double FLOOD_RAMP_SEC = 5;
 
   /** Flood holds at maximum sea for 2 s before draining back */
@@ -86,6 +93,12 @@ public class Terraform extends ApotheneumPattern {
 
   /** Per-frame diffusion stability clamp (must stay < 0.5) */
   private static final double DIFFUSION_MAX_FRAME = 0.24;
+
+  /** Uplift amplitude factor (fraction of full height, x Uplift param) at ambient / peak energy */
+  private static final double UPLIFT_AMP_AMBIENT = 0.4, UPLIFT_AMP_PEAK = 0.9;
+
+  /** Uplift bump sigma (fraction of ring length) at ambient / peak energy */
+  private static final double UPLIFT_SIGMA_AMBIENT = 0.02, UPLIFT_SIGMA_PEAK = 0.045;
 
   /** Bass hits trigger uplifts only above this energy */
   private static final double BASS_UPLIFT_MIN_ENERGY = 0.55;
@@ -134,6 +147,10 @@ public class Terraform extends ApotheneumPattern {
     new TriggerParameter("Reseed", this::reseed)
     .setDescription("Morph to a fresh random terrain over ~5 s"));
 
+  public final TriggerParameter erupt = bag.register(
+    new TriggerParameter("Erupt", this::erupt)
+    .setDescription("Raise one new mountain now, exactly as a spontaneous uplift would"));
+
   public final CompoundParameter energy = new CompoundParameter("Energy", 0.35)
     .setDescription("Master energy: 0-0.4 soothing ambient, 0.6-1.0 high-energy 160 BPM regime");
 
@@ -152,12 +169,22 @@ public class Terraform extends ApotheneumPattern {
   public final CompoundParameter sparkle = new CompoundParameter("Sparkle", 0.5)
     .setDescription("Treble-driven shimmer on snowcap pixels, active only at high energy");
 
+  public final CompoundParameter audioDepth = new CompoundParameter("Audio", 0)
+    .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
+
+  public final BooleanParameter sync = new BooleanParameter("Sync", true)
+    .setDescription("Lock motion events to the tempo grid; off restores free-running timing");
+
+  public final EnumParameter<Tempo.Division> tempoDiv = new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.QUARTER)
+    .setDescription("Tempo division that motion events land on when Sync is enabled");
+
   public final TriggerParameter meta = new TriggerParameter("Meta", bag::fire)
     .setDescription("Randomly fire a trigger or jump a parameter");
 
   // ---- State (all preallocated; zero allocation in the render path) -----------
 
   private final AudioReactive audio;
+  private final TempoLock tempoLock;
   private final Random random = new Random();
 
   // Terrain heightfields in rows. target[] receives uplift/erosion; height[]
@@ -178,26 +205,34 @@ public class Terraform extends ApotheneumPattern {
   private int floodPhase = FLOOD_NONE;
   private double floodHoldMs = 0;
 
+  /** Sea rise rate (fraction/s) while FLOOD_RISING; retimed at trigger when Sync is on */
+  private double floodRate = 1 / FLOOD_RAMP_SEC;
+
   private double shakeMs = 0;
   private double shakePhase = 0;
 
   public Terraform(LX lx) {
     super(lx);
-    this.audio = new AudioReactive(lx);
+    this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
+    this.tempoLock = new TempoLock(lx);
 
     addParameter("cataclysm", this.cataclysm);
     addParameter("flood", this.flood);
     addParameter("reseed", this.reseed);
+    addParameter("erupt", this.erupt);
     addParameter("energy", this.energy);
     addParameter("upliftSize", this.upliftSize);
     addParameter("erosion", this.erosion);
     addParameter("seaBias", this.seaBias);
     addParameter("bandShift", this.bandShift);
     addParameter("sparkle", this.sparkle);
+    addParameter("audio", this.audioDepth);
+    addParameter("sync", this.sync);
+    addParameter("tempoDiv", this.tempoDiv);
     addParameter("meta", this.meta);
 
     // Jump candidates — mirrored 1:1 in Terraform.md "Jump candidates"
-    this.bag.jumpable(this.erosion);
+    this.bag.jumpable(this.erosion, 0.15, 1);
     this.bag.jumpable(this.upliftSize);
     this.bag.jumpable(this.bandShift, -0.12, 0.12);
     this.bag.jumpable(this.seaBias, 0.3, 0.75);
@@ -222,6 +257,19 @@ public class Terraform extends ApotheneumPattern {
   private void flood() {
     LX.log("Terraform: flood");
     this.floodPhase = FLOOD_RISING;
+    this.floodRate = 1 / FLOOD_RAMP_SEC;
+    if (this.sync.isOn()) {
+      // Retime the ramp so the sea tops out on a tempo-grid boundary.
+      // Slow-down only (max scale 1): FLOOD_RAMP_SEC already sits at the 5 s
+      // full-traversal cap, so the ramp may stretch to ~7.1 s but never quicken.
+      final double msUntilFull = (SEA_FLOOD - this.seaFrac) * FLOOD_RAMP_SEC * 1000;
+      this.floodRate *= this.tempoLock.retime(msUntilFull, this.tempoDiv.getEnum(), TempoLock.DEFAULT_MIN_SCALE, 1);
+    }
+  }
+
+  private void erupt() {
+    LX.log("Terraform: erupt");
+    spawnUplift(1);
   }
 
   private void reseed() {
@@ -281,19 +329,23 @@ public class Terraform extends ApotheneumPattern {
     final double e = this.energy.getValue();
     final double dt = deltaMs / 1000.0;
 
-    // -- Uplift: Poisson timer always runs (silence-safe); bass adds at high energy
+    // -- Uplift: spontaneous births always run (silence-safe); bass adds at
+    // high energy. Free-running: a Poisson timer. Sync on: births land on the
+    // tempo grid, firing on grid crossings with a probability that preserves
+    // the same expected rate (capped at one birth per division cycle).
     final double upliftRate = Ranges.exp(e, UPLIFT_RATE_AMBIENT_HZ, UPLIFT_RATE_PEAK_HZ);
-    final boolean timerUplift = this.random.nextDouble() < upliftRate * dt;
+    // crossed() polls every frame, even with Sync off (result unused), so the
+    // gate never goes stale — a lapsed gate would report a boundary that
+    // elapsed while Sync was off and fire one spurious birth on re-enable
+    final boolean gridCross = this.tempoLock.crossed(this.tempoDiv.getEnum());
+    final boolean timerUplift = this.sync.isOn() ?
+      gridCross
+        && (this.random.nextDouble() < upliftRate * this.tempoLock.divisionMs(this.tempoDiv.getEnum()) * 0.001) :
+      this.random.nextDouble() < upliftRate * dt;
     final boolean bassUplift = (e >= BASS_UPLIFT_MIN_ENERGY) && this.audio.bassHit();
     if (timerUplift || bassUplift) {
-      double amp = this.upliftSize.getValue() * Ranges.lin(e, 0.4, 0.9);
-      if (bassUplift) {
-        // Scale bass-born mountains by how hard the transient hit
-        amp *= 0.6 + 0.4 * Math.min(this.audio.bassRatio, 2.5) / 2.5;
-      }
-      final double sigmaFrac = Ranges.lin(e, 0.02, 0.045);
-      uplift(this.cubeTarget, Apotheneum.GRID_HEIGHT, amp, sigmaFrac);
-      uplift(this.cylinderTarget, Apotheneum.CYLINDER_HEIGHT, amp, sigmaFrac);
+      // Bass-born mountains scale by how hard the transient hit
+      spawnUplift(bassUplift ? 0.6 + 0.4 * Math.min(this.audio.bassRatio, 2.5) / 2.5 : 1);
     }
 
     // -- Erosion: diffusion + subsidence on targets; heights chase rate-limited
@@ -310,7 +362,7 @@ public class Terraform extends ApotheneumPattern {
     double seaRate = 1 / SEA_RAMP_SEC;
     if (this.floodPhase == FLOOD_RISING) {
       seaGoal = SEA_FLOOD;
-      seaRate = 1 / FLOOD_RAMP_SEC;
+      seaRate = this.floodRate;
       if (this.seaFrac >= SEA_FLOOD - 0.01) {
         this.floodPhase = FLOOD_HOLDING;
         this.floodHoldMs = FLOOD_HOLD_SEC * 1000;
@@ -367,6 +419,19 @@ public class Terraform extends ApotheneumPattern {
     }
   }
 
+  /**
+   * Raise one new mountain on each surface (random independent centers),
+   * sized by Energy and the Uplift knob, optionally scaled by ampScale.
+   * Zero-allocation; called from the render path and from the Erupt trigger.
+   */
+  private void spawnUplift(double ampScale) {
+    final double e = this.energy.getValue();
+    final double amp = ampScale * this.upliftSize.getValue() * Ranges.lin(e, UPLIFT_AMP_AMBIENT, UPLIFT_AMP_PEAK);
+    final double sigmaFrac = Ranges.lin(e, UPLIFT_SIGMA_AMBIENT, UPLIFT_SIGMA_PEAK);
+    uplift(this.cubeTarget, Apotheneum.GRID_HEIGHT, amp, sigmaFrac);
+    uplift(this.cylinderTarget, Apotheneum.CYLINDER_HEIGHT, amp, sigmaFrac);
+  }
+
   private void uplift(double[] target, int fullHeight, double ampFrac, double sigmaFrac) {
     addBump(target,
       this.random.nextInt(target.length),
@@ -377,9 +442,11 @@ public class Terraform extends ApotheneumPattern {
 
   /**
    * Draw one surface's skyline into the exterior color buffer. Elevation is
-   * counted in rows from the physical ground; door-shortened columns simply
-   * lack their lowest rows (points[len-1] sits at elevation fullHeight - len),
-   * so indexing from the top keeps sea and bands aligned across doors.
+   * counted in rows above the ground: column.points[0] is the top row, so
+   * elev = fullHeight - 1 - yi. Every column carries the full point count
+   * (the model enforces this; door cutouts are masked by the core doors
+   * effect, not by shorter columns) — indexing elevation from the top keeps
+   * the sea and band thresholds aligned across all columns regardless.
    */
   private void renderSurface(Apotheneum.Orientation surface, double[] height,
                              int fullHeight, double shakeAmp, double sparkleDepth) {
