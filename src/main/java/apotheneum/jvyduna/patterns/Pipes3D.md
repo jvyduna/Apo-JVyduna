@@ -269,7 +269,8 @@ band sits live.
 
 UI/registration order (sixth pass — gesture triggers first): Sparkle,
 Teleport, the three pulses, Drain, RndTrig, then Pipes, Speed, CapDiv,
-Thick, CapDia, Density, Shaded, Reverse, JmpEnd, RotX, RotY, RstRot, Audio
+Thick, CapDia, Density, Shaded, Reverse, JmpPct, JumpTo, RotX, RotY, RstRot,
+Audio
 (20 total — well past the ~12 series guideline; this is the series'
 flagship-complexity pattern).
 
@@ -290,7 +291,8 @@ flagship-complexity pattern).
 | `density` | Density | DiscreteParameter | 10 | 6..12 | room grid cells per axis; **takes effect at the next drain** |
 | `shaded` | Shaded | CompoundParameter | 0.5 | 0..1 | Phong shading: 0 = flat fast render (all shader compute skipped); 0→0.1 fades shading/AA in; 0.5 = nominal |
 | `reverse` | Reverse | BooleanParameter | off | — | play backward: unbuild the lattice newest-first on the CapDiv grid; auto-flips forward when empty |
-| `jmpEnd` | JmpEnd | TriggerParameter | — | — | jump to the end: synthesize a busy filled room with current settings and flip Reverse on |
+| `jmpPct` | JmpPct | CompoundParameter | 1 | 0..1 | how far through the build JumpTo seeds: 0 = empty (instant drain/restart), 1 = the busy auto-drain fill level |
+| `jumpTo` | JumpTo | TriggerParameter | — | — | jump the animation to JmpPct through the build; playback continues in the current direction (Reverse unbuilds it) |
 | `rotX` | RotX | CompoundParameter | 0 | 0..1 | lattice rotation speed about the horizontal x axis; 100% = 90°/beat |
 | `rotY` | RotY | CompoundParameter | 0 | 0..1 | lattice rotation speed about the vertical y axis; 100% = 90°/beat |
 | `rstRot` | RstRot | TriggerParameter | — | — | zero RotX/RotY and snap back to the orthogonal projection (jump-cut; the lighting rig keeps turning) |
@@ -307,10 +309,11 @@ house rules), and `speed` changed type (CompoundParameter →
 EnumParameter&lt;Rate&gt;). Fourth pass: `hglht` → `shaded` (repurposed for
 full-surface shading) and `speed` back to a continuous CompoundParameter —
 old `.lxp` `hglht`/enum-speed values drop or restore oddly, accepted. Sixth
-pass: added `plsThk`/`plsShd`/`plsCap`/`capDia`/`reverse`/`jmpEnd` (no
-removals — old `.lxp` files restore cleanly). Old `.lxp` files referencing
-removed keys restore every other parameter and log an unknown-parameter
-warning for each.
+pass: added `plsThk`/`plsShd`/`plsCap`/`capDia`/`reverse` (no removals —
+old `.lxp` files restore cleanly); its short-lived `jmpEnd` became
+`jumpTo` + `jmpPct` the next day (seventh pass; the day-old `jmpEnd` key
+warns). Old `.lxp` files referencing removed keys restore every other
+parameter and log an unknown-parameter warning for each.
 
 Pipe color (third pass — series house rules, no hue knob): full H/S/B
 straight from the palette swatch. Pipe i always wears slot `i % n` — so the
@@ -341,7 +344,7 @@ moves), so the whole retained model pulses (thickness is realtime).
 Retriggering mid-decay re-latches direction and resumes the attack from the
 current level. `CURATE:` amounts/times.
 
-## Reverse / JmpEnd (sixth pass)
+## Reverse / JumpTo (sixth-seventh pass)
 
 `Reverse` (bool) plays the animation backward: growth stops (live pipes are
 released — their partial segments become the first tails) and the retained
@@ -359,12 +362,18 @@ respawn** — the animation ping-pongs. Toggling forward mid-unbuild also
 respawns immediately (old pipes are not resumed). A drain forces Reverse
 off. `CURATE:` unbuild pacing, ping-pong feel.
 
-`JmpEnd` synthesizes a busy filled room (the 60% auto-drain fill level) with
-the current settings — density applies immediately, colors/thickness per the
-usual rules — by running the same growth walk (`walkStep`) synchronously
-with `Pipes`-many walkers, then flips Reverse ON to seed the unbuild. It is
-event-rate but walks ~hundreds of cells in one call (`CURATE:` measure the
-frame hitch); bounded by the retained-list capacities and an iteration
+`JumpTo` (seventh pass — generalizes the day-old JmpEnd) jumps the
+animation to **`JmpPct`** of the way through the build: it synthesizes a
+room filled to `JmpPct × 60%` (the auto-drain level) with the current
+settings — density applies immediately, colors/thickness per the usual
+rules — by running the same growth walk (`walkStep`) synchronously with
+`Pipes`-many walkers. **Playback then continues in the current direction**
+(JumpTo no longer touches Reverse): forward keeps the walkers alive and
+growing seamlessly from the seeded state (`JmpPct = 0` reads as an instant
+drain + restart), while Reverse leaves the geometry to the unbuild cursor
+(`JmpPct = 1` + Reverse = the classic jump-to-end seed). Event-rate but
+walks ~hundreds of cells in one call at high percentages (`CURATE:` measure
+the frame hitch); bounded by the retained-list capacities and an iteration
 guard. Not in the RndTrig bag.
 
 ## Triggers
@@ -383,8 +392,8 @@ Gesture triggers, small → large:
 - `teleport` — **medium**: instant; a cap ball marks the disconnect point and
   the pipe continues from a random free cell. Reads immediately (the classic
   NT gag).
-- `jmpEnd` — **large**: instant filled room + Reverse on (see Reverse /
-  JmpEnd). Not in the bag.
+- `jumpTo` — **large**: instantly seed the room at JmpPct through the build,
+  continuing in the current direction (see Reverse / JumpTo). Not in the bag.
 - `drain` — **large**: a brightness fade (not motion) whose duration is
   measured at trigger time to conclude **exactly on a beat**, between 0.5 and
   1.5 beats out (if the next beat is closer than half a beat, it targets the
@@ -461,6 +470,7 @@ performance tempos.
 | 2026-07-05 | Fixed sparkle overlay self-occlusion; enforced ≥5 s traversal cap at all densities via `minSegMs` floor; added `audio` depth knob (default 0) wired through `AudioReactive.setDepth`; migrated tempo handling to shared `TempoLock` with `sync`/`tempoDiv`; removed `growthDiv`; added `Sparkle` manual trigger; corrected false door-column claim | Review session (Fable): bug fixes + series-convention upgrade |
 | 2026-07-05 | Integration pass: `TriggerBag.jumpable(DiscreteParameter, lo, hi)` subrange overload added; `tempoDiv` in the meta pool over SIXTEENTH..HALF; fixed a stale-gate nit (`crossed()` polled every frame) | Pipes3D agent's util request + series `crossed()` idiom |
 | 2026-07-06 | Series RndTrig ordering: `meta` → `rndTrig` (label RndTrig), moved from last to immediately after the plain triggers; `.lxp` values on the old `meta` path are dropped on load | Series convention: TriggerBag meta trigger sits right after the other trigger params |
+| 2026-07-07 (7th pass) | **JumpTo/JmpPct**: `jmpEnd` → `jumpTo` trigger + new `jmpPct` knob (0..1, default 1) scaling the synthesized fill to `pct × 60%`. JumpTo now respects the CURRENT direction instead of forcing Reverse on: forward keeps the synthesis walkers alive and growing from the seed (`planRun` each + `syncPipeCount`; pct 0 = instant drain + restart), Reverse hands the geometry to the unbuild cursor (pct 1 + Reverse = the old JmpEnd). Params ordered Reverse, JmpPct, JumpTo. `.lxp` fallout: the day-old `jmpEnd` key warns | User request: normalized jump percentage; JumpTo rename |
 | 2026-07-07 (6th pass) | Performance-gesture round. **Pulses**: PlsThk/PlsShd/PlsCap triggers fire in-pattern AD envelopes (32nd-note attack, one-beat decay, BPM-aware) pushing the EFFECTIVE value 50% of the param's range toward/past its center (Thick→3.5, Shaded→0.5, CapDia→1), latched-direction, retrigger-safe; knobs never move. **CapDia** knob (0..2, default 0 = caps hidden; capsule ends keep pipes continuous; raster skipped below 0.3 px). **Shaded response curve**: (0, 0.1] crossfades hard-flat → AA'd pipeline (`frameAABlend`, spec fades in too); [0.1, 1] piecewise-remapped keeping the 0.5/1.0 anchors; 0 still skips all shader compute. **Reverse**: global newest-first LIFO unbuild on the CapDiv grid (derived velocity, `segBallCount` log pops elbows with their segments, guarded `unoccupy` frees cells); auto-flips forward + respawns when empty; drains force it off. **JmpEnd**: synchronous `walkStep` synthesis of a ~60%-filled room with current settings, then Reverse on (walkStep factored out of planRun; no scheduling/auto-drain during synthesis). **Speed-0 kickoff fix**: pipes parked at infinite caps self-heal in updatePipes/updateReverse the first frame Speed > 0. **Order**: Sparkle, Teleport, PlsThk, PlsShd, PlsCap, Drain, RndTrig first; CapDia by Thick; Reverse/JmpEnd before rotation. **Bag**: strictly the six gesture triggers + a RevTgl toggle — ALL param jumpables removed, rstRot out. CURATE: pulse amounts/times, capless resting look, unbuild pacing, ping-pong feel, JmpEnd hitch | User live-curation notes (6th round) + decisions: unbuild auto-ping-pongs; JmpEnd flips Reverse; bag strictly triggers |
 | 2026-07-06 (5th pass) | Live-curation round 5, from a screenshot. **Gap bug fixed**: the shaded rasterizer was a *scatter* (step the projected centerline, floor-round perpendicular pixel spans), which missed interior pixels on rotated diagonals — rewrote `rasterSegment`'s per-wall emission as a **gather** over destination LEDs: per pixel in the projected capsule's bounding box, evaluate the exact 2D point-to-segment distance for coverage and the signed cross-pipe parameter for shading. Gap-free by construction, and per-LED (the user's question — was per-model-point scattered, now per projected LED). **More AA**: coverage is a `clamp((r + AA_WIDTH/2 − dist)/AA_WIDTH)` ramp (`AA_WIDTH = 1.5` px) on silhouettes and the rounded capsule/disc end-caps (was a fixed 1 px). `stampDisc` rim switched to the same ramp; segment caps now rounded (joint balls cover the overlap). Fills moved from per-step to per-segment-midpoint (far lights, negligible variation). **Drain color reset**: `drainCount` removed — pipe i always wears palette slot i, so pipes come back in the same first-N colors every drain (per-drain rotation retired by request). CURATE: `AA_WIDTH`, fill-midpoint approx, gather frame-time | User live-curation notes (5th round): fix interior gaps, smoother edges, consistent drain colors |
 | 2026-07-06 (4th pass) | Live-curation round 4. **Lighting rig**: the Phong sun now rotates about Y (one revolution per 32 beats) together with two new corner fill point lights (`FILL_CORNERS`, `FILL_DIST = 3` half-extents, direction-only) — a third coordinate system beside the fixed walls and the RotX/RotY lattice; RstRot leaves the rig alone. **Full-surface Phong** replaces the 1 px stripe: per-pixel cylinder normals on pipe bodies and sphere normals on joints/end-caps, `AMBIENT = 0.15`, `KD_SUN = 0.65`, `KD_FILL = 0.30`, spec exponent 4 per pixel — tubes read as rounded, and coverage-based AA (widened spans/discs, lightest-blend rims without depth writes) removes projection jaggies. `Hglht` → **`Shaded`**: the flat↔phong mix and spec gain; **0 disables all shading processing** (flat fast path). **Planner** rebuilt Mystify-style: cap times are hard targets on the GLOBAL tempo grid (absolute-beat CapDiv multiples — the pattern-local epoch is gone; drains no longer reset cap phase); per-frame velocity is derived from remaining-distance/remaining-time (exact arrival, BPM-robust; the Speed knob no longer moves in-flight runs); one `scheduleCap` rule covers caps, spawns, teleports, pause-resume and clock jumps (nearest grid point to the ideal arrival, ≥0.5 divisions out, with a half-division escape when a whole division is ≥2× too slow — congestion degrades speed, never grid alignment). **Speed** back to continuous (0–64, exponent-3 knob); 0 still pauses. **CapDiv** ordered right after Speed. All lighting constants + escape thresholds `CURATE:` | User live-curation notes (4th round): rotate highlight source; phong-shade everything (AA + rounded pipes) with a corner-fill rig; CapDiv after Speed; Mystify-style grid-first planner |

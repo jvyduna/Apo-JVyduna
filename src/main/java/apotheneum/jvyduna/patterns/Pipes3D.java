@@ -303,9 +303,13 @@ public class Pipes3D extends ApotheneumPattern {
     new BooleanParameter("Reverse", false)
     .setDescription("Play backward: unbuild the lattice newest-first on the CapDiv grid; auto-flips forward when empty");
 
-  public final TriggerParameter jmpEnd =
-    new TriggerParameter("JmpEnd", this::jumpToEnd)
-    .setDescription("Jump to the end: synthesize a busy filled room with current settings and flip Reverse on");
+  public final CompoundParameter jmpPct =
+    new CompoundParameter("JmpPct", 1)
+    .setDescription("How far through the build JumpTo seeds: 0 = empty (instant drain/restart), 1 = the busy auto-drain fill level");
+
+  public final TriggerParameter jumpTo =
+    new TriggerParameter("JumpTo", this::jumpTo)
+    .setDescription("Jump the animation to JmpPct through the build; playback continues in the current direction (Reverse unbuilds it)");
 
   public final CompoundParameter rotX =
     new CompoundParameter("RotX", 0)
@@ -457,7 +461,8 @@ public class Pipes3D extends ApotheneumPattern {
     addParameter("density", this.density);
     addParameter("shaded", this.shaded);
     addParameter("reverse", this.reverse);
-    addParameter("jmpEnd", this.jmpEnd);
+    addParameter("jmpPct", this.jmpPct);
+    addParameter("jumpTo", this.jumpTo);
     addParameter("rotX", this.rotX);
     addParameter("rotY", this.rotY);
     addParameter("rstRot", this.rstRot);
@@ -640,7 +645,7 @@ public class Pipes3D extends ApotheneumPattern {
    * direction and an integer run length that fit the room (self-avoiding,
    * straight-biased, best-effort intersect), do the elbow-ball/segment
    * bookkeeping, set pDir/pGoal, and occupy the swept cells. No scheduling
-   * and no fill check — planRun() adds those; the JmpEnd synthesizer drives
+   * and no fill check — planRun() adds those; the JumpTo synthesizer drives
    * this directly. Returns false when the walker teleported away or the
    * geometry lists overflowed (drain started).
    */
@@ -957,13 +962,16 @@ public class Pipes3D extends ApotheneumPattern {
   }
 
   /**
-   * Trigger: jump to the end — synthesize a busy filled room (the auto-drain
-   * fill level) with the current settings by running the growth walk
-   * synchronously, then flip Reverse on so the unbuild consumes it. Pipes
-   * are left dead; the reverse cursor owns the geometry. Event-rate; bounded
-   * by the retained-list capacities and an iteration guard.
+   * Trigger: jump the animation to JmpPct of the way through the build —
+   * synthesize a room filled to pct x the auto-drain level with the current
+   * settings by running the growth walk synchronously. Playback then
+   * continues in the CURRENT direction: forward keeps the walkers alive and
+   * growing from the seeded state (pct 0 = an instant drain + restart);
+   * Reverse leaves the geometry to the unbuild cursor (pct 1 = the classic
+   * jump-to-end seed). Event-rate; bounded by the retained-list capacities
+   * and an iteration guard.
    */
-  private void jumpToEnd() {
+  private void jumpTo() {
     if (this.draining) {
       return;
     }
@@ -972,64 +980,76 @@ public class Pipes3D extends ApotheneumPattern {
     for (int i = 0; i < MAX_PIPES; ++i) {
       this.pAlive[i] = false;
     }
-    // Place the walkers (placement core of placePipe, without scheduling)
+    final double target = this.jmpPct.getValue() * FILL_LIMIT * this.gx * this.gy * this.gz;
     final int walkers = this.pipes.getValuei();
-    for (int i = 0; i < walkers; ++i) {
-      if (findFreeCell()) {
-        occupy(this.rlX, this.rlY, this.rlZ);
-        this.pAlive[i] = true;
-        this.pHeadX[i] = this.rlX + 0.5;
-        this.pHeadY[i] = this.rlY + 0.5;
-        this.pHeadZ[i] = this.rlZ + 0.5;
-        this.pDir[i] = -1;
-        this.pSeg[i] = -1;
-        assignPipeColor(i);
-        addBall(this.pHeadX[i], this.pHeadY[i], this.pHeadZ[i], this.pHue[i], this.pSat[i], this.pBri[i]);
-      }
-    }
-    // Instant growth: walk until busy, snapping each run's head to its goal
-    final double target = FILL_LIMIT * this.gx * this.gy * this.gz;
-    final int maxSteps = 4 * MAX_SEGMENTS; // runaway guard
-    int guard = 0;
-    outer:
-    while ((this.occupiedCount < target) && (guard++ < maxSteps) && !this.draining) {
-      boolean advanced = false;
+    if (target >= 1) {
+      // Place the walkers (placement core of placePipe, without scheduling)
       for (int i = 0; i < walkers; ++i) {
-        if (!this.pAlive[i]) {
-          continue;
-        }
-        if ((this.segCount >= MAX_SEGMENTS - 1) || (this.ballCount >= MAX_BALLS - 1)) {
-          break outer; // leave headroom for the walk's own bookkeeping
-        }
-        if (walkStep(i)) {
-          final int d = this.pDir[i];
-          if (DX[d] != 0) {
-            this.pHeadX[i] = this.pGoal[i];
-          } else if (DY[d] != 0) {
-            this.pHeadY[i] = this.pGoal[i];
-          } else {
-            this.pHeadZ[i] = this.pGoal[i];
-          }
-          final int s = this.pSeg[i];
-          if (s >= 0) {
-            this.segBx[s] = this.pHeadX[i];
-            this.segBy[s] = this.pHeadY[i];
-            this.segBz[s] = this.pHeadZ[i];
-          }
-          advanced = true;
+        if (findFreeCell()) {
+          occupy(this.rlX, this.rlY, this.rlZ);
+          this.pAlive[i] = true;
+          this.pHeadX[i] = this.rlX + 0.5;
+          this.pHeadY[i] = this.rlY + 0.5;
+          this.pHeadZ[i] = this.rlZ + 0.5;
+          this.pDir[i] = -1;
+          this.pSeg[i] = -1;
+          assignPipeColor(i);
+          addBall(this.pHeadX[i], this.pHeadY[i], this.pHeadZ[i], this.pHue[i], this.pSat[i], this.pBri[i]);
         }
       }
-      if (!advanced) {
-        break;
+      // Instant growth: walk until the target fill, snapping heads to goals
+      final int maxSteps = 4 * MAX_SEGMENTS; // runaway guard
+      int guard = 0;
+      outer:
+      while ((this.occupiedCount < target) && (guard++ < maxSteps) && !this.draining) {
+        boolean advanced = false;
+        for (int i = 0; i < walkers; ++i) {
+          if (!this.pAlive[i]) {
+            continue;
+          }
+          if ((this.segCount >= MAX_SEGMENTS - 1) || (this.ballCount >= MAX_BALLS - 1)) {
+            break outer; // leave headroom for the walk's own bookkeeping
+          }
+          if (walkStep(i)) {
+            final int d = this.pDir[i];
+            if (DX[d] != 0) {
+              this.pHeadX[i] = this.pGoal[i];
+            } else if (DY[d] != 0) {
+              this.pHeadY[i] = this.pGoal[i];
+            } else {
+              this.pHeadZ[i] = this.pGoal[i];
+            }
+            final int s = this.pSeg[i];
+            if (s >= 0) {
+              this.segBx[s] = this.pHeadX[i];
+              this.segBy[s] = this.pHeadY[i];
+              this.segBz[s] = this.pHeadZ[i];
+            }
+            advanced = true;
+          }
+        }
+        if (!advanced) {
+          break;
+        }
       }
     }
-    for (int i = 0; i < MAX_PIPES; ++i) {
-      this.pAlive[i] = false;
+    LX.log("Pipes3D: JumpTo " + String.format("%.0f%%", 100 * this.jmpPct.getValue())
+      + " synthesized " + this.segCount + " segments (" + this.occupiedCount + " cells)");
+    if (this.reverse.isOn()) {
+      // The unbuild cursor owns the seeded geometry
+      for (int i = 0; i < MAX_PIPES; ++i) {
+        this.pAlive[i] = false;
+      }
+      this.revCapBeat = Double.NaN;
+    } else if (!this.draining) {
+      // Forward: the walkers keep growing from where the seed stopped
+      for (int i = 0; i < walkers; ++i) {
+        if (this.pAlive[i]) {
+          planRun(i);
+        }
+      }
+      syncPipeCount(); // fills any empty slots (pct 0 spawns the full count)
     }
-    LX.log("Pipes3D: JmpEnd synthesized " + this.segCount + " segments ("
-      + this.occupiedCount + " cells)");
-    this.reverse.setValue(true); // seed the unbuild (re-arms revCapBeat if already on)
-    this.revCapBeat = Double.NaN;
   }
 
   // Trigger + auto: fade everything out, concluding exactly on a beat, then
