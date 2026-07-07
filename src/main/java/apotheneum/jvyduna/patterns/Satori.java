@@ -87,6 +87,15 @@ public class Satori extends ApotheneumPattern {
   /** Max radial centers per surface for INTERFERENCE */
   private static final int MAX_CENTERS = 3;
 
+  /** Smooth: per-pixel temporal color low-pass time constant at Smooth=1 (CURATE) */
+  private static final double TAU_MS = 300;
+
+  /** Floor on the one-beat morph duration so extreme tempi don't strobe (CURATE) */
+  private static final double MIN_MORPH_MS = 250;
+
+  /** Max posterize band count (CompoundDiscreteParameter max is exclusive: 2..16) */
+  private static final int MAX_BANDS = 16;
+
   // ---- Parameters -------------------------------------------------------------
 
   private final TriggerBag bag = new TriggerBag("Satori");
@@ -118,8 +127,11 @@ public class Satori extends ApotheneumPattern {
     new CompoundDiscreteParameter("Bands", 6, 2, 17)
     .setDescription("Posterize the color LUT into N bold bands; smooth gradients read as mud through LED gaps");
 
+  public final CompoundParameter rnbwSm = new CompoundParameter("RnbwSm", 0)
+    .setDescription("Rainbow band-edge smoothing: each pixel smoothsteps along the LUT (hue-shifting path) from one band color to the next; 0 = hard edges");
+
   public final CompoundParameter smooth = new CompoundParameter("Smooth", 0)
-    .setDescription("Color interpolation between bands: 0 = hard band edges, 1 = each pixel smoothsteps from one color to the next");
+    .setDescription("Soften motion and transitions: eases each pixel's color over time and anti-aliases band edges on a linear-mix (low hue-shift) path; 0 = as-is");
 
   public final CompoundParameter audioDepth = new CompoundParameter("Audio", 0)
     .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
@@ -135,9 +147,29 @@ public class Satori extends ApotheneumPattern {
   // Phase field over all model points; only exterior indices are filled, the
   // interior receives a verbatim copy of the exterior each frame.
   private float[] field = null;      // normalized [0,1] per surface
+  private float[] fieldOld = null;   // pre-morph snapshot, lerped toward field
   private float[] pulseDist = null;  // normalized [0,1] distance from the pulse center
+  private int[] prevColor = null;    // Smooth: per-pixel temporal color low-pass
+  private boolean primeSmooth = true;// write the temporal buffer through on (re)alloc
   private boolean fieldDirty = true;
   private boolean reseedPending = true;
+
+  // One-beat decelerating morph on Field / Bands change
+  private boolean morphPending = false;
+  private boolean morphActive = false;
+  private double morphMs = 0;
+  private double bandsOld = 0;
+  private int bandsPrev = -1;        // last frame's band count (the "old" count)
+
+  // Band -> LUT position table (R4): rebuilt only when Bands or swatch count change
+  private final float[] bandPos = new float[MAX_BANDS];
+  private int lastTableBands = -1;
+  private int lastTableN = -1;
+
+  // Per-frame paint inputs (set in render, read in paint; single engine thread)
+  private double frameCycles, frameBandsEff, frameE, frameRnbwSm, frameSmooth, frameAlpha, framePulseDepth;
+  private int frameBands, frameN;
+  private boolean frameMorphActive, frameFractionalBands, framePrime;
 
   // Per-surface field seeds: index 0 = cube exterior, 1 = cylinder exterior
   private final int[] numCenters = new int[2];
@@ -173,6 +205,7 @@ public class Satori extends ApotheneumPattern {
     addParameter("speed", this.speed);
     addParameter("width", this.width);
     addParameter("posterize", this.posterize);
+    addParameter("rnbwSm", this.rnbwSm);
     addParameter("smooth", this.smooth);
     addParameter("audio", this.audioDepth);
 
@@ -205,8 +238,13 @@ public class Satori extends ApotheneumPattern {
   public void onParameterChanged(LXParameter parameter) {
     super.onParameterChanged(parameter);
     if (parameter == this.fieldMode) {
-      // Rebuild with the existing seeds so variants can be A/B'd on one layout
+      // Rebuild with the existing seeds so variants can be A/B'd on one layout,
+      // and morph the old field into the new one over one beat
       this.fieldDirty = true;
+      this.morphPending = true;
+    } else if (parameter == this.posterize) {
+      // Ease the band count from old to new over one beat (field is untouched)
+      this.morphPending = true;
     }
   }
 
@@ -237,7 +275,10 @@ public class Satori extends ApotheneumPattern {
     if ((this.field == null) || (this.field.length != size)) {
       // Allocation only here: first build or model change, never steady-state
       this.field = new float[size];
+      this.fieldOld = new float[size];
       this.pulseDist = new float[size];
+      this.prevColor = new int[size];
+      this.primeSmooth = true; // seed the temporal buffer from the first paint
     }
     if (this.reseedPending) {
       rollSeeds();
@@ -375,19 +416,95 @@ public class Satori extends ApotheneumPattern {
     }
   }
 
+  // ---- Band -> LUT position table (palette-exact posterization) -----------------
+
+  /**
+   * Map each posterize band to a position in the color LUT. Because updateLut()
+   * places palette color k at LUT position k/n, a band's color is fully
+   * expressed as a LUT position, so treble shimmer (which recolors the LUT)
+   * still applies. Rebuilt only when Bands or the swatch count change.
+   *
+   *   n < 2   : rainbow fallback, even band centers (i+0.5)/bands (unchanged look)
+   *   bands<=n: band i -> palette color i exactly (strict first-N subset)
+   *   bands >n: all n palette colors placed exactly; fillers interpolate position
+   */
+  private void buildBandTable(int bands, int n) {
+    if ((bands == this.lastTableBands) && (n == this.lastTableN)) {
+      return;
+    }
+    this.lastTableBands = bands;
+    this.lastTableN = n;
+    if (n < 2) {
+      for (int i = 0; i < bands; ++i) {
+        this.bandPos[i] = (i + 0.5f) / bands;
+      }
+    } else if (bands <= n) {
+      for (int i = 0; i < bands; ++i) {
+        this.bandPos[i] = i / (float) n; // lands exactly on palette color i
+      }
+    } else {
+      // bands > n: each palette color k anchored at band round(k*bands/n) (>1
+      // apart, so no collisions), non-anchor bands interpolate LUT position
+      // between bracketing anchors.
+      for (int k = 0; k < n; ++k) {
+        final int a0 = Math.round(k * bands / (float) n);
+        final int a1 = Math.round((k + 1) * bands / (float) n); // == bands at k = n-1
+        final float p0 = k / (float) n;
+        final float p1 = (k + 1) / (float) n;
+        for (int b = a0; b < a1; ++b) {
+          final float t = (a1 > a0) ? (b - a0) / (float) (a1 - a0) : 0f;
+          this.bandPos[b % bands] = p0 + t * (p1 - p0);
+        }
+      }
+    }
+  }
+
+  /** Continuous band -> LUT position, used mid-morph when the band count is fractional */
+  private static double contBandPos(int band, double bandsEff, int n) {
+    if (n < 2) {
+      return (band + 0.5) / bandsEff;
+    }
+    return band / (double) n;
+  }
+
+  /** Trailing-fraction smoothstep: 0 until (1-amt) of the band, ramps to 1 at its end */
+  private static double ramp(double f, double amt) {
+    if (amt <= 0) {
+      return 0;
+    }
+    final double t = (f - (1 - amt)) / amt;
+    return (t > 0) ? t * t * (3 - 2 * t) : 0;
+  }
+
   // ---- Render (zero allocation) --------------------------------------------------
 
   @Override
   protected void render(double deltaMs) {
     this.audio.tick(deltaMs);
 
+    final int bands = this.posterize.getValuei();
+    if (this.bandsPrev < 0) {
+      this.bandsPrev = bands; // first frame: no morph baseline yet
+    }
+
+    // Morph snapshot: capture the OLD field BEFORE buildField overwrites it, and
+    // the OLD band count from the previous frame. Skipped on a model-size change.
+    if (this.morphPending) {
+      if ((this.field != null) && (this.field.length == this.colors.length)) {
+        System.arraycopy(this.field, 0, this.fieldOld, 0, this.field.length);
+        this.bandsOld = this.bandsPrev;
+        this.morphMs = 0;
+        this.morphActive = true;
+      }
+      this.morphPending = false;
+    }
+
     if (this.fieldDirty || (this.field == null) || (this.field.length != this.colors.length)) {
       buildField();
       this.fieldDirty = false;
     }
     updateLut();
-
-    final int bands = this.posterize.getValuei();
+    buildBandTable(bands, this.cachedSwatchCount);
 
     // Slow-smoothed level boosts cycle speed (boost-only: silence and audio
     // depth 0 both read level 0 => exactly 1x, so the Speed knob alone owns
@@ -424,41 +541,103 @@ public class Satori extends ApotheneumPattern {
       lut = this.frameLut;
     }
 
-    // Width is inverted into cycles-per-surface: wide bands = few repeats
-    final double cycles = 7 - this.width.getValue();
-    final double smoothAmt = this.smooth.getValue();
-    paint(Apotheneum.cube.exterior.columns, lut, cycles, bands, smoothAmt, pulseDepth);
-    paint(Apotheneum.cylinder.exterior.columns, lut, cycles, bands, smoothAmt, pulseDepth);
+    // Smooth: temporal color low-pass alpha (per frame, not per pixel). smooth=0
+    // => alpha 1 (no easing); at smooth=1 the time constant is TAU_MS.
+    final double sm = this.smooth.getValue();
+    final double alpha = (sm <= 0) ? 1.0 : 1.0 - Math.exp(-deltaMs / (sm * TAU_MS));
+
+    // One-beat decelerating morph on Field / Bands change (ease-out cubic)
+    double e = 1.0;
+    double bandsEff = bands;
+    boolean fractionalBands = false;
+    if (this.morphActive) {
+      final double beatMs = Math.max(this.lx.engine.tempo.period.getValue(), MIN_MORPH_MS);
+      this.morphMs += deltaMs;
+      final double u = Math.min(1.0, this.morphMs / beatMs);
+      final double omu = 1.0 - u;
+      e = 1.0 - omu * omu * omu;
+      bandsEff = this.bandsOld * (1.0 - e) + bands * e;
+      fractionalBands = (this.bandsOld != bands); // Field-only morph keeps bands integer
+      if (u >= 1.0) {
+        this.morphActive = false;
+      }
+    }
+
+    // Publish per-frame paint inputs (single engine thread; read in paint)
+    this.frameCycles = 7 - this.width.getValue(); // Width inverted into cycles/surface
+    this.frameBands = bands;
+    this.frameBandsEff = bandsEff;
+    this.frameE = e;
+    this.frameN = this.cachedSwatchCount;
+    this.frameMorphActive = this.morphActive;
+    this.frameFractionalBands = fractionalBands;
+    this.frameRnbwSm = this.rnbwSm.getValue();
+    this.frameSmooth = sm;
+    this.frameAlpha = alpha;
+    this.framePrime = this.primeSmooth;
+    this.framePulseDepth = pulseDepth;
+
+    paint(Apotheneum.cube.exterior.columns, lut);
+    paint(Apotheneum.cylinder.exterior.columns, lut);
+
+    this.primeSmooth = false;
+    this.bandsPrev = bands;
 
     copyCubeExterior();
     copyCylinderExterior();
   }
 
-  private void paint(Apotheneum.Column[] columns, int[] lut, double cycles, int bands, double smooth, double pulseDepth) {
+  private void paint(Apotheneum.Column[] columns, int[] lut) {
     final double phase = this.phase;
+    final double cycles = this.frameCycles;
+    final double bandsEff = this.frameBandsEff;
+    final int bandCount = this.frameBands;
+    final int n = this.frameN;
+    final boolean fractional = this.frameFractionalBands;
+    final boolean morph = this.frameMorphActive;
+    final float ef = (float) this.frameE;
+    final double rnbwSmVal = this.frameRnbwSm;
+    final double sm = this.frameSmooth;
+    final double pulseDepth = this.framePulseDepth;
+    final double a = this.framePrime ? 1.0 : this.frameAlpha;
     for (int x = 0; x < columns.length; ++x) {
       final LXPoint[] points = columns[x].points; // door columns bound by length
       for (int y = 0; y < points.length; ++y) {
         final int idx = points[y].index;
-        double pos = this.field[idx] * cycles + phase + pulseDepth * this.pulseDist[idx];
+        // Morph: lerp the pre-change field toward the new one (decelerating)
+        final float fv = morph ? (this.fieldOld[idx] * (1f - ef) + this.field[idx] * ef) : this.field[idx];
+        double pos = fv * cycles + phase + pulseDepth * this.pulseDist[idx];
         pos -= Math.floor(pos);
-        // Posterize: quantize to band centers => N bold bands whose edges
-        // still sweep smoothly through space as the phase drifts. Smooth
-        // widens each edge into a smoothstep ramp over the trailing fraction
-        // of the band: 0 = hard edges, 1 = a continuous gradient from each
-        // band's center color to the next. The cyclic LUT index mask below
-        // handles the wrap from the last band back to the first.
-        final double b = pos * bands;
-        final double i = Math.floor(b);
-        double w = 0;
-        if (smooth > 0) {
-          final double t = (b - i - (1 - smooth)) / smooth;
-          if (t > 0) {
-            w = t * t * (3 - 2 * t);
-          }
+        // Posterize: band index + within-band fraction. Band colors come from
+        // the band->LUT-position table (exact palette anchors) at rest; during a
+        // Bands morph the fractional count uses the continuous mapping instead.
+        final double bpos = pos * bandsEff;
+        final int i = (int) bpos;
+        final double f = bpos - i;
+        double p0, p1;
+        if (fractional) {
+          p0 = contBandPos(i, bandsEff, n);
+          p1 = contBandPos(i + 1, bandsEff, n);
+        } else {
+          p0 = this.bandPos[i % bandCount];
+          p1 = this.bandPos[(i + 1) % bandCount];
         }
-        pos = (i + 0.5 + w) / bands;
-        this.colors[idx] = lut[((int) (pos * LUT_SIZE)) & (LUT_SIZE - 1)];
+        if (p1 <= p0) {
+          p1 += 1.0; // keep monotonic across the cyclic wrap from last band to first
+        }
+        // RnbwSm: smoothstep along the LUT between band centers (hue-shifting path)
+        final double wR = ramp(f, rnbwSmVal);
+        final int cHue = lut[((int) Math.round((p0 + wR * (p1 - p0)) * LUT_SIZE)) & (LUT_SIZE - 1)];
+        // Smooth (spatial): linear-RGB anti-alias toward the next band center
+        final double wS = ramp(f, sm);
+        int target = cHue;
+        if (wS > 0) {
+          final int cNext = lut[((int) Math.round(p1 * LUT_SIZE)) & (LUT_SIZE - 1)];
+          target = LXColor.lerp(cHue, cNext, (float) wS);
+        }
+        // Smooth (temporal): low-pass the output color per pixel (linear RGB mix)
+        this.colors[idx] = this.prevColor[idx] =
+          (a >= 1.0) ? target : LXColor.lerp(this.prevColor[idx], target, (float) a);
       }
     }
   }
