@@ -16,6 +16,7 @@ import heronarts.lx.LXComponent;
 import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
 import heronarts.lx.color.LXDynamicColor;
+import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundParameter;
 import heronarts.lx.parameter.DiscreteParameter;
 import heronarts.lx.parameter.EnumParameter;
@@ -188,38 +189,107 @@ public class Pipes3D extends ApotheneumPattern {
     }
   }
 
+  /**
+   * Beat-synced AD pulse envelope: a 32nd-note (1/8 beat) attack to 1, then
+   * a one-beat linear decay to 0. Fired by the Pls* triggers; the offset
+   * pushes its parameter 50% of the param's total range toward (and usually
+   * past) the range center, from wherever the base knob sits. Drives the
+   * EFFECTIVE value only — the UI knob does not move.
+   */
+  private static final class Pulse {
+    double env;   // 0..1
+    int stage;    // 0 idle, 1 attack, 2 decay
+    double sign;  // +1 toward-larger, -1 toward-smaller (latched at trigger)
+
+    void trigger(double base, double center) {
+      this.stage = 1;
+      this.sign = (base < center) ? 1 : -1;
+    }
+
+    void tick(double dBeats) {
+      if (this.stage == 1) {
+        this.env += dBeats / PULSE_ATTACK_BEATS;
+        if (this.env >= 1) {
+          this.env = 1;
+          this.stage = 2;
+        }
+      } else if (this.stage == 2) {
+        this.env -= dBeats / PULSE_DECAY_BEATS;
+        if (this.env <= 0) {
+          this.env = 0;
+          this.stage = 0;
+        }
+      }
+    }
+
+    double offset(double amount) {
+      return this.sign * amount * this.env;
+    }
+  }
+
+  /** Pulse envelope times, in beats (32nd-note attack, one-beat decay) */
+  private static final double PULSE_ATTACK_BEATS = 0.125;
+  private static final double PULSE_DECAY_BEATS = 1.0;
+
+  /** Shaded knob zone [0..SHADE_RAMP_END]: crossfade flat -> shaded pipeline */
+  private static final double SHADE_RAMP_END = 0.1;
+
+  /** Skip ball rasterization below this half-size in px (CapDia near 0) */
+  private static final double BALL_MIN_PX = 0.3;
+
   // ---- Parameters -----------------------------------------------------------
 
   private final TriggerBag bag = new TriggerBag("Pipes3D");
-
-  public final TriggerParameter drain = bag.register(
-    new TriggerParameter("Drain", this::startDrain)
-    .setDescription("Fade the room out, concluding exactly on a beat (0.5-1.5 beats), then restart with the Pipes-knob count in the first palette colors"));
-
-  public final TriggerParameter teleport = bag.register(
-    new TriggerParameter("Teleport", this::teleportRandomPipe)
-    .setDescription("A growing pipe jumps to a random free cell and continues (the classic)"));
-
-  public final DiscreteParameter pipes =
-    new DiscreteParameter("Pipes", 1, 1, MAX_PIPES + 1)
-    .setDescription("Number of concurrent pipes; raising spawns a fresh pipe, lowering culls the oldest");
 
   public final TriggerParameter sparkle = bag.register(
     new TriggerParameter("Sparkle", this::flashSparkle)
     .setDescription("Flash the recent elbow joints white (the bass sparkle, fired manually)"));
 
-  public final TriggerParameter rstRot = bag.register(
-    new TriggerParameter("RstRot", this::resetRotation)
-    .setDescription("Zero the rotation speeds and snap back to the orthogonal projection"));
+  public final TriggerParameter teleport = bag.register(
+    new TriggerParameter("Teleport", this::teleportRandomPipe)
+    .setDescription("A growing pipe jumps to a random free cell and continues (the classic)"));
+
+  public final TriggerParameter plsThk = bag.register(
+    new TriggerParameter("PlsThk", () -> this.thkPulse.trigger(
+      this.thickness.getValue(), (THICK_MIN + THICK_MAX) / 2))
+    .setDescription("Pulse Thick 50% of its range toward (usually past) center: 32nd-note attack, one-beat decay"));
+
+  public final TriggerParameter plsShd = bag.register(
+    new TriggerParameter("PlsShd", () -> this.shdPulse.trigger(this.shaded.getValue(), 0.5))
+    .setDescription("Pulse Shaded 50% of its range toward (usually past) center: 32nd-note attack, one-beat decay"));
+
+  public final TriggerParameter plsCap = bag.register(
+    new TriggerParameter("PlsCap", () -> this.capPulse.trigger(this.capDia.getValue(), 1))
+    .setDescription("Pulse CapDia 50% of its range toward (usually past) center: 32nd-note attack, one-beat decay"));
+
+  public final TriggerParameter drain = bag.register(
+    new TriggerParameter("Drain", this::startDrain)
+    .setDescription("Fade the room out, concluding exactly on a beat (0.5-1.5 beats), then restart with the Pipes-knob count in the first palette colors"));
+
+  public final TriggerParameter rndTrig =
+    new TriggerParameter("RndTrig", bag::fire)
+    .setDescription("Randomly fire one of the gesture triggers or toggle Reverse");
+
+  public final DiscreteParameter pipes =
+    new DiscreteParameter("Pipes", 1, 1, MAX_PIPES + 1)
+    .setDescription("Number of concurrent pipes; raising spawns a fresh pipe, lowering culls the oldest");
 
   public final CompoundParameter speed =
     (CompoundParameter) new CompoundParameter("Speed", 1, 0, 64)
     .setExponent(3) // CURATE: knob resolution concentrated in the musical low end
     .setDescription("Target growth speed in cells per beat; steers how many CapDivs each run spans (caps always land on the grid); 0 pauses growth");
 
+  public final EnumParameter<Beats> onBeats =
+    new EnumParameter<Beats>("CapDiv", Beats.ONE)
+    .setDescription("Beat division that every cap/turn lands on, phase-aligned to the global tempo grid");
+
   public final CompoundParameter thickness =
     new CompoundParameter("Thick", 3.5, THICK_MIN, THICK_MAX)
     .setDescription("Pipe thickness in pixels, applied to the whole model in realtime");
+
+  public final CompoundParameter capDia =
+    new CompoundParameter("CapDia", 0, 0, 2)
+    .setDescription("Joint/cap ball size as a multiple of the classic cap size; 0 hides caps (PlsCap pulses them in)");
 
   public final DiscreteParameter density =
     new DiscreteParameter("Density", 10, MIN_DENSITY, MAX_DENSITY + 1)
@@ -227,7 +297,15 @@ public class Pipes3D extends ApotheneumPattern {
 
   public final CompoundParameter shaded =
     new CompoundParameter("Shaded", 0.5)
-    .setDescription("Phong shading amount: rounded-pipe lighting + edge antialiasing; 0 disables all shading (fast flat render)");
+    .setDescription("Phong shading: 0 = flat fast render (all shader compute skipped); up to 0.1 fades the shading/antialiasing in; 0.5 = nominal");
+
+  public final BooleanParameter reverse =
+    new BooleanParameter("Reverse", false)
+    .setDescription("Play backward: unbuild the lattice newest-first on the CapDiv grid; auto-flips forward when empty");
+
+  public final TriggerParameter jmpEnd =
+    new TriggerParameter("JmpEnd", this::jumpToEnd)
+    .setDescription("Jump to the end: synthesize a busy filled room with current settings and flip Reverse on");
 
   public final CompoundParameter rotX =
     new CompoundParameter("RotX", 0)
@@ -237,17 +315,13 @@ public class Pipes3D extends ApotheneumPattern {
     new CompoundParameter("RotY", 0)
     .setDescription("Lattice rotation speed about the vertical y axis: 100% = 90 degrees per beat");
 
+  public final TriggerParameter rstRot =
+    new TriggerParameter("RstRot", this::resetRotation)
+    .setDescription("Zero the rotation speeds and snap back to the orthogonal projection");
+
   public final CompoundParameter audioDepth =
     new CompoundParameter("Audio", 0)
     .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full bass-sparkle response");
-
-  public final EnumParameter<Beats> onBeats =
-    new EnumParameter<Beats>("CapDiv", Beats.ONE)
-    .setDescription("Beat division that every cap/turn lands on, phase-aligned to the global tempo grid");
-
-  public final TriggerParameter rndTrig =
-    new TriggerParameter("RndTrig", bag::fire)
-    .setDescription("Randomly fire a trigger or jump a parameter");
 
   // ---- Preallocated state (zero-alloc render path) ---------------------------
 
@@ -282,6 +356,18 @@ public class Pipes3D extends ApotheneumPattern {
   private final float[] ballSat = new float[MAX_BALLS];
   private final float[] ballBri = new float[MAX_BALLS];
   private int ballCount = 0;
+
+  /** ballCount snapshot at each segment's creation — the unbuild (Reverse) log */
+  private final int[] segBallCount = new int[MAX_SEGMENTS];
+
+  // Reverse (unbuild) state: the tail segment's B end retracts toward A
+  private double revCapBeat = Double.NaN;
+  private double revStartBx, revStartBy, revStartBz; // tail's pre-shrink B, for the occupancy free
+
+  // Beat-synced AD pulse envelopes (PlsThk / PlsShd / PlsCap)
+  private final Pulse thkPulse = new Pulse();
+  private final Pulse shdPulse = new Pulse();
+  private final Pulse capPulse = new Pulse();
 
   // Pipe state (parallel arrays, MAX_PIPES slots). Heads are continuous cell
   // coordinates (cell k's center is at k + 0.5) and move only along pDir.
@@ -324,8 +410,10 @@ public class Pipes3D extends ApotheneumPattern {
   /** This frame's live half-thicknesses (Thick applies to the whole model in realtime) */
   private double frameHalfPx, frameBallHalfPx;
 
-  /** This frame's shading state: Shaded mix, specular gain, rig-rotated lights */
+  /** This frame's shading state: Shaded mix/AA blend, specular gain, rig lights */
+  private boolean frameShadingOn;
   private double frameShadeMix;
+  private double frameAABlend;
   private double frameSpecScale;
   private double rigDeg = 0;
   private final double[] sunDir = new double[3];
@@ -354,37 +442,31 @@ public class Pipes3D extends ApotheneumPattern {
     this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
     this.tempoLock = new TempoLock(lx);
 
-    addParameter("drain", this.drain);
-    addParameter("teleport", this.teleport);
-    addParameter("pipes", this.pipes);
     addParameter("sparkle", this.sparkle);
-    addParameter("rndTrig", this.rndTrig); // series convention: right after the plain triggers
+    addParameter("teleport", this.teleport);
+    addParameter("plsThk", this.plsThk);
+    addParameter("plsShd", this.plsShd);
+    addParameter("plsCap", this.plsCap);
+    addParameter("drain", this.drain);
+    addParameter("rndTrig", this.rndTrig);
+    addParameter("pipes", this.pipes);
     addParameter("speed", this.speed);
     addParameter("onBeats", this.onBeats); // key kept for .lxp compat; UI label is CapDiv
     addParameter("thickness", this.thickness);
+    addParameter("capDia", this.capDia);
     addParameter("density", this.density);
     addParameter("shaded", this.shaded);
+    addParameter("reverse", this.reverse);
+    addParameter("jmpEnd", this.jmpEnd);
     addParameter("rotX", this.rotX);
     addParameter("rotY", this.rotY);
     addParameter("rstRot", this.rstRot);
     addParameter("audio", this.audioDepth);
 
-    bag.jumpable(this.thickness);
-    bag.jumpable(this.density);
-    // Spawn/cull as an ambient event. CURATE: do uncommanded culls read well?
-    bag.jumpable(this.pipes);
-    // Never fully disables shading (0 = flat render). CURATE
-    bag.jumpable(this.shaded, 0.25, 1);
-    // Musical mid-band only (0.5..4): excludes 0 — RndTrig must not silently
-    // freeze the pattern — and the blazing top of the knob. CURATE
-    bag.jumpable(this.speed, 0.5, 4);
-    // Exclude 3/4 (a random polyrhythm jump reads as a timing bug) and 8
-    // (caps stall for many seconds). CURATE: unverified visually
-    bag.jumpable(this.onBeats, Beats.ONE.ordinal(), Beats.FOUR.ordinal());
-    // Slow ambient drift only (<= 22.5 deg/beat); a jump to full rate is
-    // disorienting. RstRot is registered too, so RndTrig can snap back. CURATE
-    bag.jumpable(this.rotX, 0, 0.25);
-    bag.jumpable(this.rotY, 0, 0.25);
+    // RndTrig bag = strictly the gesture triggers registered above (Sparkle,
+    // Teleport, the three pulses, Drain) plus a Reverse toggle. No parameter
+    // jumps — the pulse triggers took over that role (sixth pass).
+    bag.register(new TriggerParameter("RevTgl", this.reverse::toggle));
 
     this.lastBeats = lx.engine.tempo.getCompositeBasis();
     this.prevRate = this.speed.getValue();
@@ -447,6 +529,14 @@ public class Pipes3D extends ApotheneumPattern {
     if (!this.occupied[x][y][z]) {
       this.occupied[x][y][z] = true;
       ++this.occupiedCount;
+    }
+  }
+
+  /** Guarded free for the reverse unbuild (shared cells free exactly once) */
+  private void unoccupy(int x, int y, int z) {
+    if (inBounds(x, y, z) && this.occupied[x][y][z]) {
+      this.occupied[x][y][z] = false;
+      --this.occupiedCount;
     }
   }
 
@@ -516,11 +606,10 @@ public class Pipes3D extends ApotheneumPattern {
    * (spawn, teleport, pause-resume, clock jumps) the first cap lands 0.5-1.5
    * divisions out. Speed 0 parks the cap at infinity until resume.
    */
-  private void scheduleCap(int i, double now, double dist) {
+  private double scheduleCapBeat(double now, double dist) {
     final double s = this.speed.getValue();
     if (s <= 0) {
-      this.pCapBeat[i] = Double.POSITIVE_INFINITY;
-      return;
+      return Double.POSITIVE_INFINITY;
     }
     final double g = gridInterval();
     final double tIdeal = dist / s;
@@ -531,7 +620,11 @@ public class Pipes3D extends ApotheneumPattern {
     if ((tIdeal <= 0.75 * g) && (capBeat - now >= 2 * tIdeal)) {
       capBeat = now + 0.5 * g;
     }
-    this.pCapBeat[i] = capBeat;
+    return capBeat;
+  }
+
+  private void scheduleCap(int i, double now, double dist) {
+    this.pCapBeat[i] = scheduleCapBeat(now, dist);
   }
 
   private static int clampi(int v, int lo, int hi) {
@@ -543,14 +636,15 @@ public class Pipes3D extends ApotheneumPattern {
   }
 
   /**
-   * Plan the next run for pipe i, starting at the current (continuous) head:
-   * pick a direction and an integer cell count that fit the room, then
-   * schedule the cap on the global CapDiv grid (scheduleCap). Called at every
-   * cap, at spawn, and after a teleport landing.
+   * One walk step for pipe i: from the current (continuous) head, choose a
+   * direction and an integer run length that fit the room (self-avoiding,
+   * straight-biased, best-effort intersect), do the elbow-ball/segment
+   * bookkeeping, set pDir/pGoal, and occupy the swept cells. No scheduling
+   * and no fill check — planRun() adds those; the JmpEnd synthesizer drives
+   * this directly. Returns false when the walker teleported away or the
+   * geometry lists overflowed (drain started).
    */
-  private void planRun(int i) {
-    final double now = this.lastBeats;
-
+  private boolean walkStep(int i) {
     // Anchor: nearest in-bounds cell to the head. The head is clamped inside
     // the room during integration, so per-axis residuals are <= 0.5 cell;
     // an along-axis residual is absorbed into this run's distance, off-axis
@@ -634,7 +728,7 @@ public class Pipes3D extends ApotheneumPattern {
     if (dir < 0) {
       // Defensively unreachable (the anchor is in bounds in a >= 6-cell room)
       teleportPipe(i);
-      return;
+      return false;
     }
 
     // Run length: uniform over 1..maxRun. Direction choice is weighted by
@@ -650,6 +744,9 @@ public class Pipes3D extends ApotheneumPattern {
     // fresh segment. pDir < 0 means just placed: the spawn ball already
     // marks the start, no elbow.
     if ((dir != straight) || (this.pSeg[i] < 0)) {
+      // Snapshot BEFORE the elbow ball, so popping this segment in reverse
+      // removes its elbow too (the unbuild log)
+      final int ballMark = this.ballCount;
       if (straight >= 0) {
         addBall(this.pHeadX[i], this.pHeadY[i], this.pHeadZ[i], this.pHue[i], this.pSat[i], this.pBri[i]);
         recordElbow((float) this.pHeadX[i], (float) this.pHeadY[i], (float) this.pHeadZ[i]);
@@ -657,7 +754,7 @@ public class Pipes3D extends ApotheneumPattern {
       if (this.segCount >= MAX_SEGMENTS) {
         LX.log("Pipes3D: segment list full; draining");
         startDrain();
-        return;
+        return false;
       }
       final int s = this.segCount++;
       this.segAx[s] = this.segBx[s] = this.pHeadX[i];
@@ -667,32 +764,43 @@ public class Pipes3D extends ApotheneumPattern {
       this.segHue[s] = this.pHue[i];
       this.segSat[s] = this.pSat[i];
       this.segBri[s] = this.pBri[i];
+      this.segBallCount[s] = ballMark;
       this.pSeg[i] = s;
     }
 
-    // Cap scheduling: the run covers dist cells (target = the corner n cells
-    // from the anchor along dir; only the run-axis coordinate is targeted);
-    // scheduleCap() picks the global grid point nearest the ideal arrival at
-    // the Speed knob (hard target; velocity is derived from it per frame).
-    double dist;
+    // Target: the corner n cells from the anchor along dir (only the
+    // run-axis coordinate is targeted; off-axis residuals heal later)
     if (DX[dir] != 0) {
       this.pGoal[i] = ax + 0.5 + DX[dir] * n;
-      dist = Math.abs(this.pGoal[i] - this.pHeadX[i]);
     } else if (DY[dir] != 0) {
       this.pGoal[i] = ay + 0.5 + DY[dir] * n;
-      dist = Math.abs(this.pGoal[i] - this.pHeadY[i]);
     } else {
       this.pGoal[i] = az + 0.5 + DZ[dir] * n;
-      dist = Math.abs(this.pGoal[i] - this.pHeadZ[i]);
     }
     this.pDir[i] = dir;
-    scheduleCap(i, now, dist);
 
     // Occupy the swept cells (idempotent; intersecting sweeps add only the
-    // newly free ones), then check the auto-drain fill limit
+    // newly free ones)
     for (int s = 1; s <= n; ++s) {
       occupy(ax + DX[dir] * s, ay + DY[dir] * s, az + DZ[dir] * s);
     }
+    return true;
+  }
+
+  /**
+   * Plan the next run for pipe i: take a walk step, then schedule its cap on
+   * the global CapDiv grid (scheduleCap: the hard beat target from which the
+   * per-frame velocity is derived) and check the auto-drain fill limit.
+   * Called at every cap, at spawn, and after a teleport landing.
+   */
+  private void planRun(int i) {
+    if (!walkStep(i)) {
+      return;
+    }
+    final int d = this.pDir[i];
+    final double head = (DX[d] != 0) ? this.pHeadX[i]
+      : (DY[d] != 0) ? this.pHeadY[i] : this.pHeadZ[i];
+    scheduleCap(i, this.lastBeats, Math.abs(this.pGoal[i] - head));
     if (this.occupiedCount > FILL_LIMIT * this.gx * this.gy * this.gz) {
       startDrain();
     }
@@ -760,7 +868,7 @@ public class Pipes3D extends ApotheneumPattern {
         ++alive;
       }
     }
-    while (!this.draining && (alive < target)) {
+    while (!this.draining && !this.reverse.isOn() && (alive < target)) {
       spawnPipe(); // fills exactly one slot, or starts a drain when the room is full
       ++alive;
     }
@@ -784,6 +892,18 @@ public class Pipes3D extends ApotheneumPattern {
     if ((parameter == this.pipes) && !this.draining) {
       // While draining, pipes are already dead; finishDrain() reconciles
       syncPipeCount();
+    } else if (parameter == this.reverse) {
+      if (this.reverse.isOn()) {
+        // Entering reverse: live pipes stop where they are — their partial
+        // segments become the first unbuild tails
+        for (int i = 0; i < MAX_PIPES; ++i) {
+          this.pAlive[i] = false;
+        }
+        this.revCapBeat = Double.NaN;
+      } else if (!this.draining) {
+        // Forward again: fresh pipes grow into the freed cells
+        syncPipeCount();
+      }
     }
   }
 
@@ -836,6 +956,82 @@ public class Pipes3D extends ApotheneumPattern {
     }
   }
 
+  /**
+   * Trigger: jump to the end — synthesize a busy filled room (the auto-drain
+   * fill level) with the current settings by running the growth walk
+   * synchronously, then flip Reverse on so the unbuild consumes it. Pipes
+   * are left dead; the reverse cursor owns the geometry. Event-rate; bounded
+   * by the retained-list capacities and an iteration guard.
+   */
+  private void jumpToEnd() {
+    if (this.draining) {
+      return;
+    }
+    applyDensity();
+    clearRoom();
+    for (int i = 0; i < MAX_PIPES; ++i) {
+      this.pAlive[i] = false;
+    }
+    // Place the walkers (placement core of placePipe, without scheduling)
+    final int walkers = this.pipes.getValuei();
+    for (int i = 0; i < walkers; ++i) {
+      if (findFreeCell()) {
+        occupy(this.rlX, this.rlY, this.rlZ);
+        this.pAlive[i] = true;
+        this.pHeadX[i] = this.rlX + 0.5;
+        this.pHeadY[i] = this.rlY + 0.5;
+        this.pHeadZ[i] = this.rlZ + 0.5;
+        this.pDir[i] = -1;
+        this.pSeg[i] = -1;
+        assignPipeColor(i);
+        addBall(this.pHeadX[i], this.pHeadY[i], this.pHeadZ[i], this.pHue[i], this.pSat[i], this.pBri[i]);
+      }
+    }
+    // Instant growth: walk until busy, snapping each run's head to its goal
+    final double target = FILL_LIMIT * this.gx * this.gy * this.gz;
+    final int maxSteps = 4 * MAX_SEGMENTS; // runaway guard
+    int guard = 0;
+    outer:
+    while ((this.occupiedCount < target) && (guard++ < maxSteps) && !this.draining) {
+      boolean advanced = false;
+      for (int i = 0; i < walkers; ++i) {
+        if (!this.pAlive[i]) {
+          continue;
+        }
+        if ((this.segCount >= MAX_SEGMENTS - 1) || (this.ballCount >= MAX_BALLS - 1)) {
+          break outer; // leave headroom for the walk's own bookkeeping
+        }
+        if (walkStep(i)) {
+          final int d = this.pDir[i];
+          if (DX[d] != 0) {
+            this.pHeadX[i] = this.pGoal[i];
+          } else if (DY[d] != 0) {
+            this.pHeadY[i] = this.pGoal[i];
+          } else {
+            this.pHeadZ[i] = this.pGoal[i];
+          }
+          final int s = this.pSeg[i];
+          if (s >= 0) {
+            this.segBx[s] = this.pHeadX[i];
+            this.segBy[s] = this.pHeadY[i];
+            this.segBz[s] = this.pHeadZ[i];
+          }
+          advanced = true;
+        }
+      }
+      if (!advanced) {
+        break;
+      }
+    }
+    for (int i = 0; i < MAX_PIPES; ++i) {
+      this.pAlive[i] = false;
+    }
+    LX.log("Pipes3D: JmpEnd synthesized " + this.segCount + " segments ("
+      + this.occupiedCount + " cells)");
+    this.reverse.setValue(true); // seed the unbuild (re-arms revCapBeat if already on)
+    this.revCapBeat = Double.NaN;
+  }
+
   // Trigger + auto: fade everything out, concluding exactly on a beat, then
   // restart with one pipe in the next palette color
   private void startDrain() {
@@ -865,6 +1061,7 @@ public class Pipes3D extends ApotheneumPattern {
     }
     applyDensity(); // density jumps take effect here
     clearRoom();
+    this.reverse.setValue(false); // a drain is a hard reset to forward growth
     syncPipeCount();
     LX.log("Pipes3D: drain complete; density " + this.gx + "x" + this.gy + "x" + this.gz);
   }
@@ -887,6 +1084,15 @@ public class Pipes3D extends ApotheneumPattern {
     for (int i = 0; i < MAX_PIPES; ++i) {
       if (!this.pAlive[i] || (this.pDir[i] < 0)) {
         continue;
+      }
+      if (!Double.isFinite(this.pCapBeat[i])) {
+        // Parked at infinity (scheduled while paused) — self-heal: schedule
+        // now, so the animation always kicks off when Speed rises, no matter
+        // how the pause state was reached (load order, inactive knob turns)
+        final int dh = this.pDir[i];
+        final double headH = (DX[dh] != 0) ? this.pHeadX[i]
+          : (DY[dh] != 0) ? this.pHeadY[i] : this.pHeadZ[i];
+        scheduleCap(i, now, Math.abs(this.pGoal[i] - headH));
       }
       if (now >= this.pCapBeat[i]) {
         // Cap: snap exactly to the target corner and plan the next run
@@ -950,6 +1156,75 @@ public class Pipes3D extends ApotheneumPattern {
     }
   }
 
+  /**
+   * Reverse playback: unbuild the retained geometry newest-first (a global
+   * LIFO — segments interleave across pipes, so one tail cursor rather than
+   * per-pipe retraces). The tail segment's B end retracts toward A with the
+   * same derived-velocity rule, capping on the global CapDiv grid; at the
+   * cap the segment pops, its logged balls vanish (segBallCount), and its
+   * swept cells free up. When everything is consumed, Reverse auto-flips
+   * off and fresh pipes respawn — the animation ping-pongs.
+   */
+  private void updateReverse(double now, double dBeats) {
+    if (this.speed.getValue() <= 0) {
+      return; // paused
+    }
+    if (this.segCount == 0) {
+      this.ballCount = 0;
+      this.reverse.setValue(false); // respawn via onParameterChanged
+      return;
+    }
+    final int s = this.segCount - 1;
+    if (!Double.isFinite(this.revCapBeat)) {
+      // Fresh tail: capture its pre-shrink B for the occupancy free, then
+      // schedule its un-cap on the grid from its remaining cell length
+      this.revStartBx = this.segBx[s];
+      this.revStartBy = this.segBy[s];
+      this.revStartBz = this.segBz[s];
+      final double dx = this.segBx[s] - this.segAx[s];
+      final double dy = this.segBy[s] - this.segAy[s];
+      final double dz = this.segBz[s] - this.segAz[s];
+      this.revCapBeat = scheduleCapBeat(now, Math.sqrt(dx * dx + dy * dy + dz * dz));
+      if (!Double.isFinite(this.revCapBeat)) {
+        return;
+      }
+    }
+    if (now >= this.revCapBeat) {
+      popTailSegment();
+      this.revCapBeat = Double.NaN; // the next tail schedules next frame
+      return;
+    }
+    final double bPrev = now - dBeats;
+    final double denom = this.revCapBeat - bPrev;
+    final double dt = now - bPrev;
+    if ((denom > 1e-9) && (dt > 0)) {
+      final double f = Math.min(1, dt / denom);
+      this.segBx[s] += (this.segAx[s] - this.segBx[s]) * f;
+      this.segBy[s] += (this.segAy[s] - this.segBy[s]) * f;
+      this.segBz[s] += (this.segAz[s] - this.segBz[s]) * f;
+    }
+  }
+
+  /** Pop the fully-retracted tail: drop its logged balls, free its cells */
+  private void popTailSegment() {
+    final int s = --this.segCount;
+    this.ballCount = this.segBallCount[s];
+    // Free the swept cells from A toward the pre-shrink B along the run axis
+    // (guarded: shared joint/intersection cells free exactly once — the
+    // occupancy grid only steers planning, so the drift is acceptable)
+    final double ddx = this.revStartBx - this.segAx[s];
+    final double ddy = this.revStartBy - this.segAy[s];
+    final double ddz = this.revStartBz - this.segAz[s];
+    final int n = (int) Math.round(Math.abs(ddx) + Math.abs(ddy) + Math.abs(ddz));
+    final int sx = (int) Math.signum(ddx), sy = (int) Math.signum(ddy), sz = (int) Math.signum(ddz);
+    final int ax = clampi((int) Math.round(this.segAx[s] - 0.5), 0, this.gx - 1);
+    final int ay = clampi((int) Math.round(this.segAy[s] - 0.5), 0, this.gy - 1);
+    final int az = clampi((int) Math.round(this.segAz[s] - 0.5), 0, this.gz - 1);
+    for (int k = 1; k <= n; ++k) {
+      unoccupy(ax + sx * k, ay + sy * k, az + sz * k);
+    }
+  }
+
   private void recordElbow(float x, float y, float z) {
     this.elbowX[this.elbowNext] = x;
     this.elbowY[this.elbowNext] = y;
@@ -988,11 +1263,6 @@ public class Pipes3D extends ApotheneumPattern {
   // scale by cw,ch into the 50x45 pixel grid. Depth normalizes by gz (== gx)
   // and clamps — rotated content may stick out of the viewport/depth range,
   // which simply clips.
-
-  /** Current pipe thickness in px (unclamped: 6 px at high density deliberately merges cells) */
-  private double thicknessPx() {
-    return this.thickness.getValue();
-  }
 
   /** Rotate a lattice point about the room center into world coordinates (tx/ty/tz) */
   private void xformPoint(double x, double y, double z) {
@@ -1085,7 +1355,7 @@ public class Pipes3D extends ApotheneumPattern {
         continue;
       }
 
-      final boolean shading = this.frameShadeMix > 0;
+      final boolean shading = this.frameShadingOn;
 
       // Cylinder shading frame for this wall: M̂ = cross-pipe direction on
       // screen, V̂′ = view-facing normal component (both unit); the surface
@@ -1181,11 +1451,17 @@ public class Pipes3D extends ApotheneumPattern {
             continue;
           }
           double cov = (rEdge - Math.sqrt(dist2)) * covDenom;
-          if (cov <= 0) {
-            continue;
-          }
           if (cov > 1) {
             cov = 1;
+          }
+          // Shaded ramp-in zone: blend the smooth AA coverage toward the
+          // hard flat edge so low Shaded values ease in rather than snapping
+          if (this.frameAABlend < 1) {
+            final double covHard = (dist2 <= rHard2) ? 1 : 0;
+            cov = covHard + (cov - covHard) * this.frameAABlend;
+          }
+          if (cov <= 0) {
+            continue;
           }
           double diff, spec;
           if (lit) {
@@ -1267,7 +1543,7 @@ public class Pipes3D extends ApotheneumPattern {
   private void stampDisc(int[] cBuf, float[] dBuf, int w, double cu, double cv,
                          double half, float dn, double wx, double wy, double wz,
                          float hueDeg, float sat, float bri, float boost) {
-    final boolean shading = this.frameShadeMix > 0;
+    final boolean shading = this.frameShadingOn;
     final double pad = shading ? AA_WIDTH * 0.5 + 1 : 0;
     final int iu0 = Math.max(0, (int) Math.floor(cu - half - pad));
     final int iu1 = Math.min(W - 1, (int) Math.ceil(cu + half + pad) - 1);
@@ -1336,7 +1612,12 @@ public class Pipes3D extends ApotheneumPattern {
       for (int u = iu0; u <= iu1; ++u) {
         final double dxp = u + 0.5 - cu;
         final double dist = Math.sqrt(dxp * dxp + dyp * dyp);
-        final double cov = clamp((r + AA_WIDTH * 0.5 - dist) / AA_WIDTH, 0, 1);
+        double cov = clamp((r + AA_WIDTH * 0.5 - dist) / AA_WIDTH, 0, 1);
+        // Shaded ramp-in zone: ease toward the hard flat edge (see gather)
+        if (this.frameAABlend < 1) {
+          final double covHard = (dist <= r + 0.5) ? 1 : 0;
+          cov = covHard + (cov - covHard) * this.frameAABlend;
+        }
         if (cov <= 0) {
           continue;
         }
@@ -1398,13 +1679,41 @@ public class Pipes3D extends ApotheneumPattern {
     this.sinAx = Math.sin(axr); this.cosAx = Math.cos(axr);
     this.sinAy = Math.sin(ayr); this.cosAy = Math.cos(ayr);
     this.cxr = this.gx * 0.5; this.cyr = this.gy * 0.5; this.czr = this.gz * 0.5;
-    this.frameHalfPx = thicknessPx() / 2;
-    this.frameBallHalfPx = this.frameHalfPx + BALL_EXTRA_PX;
-    // Shading amount (0 = flat fast path) and specular gain: the Shaded knob
-    // (0.5 = nominal) plus an audio level boost (depth-scaled, silence-safe)
-    this.frameShadeMix = this.shaded.getValue();
-    this.frameSpecScale = SPEC_GAIN
-      * (2 * this.frameShadeMix + AUDIO_SPEC_BOOST * this.audio.level);
+    // Beat-synced AD pulses push the EFFECTIVE Thick/Shaded/CapDia values
+    // 50% of each param's range toward (usually past) its center
+    this.thkPulse.tick(dBeats);
+    this.shdPulse.tick(dBeats);
+    this.capPulse.tick(dBeats);
+    final double thickEff = clamp(
+      this.thickness.getValue() + this.thkPulse.offset(0.5 * (THICK_MAX - THICK_MIN)),
+      THICK_MIN, THICK_MAX);
+    final double shadedEff = clamp(this.shaded.getValue() + this.shdPulse.offset(0.5), 0, 1);
+    final double capDiaEff = clamp(this.capDia.getValue() + this.capPulse.offset(1), 0, 2);
+
+    this.frameHalfPx = thickEff / 2;
+    this.frameBallHalfPx = (this.frameHalfPx + BALL_EXTRA_PX) * capDiaEff;
+
+    // Shaded response curve: 0 = flat fast path (all shader compute skipped);
+    // (0, 0.1] fades the AA/pipeline in over the flat look (frameAABlend);
+    // [0.1, 1] is the classic phong range remapped piecewise so the 0.5
+    // nominal and 1.0 full breakpoints keep their exact meaning
+    if (shadedEff <= 0) {
+      this.frameShadingOn = false;
+      this.frameShadeMix = 0;
+      this.frameAABlend = 0;
+      this.frameSpecScale = 0;
+    } else {
+      this.frameShadingOn = true;
+      this.frameAABlend = Math.min(1, shadedEff / SHADE_RAMP_END);
+      final double mixKnob = (shadedEff <= SHADE_RAMP_END) ? 0
+        : (shadedEff <= 0.5)
+          ? (shadedEff - SHADE_RAMP_END) / (0.5 - SHADE_RAMP_END) * 0.5
+          : shadedEff;
+      this.frameShadeMix = mixKnob;
+      // Spec gain also fades in through the ramp zone (audio boost included)
+      this.frameSpecScale = SPEC_GAIN
+        * (2 * mixKnob + AUDIO_SPEC_BOOST * this.audio.level) * this.frameAABlend;
+    }
 
     // Lighting rig: the sun and corner fills rotate together about Y, one
     // full revolution per RIG_ROT_BEATS beats — the third coordinate system
@@ -1441,6 +1750,8 @@ public class Pipes3D extends ApotheneumPattern {
       } else {
         outputScale = this.drainRemainMs / this.drainTotalMs;
       }
+    } else if (this.reverse.isOn()) {
+      updateReverse(now, dBeats);
     } else {
       updatePipes(now, dBeats);
     }
@@ -1462,8 +1773,10 @@ public class Pipes3D extends ApotheneumPattern {
     for (int s = 0; s < this.segCount; ++s) {
       rasterSegment(s);
     }
-    for (int b = 0; b < this.ballCount; ++b) {
-      rasterBall(b);
+    if (this.frameBallHalfPx >= BALL_MIN_PX) { // CapDia near 0 hides caps
+      for (int b = 0; b < this.ballCount; ++b) {
+        rasterBall(b);
+      }
     }
 
     blit(outputScale);
