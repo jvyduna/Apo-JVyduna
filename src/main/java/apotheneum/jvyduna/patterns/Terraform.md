@@ -1,7 +1,8 @@
 # Terraform
 
 Evolving terrain skyline: tempo-locked uplifts raise mountains, erosion silts
-the sea, and the sea pumps with the music.
+the sea, and a settable sea level (with Water and silt) drives flood/eruption
+triggers. The sea is independent of the music (2026-07-07 revision).
 
 > Sidecar design doc convention: this file lives beside `Terraform.java` and is
 > the source of truth for design decisions and curation history. Mark any constant
@@ -15,10 +16,11 @@ evokes the terrain-generation / "terraforming" family of demos and screensavers,
 but this design was not traced to a specific verified original. The visual
 signature being built: a wrap-around mountain skyline in hard elevation bands
 (water / sand / grass / rock / peaks) that geologically evolves — mountains rise,
-erode, and drown or emerge as the sea level pumps with the music. The
-emotional core is the sea: quiet music floods the land into a calm ocean; loud
-music drains it and the full mountain range emerges — spanning ambient↔peak
-with zero mode switches.
+erode, and drown or emerge as the sea level moves. The sea rests at a settable
+`SeaLevel` (plus `Water` and erosion silt) and is choreographed by the artist
+and the Flood/Erupt triggers rather than pumped by the music (2026-07-07
+revision — audio no longer moves the sea). An optional `Smooth` knob
+anti-aliases the band and sea-surface edges.
 
 ## Rendering approach
 
@@ -55,8 +57,16 @@ with zero mode switches.
     accent (specular highlight). Water draws in front of submerged land, so the
     waterline is one continuous ring at the sea surface.
   - `sea < elev ≤ terrain` → land, banded by **absolute elevation**: sand /
-    grass / rock / peaks. Hard edges, no gradients.
+    grass / rock / peaks.
   - above both → sky (black).
+  - **Edge smoothing** (`Smooth`, 2026-07-07): the band-to-band edges and the
+    sea surface top are anti-aliased. Each pixel's color is a chain of
+    `LXColor.lerp`s across the band tops and then across the sea surface, using
+    an `edge(elev, boundary, halfWidth)` smoothstep with
+    `halfWidth = Smooth · SMOOTH_MAX_ROWS` (1.25 rows). At `Smooth = 0` the
+    smoothstep collapses to the original hard integer thresholds. The **land/sky
+    silhouette** (terrain top at `h`) is deliberately left hard — only bands and
+    the sea top smooth. Zero allocation (scalar math + `LXColor.lerp`).
 - **Door-column handling**: every cube/cylinder column carries the full point
   count (the `Apotheneum` orientation constructors enforce 45/43 points per
   column); door cutouts are masked globally by the core doors effect, not by
@@ -106,25 +116,26 @@ its silence value and hits never fire, so the depth-0 baseline *is* the
 silence behavior below. There is no per-site gating in the pattern — the
 depth scaling happens once inside `AudioReactive`.
 
+Note (2026-07-07): **audio no longer moves the sea.** The former
+`level → seaLevel` sea-pumping tap and its `SEA_SWING`/`SEA_TAU_SEC` constants
+were removed. Audio now drives only uplifts, the erosion regime, and the treble
+flash — never the sea height.
+
 | Tap | Drives |
 |---|---|
-| `level` → `seaLevel` (fast smoother, τ = 0.35 s) | Sea level goal: `seaBias − 0.45 · seaLevel + silt`, clamped to [0.05, 0.9]. Quiet → sea rises and drowns the land; loud → sea drains, mountains emerge — within a beat. |
 | `level` → `drive` (slow smoother, τ = 2 s) | Everything the old Energy knob drove: uplift rate/amplitude/sigma, diffusion blend, subsidence speed, bass-uplift gate. See "Drive mapping". |
 | `bassHit()` + `bassRatio` | At smoothed level ≥ 0.35 (gate = 0.35 × depth compared against `drive`, so it reads the depth-independent level — a fixed gate would silently disable bass uplifts for any Audio knob below it): each bass transient raises a new mountain (tempo-quantized uplift); amplitude scales with `bassRatio`. |
 | `trebleHit()` | TrbSprk white flash burst: flash envelope snaps to `depth()` (the AudioReactive scaled-hit-response contract — a barely-on knob must not strobe at full brightness) and decays (τ = 45 ms); a fresh random ~45%·TrbSprk subset of peak-band pixels (plus a 2-row spill into rock) lerps toward white by the envelope (toward black on the peaks when `WhtCps` is on). |
 
 **Depth-0 baseline (default, = silence behavior)**: the sea settles at
-`SeaBias` (default 0.55 ≈ mid-level) plus any silt from ongoing erosion, the
-spontaneous uplift timer keeps slowly raising new mountains, and erosion keeps
-aging them — a calm, self-evolving archipelago. Designed to look good with
-zero audio. (Since the Energy-knob removal this baseline sits at the pure
-ambient endpoints; the old default was a fixed e = 0.35 blend, so silence is
-now slightly calmer.)
+`SeaLevel` (default 0.5 ≈ mid-level) plus any `Water` and any silt from ongoing
+erosion, the spontaneous uplift timer keeps slowly raising new mountains, and
+erosion keeps aging them — a calm, self-evolving archipelago. Designed to look
+good with zero audio.
 
-**Raising the knob restores**: the sea pumping (draining as the fast-smoothed
-music level rises — the emotional core), bass-hit mountain births under
-sustained loud music, and treble flash bursts. Magnitude effects (sea swing,
-bass-uplift amplitude via `bassRatio`) scale linearly with depth; bass-hit
+**Raising the knob restores**: bass-hit mountain births under sustained loud
+music, and treble flash bursts (the sea is unaffected). Magnitude effects
+(bass-uplift amplitude via `bassRatio`) scale linearly with depth; bass-hit
 births start firing once depth > 0.01 *and* drive ≥ 0.35 at a floor amplitude
 of 0.6× (the `bassRatio` term supplies the remaining 0.4× as depth rises).
 
@@ -134,12 +145,12 @@ Discrete formation events lock to the grid; continuous morphing (erosion,
 height chase) stays smooth and is never tempo-quantized. Default division:
 `QUARTER`.
 
-- **Uplift rises complete on the grid** — every uplift (timer, bass, Erupt) is
-  an eased envelope whose peak lands exactly on a `tempoDiv` boundary. Duration
-  rule (grid-strict): finish on the next boundary, unless it is less than half
-  a division away — then target the boundary after. Durations land in
-  [0.5, 1.5) divisions; timer births fire *on* crossings, so they get exactly
-  1.0 division.
+- **Uplift rises complete on the grid** — every uplift (timer, bass, Erupt —
+  including the guaranteed-breach eruption) is an eased envelope whose peak
+  lands exactly on a `tempoDiv` boundary. Duration rule (grid-strict): finish
+  on the next boundary, unless it is less than half a division away — then
+  target the boundary after. Durations land in [0.5, 1.5) divisions; timer
+  births fire *on* crossings, so they get exactly 1.0 division.
 - **Spontaneous mountain births initiate on the grid** — a
   `TempoLock.crossed(tempoDiv)`
   per-frame gate: on each grid crossing a birth fires with probability
@@ -147,15 +158,17 @@ height chase) stays smooth and is never tempo-quantized. Default division:
   Poisson timer (capped at one birth per division cycle — at peak drive with
   divisions longer than ~2 s the effective rate saturates at one per
   division). Births land exactly on the beat; drive controls density.
-- **Sea rate** — the ambient sea chase runs at one full sweep per beat
-  (`1000 / tempo.period` fraction/s), so the sea achieves any new goal within
-  one beat at the current tempo. Not phase-locked, just rate-matched.
-- **Flood ramp landing** — at the moment the `Flood` trigger fires, the sea
-  rise rate is scaled by `retime(msUntilFull, tempoDiv, 0.7, 1.0)` so the sea
-  tops out on a grid boundary. **Clamp override**: max scale 1.0 (slow-down
-  only) because `FLOOD_RAMP_SEC` = 5 s is the designed dramatic ramp — it may
-  stretch to ~7.1 s but never quicken. Retimed once, at trigger time
-  (event-rate), not per frame.
+- **Sea rate** — outside a flood the sea chases its nominal goal (SeaLevel +
+  Water + silt) at one full sweep per beat (`1000 / tempo.period` fraction/s),
+  so a parameter move eases in over a beat rather than jumping. Not
+  phase-locked, just rate-matched.
+- **Flood timing** (2026-07-07) — the `Flood` trigger drives the sea over a
+  fixed beat-count envelope, not a seconds ramp: **1 beat** smoothstep rise
+  from the current level to the top (`SEA_FLOOD` = 1.0), then **8 beats**
+  smoothstep settle back to the live nominal sea. Beat length is captured at
+  trigger from `tempo.period`, so the whole gesture scales with BPM. The old
+  `retime`-to-grid landing was dropped — the durations are exact beat multiples
+  from the press.
 - **Not locked**: cataclysm/reseed triggers (fire when pressed; their terrain
   writes ride the background chase), erosion, subsidence, roughness jitter.
 
@@ -192,15 +205,17 @@ immediately after them, then pattern parameters, Audio, TempoDiv.
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
 | `cataclysm` | Cataclysm | TriggerParameter | — | — | huge ridge + ≤ 0.5 s whole-ring shake, then settles |
-| `flood` | Flood | TriggerParameter | — | — | sea ramps to max, holds 2 s, drains back |
+| `flood` | Flood | TriggerParameter | — | — | 1-beat smoothstep rise to the top, then 8-beat smoothstep settle back |
 | `reseed` | Reseed | TriggerParameter | — | — | morph to a fresh random terrain over ~5 s |
-| `erupt` | Erupt | TriggerParameter | — | — | raise one new mountain now, exactly as a spontaneous uplift would |
+| `erupt` | Erupt | TriggerParameter | — | — | raise one new mountain now, always breaching the sea by ≥ 3 rows |
 | `rndTrig` | RndTrig | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
 | `upliftSize` | Uplift | CompoundParameter | 0.5 | 0..1 | amplitude of new mountain uplifts |
 | `erosion` | Erosion | CompoundParameter | 0.4 | 0..10, exponent 2 | diffusion + subsidence rate; quadratic knob (value = 10·knob²) gives fine low-end resolution, top is 10× the old max |
 | `rough` | Rough | CompoundParameter | 0.25 | 0..1 | terrain ruggedness: continuous ±2.7-row jitter bumps/divots, up to 25 /s per surface |
-| `seaBias` | SeaBias | CompoundParameter | 0.55 | 0.15..0.85 | sea level in silence (fraction of height); music lowers it |
+| `seaLevel` | SeaLevel | CompoundParameter | 0.5 | 0..0.9 | resting sea level (fraction of height); bottom = sea at the base. Independent of the music; silt/eruptions fluctuate it |
+| `water` | Water | CompoundParameter | 0 | 0..0.5 | extra water volume raising the sea above SeaLevel (adds upward only) |
 | `bandShift` | Bands | CompoundParameter | 0 | -0.2..0.2 | shift all band thresholds up/down (fraction of height) |
+| `smoothing` | Smooth | CompoundParameter | 0 | 0..1 | anti-alias band-to-band edges and the sea surface top; 0 = hard edges |
 | `whiteCaps` | WhtCps | BooleanParameter | false | — | peaks band pure white; swatch color 0 discarded (no band shifting); TrbSprk crackles the peaks dark |
 | `trbSprk` | TrbSprk | CompoundParameter | 0.5 | 0..1 | treble-hit white flash burst coverage on the peaks |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth: 0 = pure screensaver, 1 = full reactivity |
@@ -217,17 +232,22 @@ UI is Chromatik's default auto-generated control panel (no custom
 Param-key note: the 2026-07-06 renames (`sparkle` → `trbSprk`, removed
 `energy`, added `rough`/`whiteCaps`) change the saved-parameter keys — older
 .lxp projects will not restore the old Sparkle/Energy values. Accepted during
-curation.
+curation. **2026-07-07**: `seaBias` (key `seaBias`) → `seaLevel` (key
+`seaLevel`), and new `water`/`smoothing` keys added — old `.lxp` `seaBias`
+references are dropped on load. Accepted (the pattern is new).
 
 ## Triggers
 
 Four non-meta triggers spanning small → large, all registered through the
 `TriggerBag` (so RndTrig can fire any of them):
 
-- `erupt` (small) — books a single new mountain on each surface, exactly the
-  spontaneous-uplift recipe (drive-scaled amplitude and sigma, random
-  columns). The rise completes on the next tempoDiv boundary
-  (≥ 0.5 div away). The subtlest permutation.
+- `erupt` (small) — books a single new mountain on each surface (drive-scaled
+  sigma, random column, rise completes on the next tempoDiv boundary). Unlike a
+  spontaneous uplift, the amplitude is forced to at least
+  `seaFrac·H + ERUPT_MARGIN_ROWS − height[center]`, so the crest **always**
+  emerges ≥ 3 rows above the current sea surface, at any sea level or local
+  terrain height (2026-07-07). Only a fully-flooded installation (sea at the
+  very top) leaves no headroom.
 - `cataclysm` — adds a mountain-range ridge (0.85 H central peak + two 0.55 H
   shoulders, σ = 5% of ring) to both surfaces' targets and starts the shake: a
   spatial sine ripple (±2.5 rows, 7 Hz, decaying) across every column for
@@ -235,14 +255,13 @@ Four non-meta triggers spanning small → large, all registered through the
   and erodes over the following tens of seconds. Deliberately unquantized.
   CURATE: shake amp 2.5 rows / 7 Hz / 0.6 rad-per-column wavelength
   unverified — must read as a tremor, not flicker.
-- `flood` — sea goal overridden to 0.97 H at the flood rate (full sweep in 5 s;
-  ~4 s from a typical drained sea), holds 2 s at max (near-total drowning, one
-  bright waterline near the crown), then drains at the normal sea rate back to
-  the audio-driven level. Since the sea-rate change that drain is one full
-  sweep per beat — a dramatic whoosh rather than the old 8 s ebb (accepted;
-  if curation dislikes it, give `floodPhase` exit a dedicated slow drain
-  rate). The ramp rate is retimed (slow-down only, see Tempo mapping) so the
-  sea tops out on a `TempoDiv` boundary.
+- `flood` (2026-07-07) — a two-phase beat-count envelope that drives `seaFrac`
+  directly (bypassing the chase): **rise** over 1 beat, smoothstepping from the
+  level at the press to the top (`SEA_FLOOD` = 1.0, total drowning), then
+  **settle** over 8 beats, smoothstepping from the top back to the live nominal
+  sea (SeaLevel + Water + silt at that moment). Beat length is captured at the
+  trigger from `tempo.period`, so both phases scale with BPM. Replaces the old
+  5 s ramp + 2 s hold + fast drain.
 - `reseed` — re-rolls both targets (random base 0.05–0.15 H plus 8 cube / 6
   cylinder random bumps, amp 0.25–0.8 H); displayed heights morph there under
   the rate limit, so the world transforms over ≤ 5 s. Deliberately unquantized.
@@ -258,7 +277,7 @@ updated during curation.
 | `upliftSize` | 0..1 (full) | candidate | uplift size |
 | `rough` | 0..0.8 | candidate | ruggedness; sub-range avoids full-rate jitter storms from a meta jump |
 | `bandShift` | -0.12..0.12 | candidate | band offset; sub-range keeps peaks ≥ ~4 rows |
-| `seaBias` | 0.3..0.75 | candidate | sea level bias; sub-range avoids near-empty/near-full seas |
+| `seaLevel` | 0.2..0.7 | candidate | resting sea level; sub-range avoids near-empty/near-full seas |
 
 Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [a,b]`.
 
@@ -289,13 +308,14 @@ visible; check it doesn't read as the sea "breathing wrong" against music.
   grid; a 13-row bump rising in 0.25 s at 160 BPM QUARTER moves ~52 rows/s
   *locally* (σ ≤ 9 of 200 columns). Localized event-class motion, same
   category as the cataclysm shake; whole-sculpture change remains chase-capped.
-- **Documented exception — one-beat sea rate** (2026-07-06 curation decision):
-  the previous "sea ≥ 5 s per full traversal" claim is **revoked**. The sea now
-  sweeps its full range in one beat (≈ 0.37 s at 160 BPM) so it fully reacts
-  to the music within a beat; the fast τ = 0.35 s `seaLevel` smoother plus the
-  0.45 swing keep it musical rather than strobing. The flood ramp keeps its
-  5 s character (retime slow-down only), but the post-flood drain rides the
-  fast rate. CURATE: verify the pumping sea reads as surf, not flicker, at
+- **Documented exception — one-beat sea rate** (2026-07-06; sea/audio decoupled
+  2026-07-07): the previous "sea ≥ 5 s per full traversal" claim is **revoked**.
+  Outside a flood the sea chases its nominal goal (SeaLevel + Water + silt) at
+  one full sweep per beat, so a parameter move eases in within a beat rather
+  than jumping. The Flood trigger drives the sea directly over a 1-beat rise /
+  8-beat settle smoothstep envelope (≈ 52 rows over 1 beat at 160 BPM on the
+  cube — event-class localized-in-time motion, same category as the cataclysm
+  shake). CURATE: verify the flood rise/settle reads as a tide, not a jump, at
   high BPM.
 - **Diffusion stability**: the Laplacian pass is sub-stepped — per frame
   `kTotal = erosion × diffusion × dt` is split into `⌈kTotal / 0.24⌉` Jacobi
@@ -316,9 +336,11 @@ visible; check it doesn't read as the sea "breathing wrong" against music.
   for ~100 ms). CURATE: flash decay 45 ms / coverage 0.45 / 2-row rock spill
   unverified — must read as glinting peaks, not noise, at distance.
 
-Other unverified constants: CURATE: `SEA_SWING` 0.45, `SEA_TAU_SEC` 0.35 and
-`DRIVE_TAU_SEC` 2 (sea pumps with dynamics without strobing; drive swings the
-uplift/erosion regime over phrases, not bars?). CURATE: spontaneous birth
+Other unverified constants: CURATE: `DRIVE_TAU_SEC` 2 (drive swings the
+uplift/erosion regime over phrases, not bars?). CURATE: `SMOOTH_MAX_ROWS` 1.25
+and `ERUPT_MARGIN_ROWS` 3 (does Smooth = 1 read as anti-aliased, not blurry;
+does an eruption clear the water by a satisfying margin?). CURATE: spontaneous
+birth
 rates 0.06→0.5 /s, applied as per-crossing probability on the tempo grid —
 is ambient lively enough / peak not cluttered?
 CURATE: subsidence taus 120→30 s (do old ranges linger too long?).
@@ -337,3 +359,4 @@ CURATE: seed bump counts (8 cube / 6 cylinder) and base height 0.05–0.15 H.
 | 2026-07-06 | Curation pass (7 changes, no visual verification yet): Erosion re-ranged 0..10 with `setExponent(2)` + diffusion sub-stepping and exact-exponential subsidence for stability; **Energy knob removed** — `drive` (τ = 2 s smoothed audio level) substitutes at every site; land band colors now palette-driven (peaks/rock/grass/sand ← swatch 0–3, Rubik fill rules) + `WhtCps` white-peaks toggle; uplifts became tempo-quantized eased envelopes (overlay + commit, grid-strict [0.5, 1.5) div, Sync-off 1.4 s); sea re-rated to one full sweep per beat with a fast τ = 0.35 s smoother + erosion-coupled `silt` raising the sea; added `Rough` jitter-bump knob; Sparkle → `TrbSprk` treble-hit white flash bursts (the old ≤ 45% snow *dimming* was invisible over bright snow and gated behind the removed energy > 0.5) | Jeff's curation notes: better low-end Erosion resolution and a real 10x top; Energy redundant; palette integration; beat-locked geology; the sea was imperceptible; terrain needed a ruggedness axis; sparkle was never visible with audio playing |
 | 2026-07-06 | Post-implementation review fixes (multi-angle code review, 8 findings): uplift envelopes now advance *before* the spawn decision (a just-booked rise was credited the pre-booking frame's deltaMs and peaked one frame ahead of the grid); bass-uplift gate made depth-relative (`drive ≥ 0.35 × depth()` — a fixed 0.35 gate silently disabled bass uplifts for any Audio knob < 0.35, since drive ≤ depth); flash amplitude now `depth()` instead of 1 (AudioReactive's scaled-hit-response contract — Audio = 0.05 must not strobe full white); WhtCps + TrbSprk interaction resolved (peaks crackle dark under white caps; white-on-white was a no-op); pool-overflow steal hands the eased fraction to `height[]` + remainder to the chase instead of committing full amplitude in one frame (terrain pop); `addBump`/`addOverlayBump` merged into one ±4σ-windowed `addGaussian` kernel (shape-divergence risk + ~2560 wasted Math.exp/frame at a full pool); silt ordering contract documented in code + doc; dead 1.02·H clamp removed from renderSurface, `hueWork` sized to its real capacity | review found the envelope/gate/flash regressions before hardware time; tempo-change-mid-rise un-quantizing noted and accepted (retime-once, flood idiom) |
 | 2026-07-06 | Series RndTrig/Sync cleanup: `meta` → `rndTrig` (label RndTrig) and moved to 5th, right after the triggers; `Sync` removed with grid-locking baked always-on (uplift rises, grid-gated births, flood-ramp retime); the Sync-off free paths (`UPLIFT_FREE_RISE_MS` 1.4 s rise, Poisson birth timer, unretimed flood ramp) deleted. `.lxp` values on the old `sync`/`meta` paths are dropped on load | Jeff 2026-07-06: RndTrig placement convention; remove Sync booleans — triggers are aligned in the composition timeline, ambient events stay tempo-locked |
+| 2026-07-07 | Feedback revision (6 changes, no visual verification yet): **audio decoupled from the sea** — removed the `level → seaLevel` pump, `SEA_SWING`, `SEA_TAU_SEC`; sea goal is now `SeaLevel + Water + silt`. `seaBias` → **`SeaLevel`** (range 0..0.9, default 0.5; bottom = sea at the base) and **settled at init** (`seaFrac = seaGoal()` — no start-up motion). New **`Water`** reservoir param (0..0.5, adds upward only). New **`Smooth`** knob (0..1) anti-aliasing band and sea-surface edges via an `edge()` smoothstep (land/sky silhouette left hard). **`Erupt`** now guarantees a breach: amplitude forced to clear the sea by `ERUPT_MARGIN_ROWS` (3). **`Flood`** rewritten to a 1-beat smoothstep rise to the top + 8-beat smoothstep settle to the live nominal (beat length captured at trigger; dropped the seconds ramp/hold/retime). `SEA_MIN` 0.05→0, `SEA_MAX` 0.9→0.98, `SEA_FLOOD` 0.97→1.0 | Jeff's feedback: sea level should be a reliable, settable, music-independent quantity that init rests at; eruptions must always emerge; flood should be a fast tide (1 beat up, 8 down); smoother edges available on demand |

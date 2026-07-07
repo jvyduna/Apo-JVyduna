@@ -33,17 +33,17 @@ import heronarts.lx.utils.LXUtils;
  * Mountains are born by uplift (bass hits when the music drives hard, a
  * spontaneous timer at ambient) and rise as tempo-quantized envelopes that
  * complete exactly on the tempo grid. They age by erosion (neighbor diffusion
- * + slow subsidence), and drown or emerge as the sea tracks the music level
- * within a beat: quiet music raises the ocean over the land; loud music drains
- * it and the peaks come out. Eroded mountain mass silts the basin, visibly
- * raising the sea. Treble hits flash the peaks white. All audio reactivity is
- * gated by the Audio depth knob (default 0 = pure screensaver).
+ * + slow subsidence). The sea rests at the SeaLevel value (plus any Water and
+ * erosion silt) and is independent of the music; Flood ramps it to the top for
+ * one beat and settles back over eight. Treble hits flash the peaks white. All
+ * audio reactivity (uplift drive, erosion regime, treble flash) is gated by the
+ * Audio depth knob (default 0 = pure screensaver); audio never moves the sea.
  *
  * See Terraform.md (beside this file) for the full design note.
  */
 @LXCategory("Apotheneum/jvyduna")
 @LXComponent.Name("Terraform")
-@LXComponent.Description("Evolving terrain skyline: tempo-locked uplifts raise mountains, erosion silts the sea, and the sea pumps with the music")
+@LXComponent.Description("Evolving terrain skyline: tempo-locked uplifts raise mountains, erosion silts the sea, and a settable sea level with flood and eruption triggers")
 public class Terraform extends ApotheneumPattern {
 
   // ---- Timing constants (physical intent) -----------------------------------
@@ -51,17 +51,14 @@ public class Terraform extends ApotheneumPattern {
   /** Background terrain chase: full-height (45-row) change takes >= 5 s (erosion/reseed/cataclysm) */
   private static final double RISE_FULL_SEC = 5;
 
-  /** Flood trigger sea sweep: full range in 5 s (~4 s from a typical drained sea) */
-  private static final double FLOOD_RAMP_SEC = 5;
+  /** Flood trigger: smoothstep rise to the top over this many beats */
+  private static final double FLOOD_RISE_BEATS = 1;
 
-  /** Flood holds at maximum sea for 2 s before draining back */
-  private static final double FLOOD_HOLD_SEC = 2;
+  /** Flood trigger: smoothstep settle back to the nominal sea over this many beats */
+  private static final double FLOOD_SETTLE_BEATS = 8;
 
   /** Time constant of the audio-level smoothing that substitutes for the old Energy knob (s) */
   private static final double DRIVE_TAU_SEC = 2;
-
-  /** Time constant of the fast audio-level smoothing that steers the sea (s) */
-  private static final double SEA_TAU_SEC = 0.35;
 
   /** Cataclysm shake duration — the one event-like exception, <= 0.5 s */
   private static final double SHAKE_SEC = 0.45;
@@ -111,14 +108,14 @@ public class Terraform extends ApotheneumPattern {
    *  level exceeds this (the gate compares drive against this x audio depth) */
   private static final double BASS_UPLIFT_MIN_LEVEL = 0.35;
 
-  /** Sea drop from the SeaBias baseline at full sustained music level */
-  private static final double SEA_SWING = 0.45;
+  /** Sea goal clamp: bottom = dry (sea at the base); top leaves room for Water/silt to lift the resting sea */
+  private static final double SEA_MIN = 0, SEA_MAX = 0.98;
 
-  /** Audio-driven sea goal clamp: the sea never fully vanishes or tops out */
-  private static final double SEA_MIN = 0.05, SEA_MAX = 0.9;
+  /** Sea fraction the flood trigger rises to (1.0 = top of the installation) */
+  private static final double SEA_FLOOD = 1.0;
 
-  /** Sea fraction the flood trigger ramps to */
-  private static final double SEA_FLOOD = 0.97;
+  /** Erupt guarantees a new peak this many rows above the current sea surface */
+  private static final double ERUPT_MARGIN_ROWS = 3;
 
   /** Silt: sea-level rise per unit of normalized eroded above-sea volume */
   private static final double SILT_GAIN = 8;
@@ -149,6 +146,9 @@ public class Terraform extends ApotheneumPattern {
   private static final double GRASS_TOP = 0.55;
   private static final double ROCK_TOP = 0.80;
 
+  /** Smoothing = 1 anti-aliases band and sea-surface edges over +/- this many rows */
+  private static final double SMOOTH_MAX_ROWS = 1.25;
+
   // ---- Fixed colors (sea + sky; land bands come from the palette) ------------
 
   private static final int SKY = LXColor.BLACK;
@@ -157,7 +157,7 @@ public class Terraform extends ApotheneumPattern {
 
   // ---- Flood state machine ----------------------------------------------------
 
-  private static final int FLOOD_NONE = 0, FLOOD_RISING = 1, FLOOD_HOLDING = 2;
+  private static final int FLOOD_NONE = 0, FLOOD_RISING = 1, FLOOD_SETTLING = 2;
 
   // ---- Parameters -------------------------------------------------------------
 
@@ -188,11 +188,17 @@ public class Terraform extends ApotheneumPattern {
   public final CompoundParameter rough = new CompoundParameter("Rough", 0.25)
     .setDescription("Terrain ruggedness: continuous small jitter bumps and divots injected into the land");
 
-  public final CompoundParameter seaBias = new CompoundParameter("SeaBias", 0.55, 0.15, 0.85)
-    .setDescription("Baseline sea level as a fraction of sculpture height; music level lowers the sea from here, erosion silt raises it");
+  public final CompoundParameter seaLevel = new CompoundParameter("SeaLevel", 0.5, 0, 0.9)
+    .setDescription("Resting sea level as a fraction of sculpture height; at the bottom the sea sits at the base. Erosion silt and eruptions fluctuate it from here");
+
+  public final CompoundParameter water = new CompoundParameter("Water", 0, 0, 0.5)
+    .setDescription("Extra water volume in the system, raising the sea above SeaLevel (adds upward only)");
 
   public final CompoundParameter bandShift = new CompoundParameter("Bands", 0, -0.2, 0.2)
     .setDescription("Shifts all elevation band thresholds up (+) or down (-) as a fraction of height");
+
+  public final CompoundParameter smoothing = new CompoundParameter("Smooth", 0)
+    .setDescription("Anti-aliases the band-to-band edges and the sea surface top; 0 = hard edges");
 
   public final BooleanParameter whiteCaps = new BooleanParameter("WhtCps", false)
     .setDescription("Render the peaks band pure white; swatch color 0 is skipped (rock/grass/sand stay on swatch 1/2/3) and TrbSprk crackles the peaks dark for contrast");
@@ -251,9 +257,6 @@ public class Terraform extends ApotheneumPattern {
   /** Smoothed music level substituting for the old Energy knob (0..1, tau = DRIVE_TAU_SEC) */
   private double drive = 0;
 
-  /** Fast-smoothed music level steering the sea (0..1, tau = SEA_TAU_SEC) */
-  private double seaLevel = 0;
-
   /** Eroded-mountain silt raising the sea goal (0..SILT_MAX, slow decay) */
   private double silt = 0;
 
@@ -261,10 +264,10 @@ public class Terraform extends ApotheneumPattern {
   private double seaFrac;
 
   private int floodPhase = FLOOD_NONE;
-  private double floodHoldMs = 0;
-
-  /** Sea rise rate (fraction/s) while FLOOD_RISING; retimed onto the grid at trigger */
-  private double floodRate = 1 / FLOOD_RAMP_SEC;
+  private double floodElapsedMs = 0;
+  private double floodRiseMs = 0;
+  private double floodSettleMs = 0;
+  private double floodStartFrac = 0;
 
   private double shakeMs = 0;
   private double shakePhase = 0;
@@ -293,8 +296,10 @@ public class Terraform extends ApotheneumPattern {
     addParameter("upliftSize", this.upliftSize);
     addParameter("erosion", this.erosion);
     addParameter("rough", this.rough);
-    addParameter("seaBias", this.seaBias);
+    addParameter("seaLevel", this.seaLevel);
+    addParameter("water", this.water);
     addParameter("bandShift", this.bandShift);
+    addParameter("smoothing", this.smoothing);
     addParameter("whiteCaps", this.whiteCaps);
     addParameter("trbSprk", this.trbSprk);
     addParameter("audio", this.audioDepth);
@@ -305,14 +310,20 @@ public class Terraform extends ApotheneumPattern {
     this.bag.jumpable(this.upliftSize);
     this.bag.jumpable(this.rough, 0, 0.8);
     this.bag.jumpable(this.bandShift, -0.12, 0.12);
-    this.bag.jumpable(this.seaBias, 0.3, 0.75);
+    this.bag.jumpable(this.seaLevel, 0.2, 0.7);
 
     // Start with a formed landscape: seed and snap heights to it
     seedTerrain(this.cubeTarget, Apotheneum.GRID_HEIGHT);
     seedTerrain(this.cylinderTarget, Apotheneum.CYLINDER_HEIGHT);
     System.arraycopy(this.cubeTarget, 0, this.cubeHeight, 0, this.cubeTarget.length);
     System.arraycopy(this.cylinderTarget, 0, this.cylinderHeight, 0, this.cylinderTarget.length);
-    this.seaFrac = this.seaBias.getValue();
+    // Settled sea at rest exactly at SeaLevel (+ Water; silt is 0 at init)
+    this.seaFrac = seaGoal();
+  }
+
+  /** Nominal sea fraction: SeaLevel plus Water reservoir plus erosion silt, clamped. */
+  private double seaGoal() {
+    return LXUtils.constrain(this.seaLevel.getValue() + this.water.getValue() + this.silt, SEA_MIN, SEA_MAX);
   }
 
   // ---- Triggers --------------------------------------------------------------
@@ -326,18 +337,20 @@ public class Terraform extends ApotheneumPattern {
 
   private void flood() {
     LX.log("Terraform: flood");
+    // One beat to rise from the current level to the top on a smoothstep curve,
+    // then eight beats to settle back to the nominal sea. Beat length is
+    // captured at the trigger (as Lorre's tint envelope does).
+    final double beatMs = Math.max(1, this.lx.engine.tempo.period.getValue());
     this.floodPhase = FLOOD_RISING;
-    this.floodRate = 1 / FLOOD_RAMP_SEC;
-    // Retime the ramp so the sea tops out on a tempo-grid boundary.
-    // Slow-down only (max scale 1): FLOOD_RAMP_SEC already sits at the 5 s
-    // full-traversal cap, so the ramp may stretch to ~7.1 s but never quicken.
-    final double msUntilFull = (SEA_FLOOD - this.seaFrac) * FLOOD_RAMP_SEC * 1000;
-    this.floodRate *= this.tempoLock.retime(msUntilFull, this.tempoDiv.getEnum(), TempoLock.DEFAULT_MIN_SCALE, 1);
+    this.floodElapsedMs = 0;
+    this.floodStartFrac = this.seaFrac;
+    this.floodRiseMs = FLOOD_RISE_BEATS * beatMs;
+    this.floodSettleMs = FLOOD_SETTLE_BEATS * beatMs;
   }
 
   private void erupt() {
     LX.log("Terraform: erupt");
-    spawnUplift(1);
+    spawnEruption();
   }
 
   private void reseed() {
@@ -411,10 +424,9 @@ public class Terraform extends ApotheneumPattern {
     this.audio.tick(deltaMs);
     final double dt = deltaMs / 1000.0;
 
-    // -- Audio smoothers: drive substitutes for the old Energy knob; seaLevel
-    // is fast enough for the sea to pump within a beat
+    // -- Audio smoother: drive substitutes for the old Energy knob, steering
+    // uplift/erosion/diffusion regimes and the treble flash (never the sea)
     this.drive += (this.audio.level - this.drive) * Math.min(dt / DRIVE_TAU_SEC, 1);
-    this.seaLevel += (this.audio.level - this.seaLevel) * Math.min(dt / SEA_TAU_SEC, 1);
 
     computeBandColors();
 
@@ -475,26 +487,32 @@ public class Terraform extends ApotheneumPattern {
       this.silt = SILT_MAX;
     }
 
-    // -- Sea level: tracks the fast-smoothed music level plus silt, reaching
-    // any goal within one beat at the current tempo; flood overrides
-    double seaGoal = LXUtils.constrain(
-      this.seaBias.getValue() - SEA_SWING * this.seaLevel + this.silt, SEA_MIN, SEA_MAX);
-    double seaRate = 1000 / this.lx.engine.tempo.period.getValue(); // full sweep in one beat
+    // -- Sea level: rests at the nominal goal (SeaLevel + Water + silt),
+    // independent of the music. Flood drives seaFrac directly over its
+    // smoothstep envelope; otherwise the sea chases the goal within a beat so
+    // parameter moves ease rather than jump.
+    final double nominal = seaGoal();
     if (this.floodPhase == FLOOD_RISING) {
-      seaGoal = SEA_FLOOD;
-      seaRate = this.floodRate;
-      if (this.seaFrac >= SEA_FLOOD - 0.01) {
-        this.floodPhase = FLOOD_HOLDING;
-        this.floodHoldMs = FLOOD_HOLD_SEC * 1000;
+      this.floodElapsedMs += deltaMs;
+      final double t = Math.min(this.floodElapsedMs / this.floodRiseMs, 1);
+      final double p = t * t * (3 - 2 * t);
+      this.seaFrac = LXUtils.lerp(this.floodStartFrac, SEA_FLOOD, p);
+      if (t >= 1) {
+        this.floodPhase = FLOOD_SETTLING;
+        this.floodElapsedMs = 0;
       }
-    } else if (this.floodPhase == FLOOD_HOLDING) {
-      seaGoal = SEA_FLOOD;
-      this.floodHoldMs -= deltaMs;
-      if (this.floodHoldMs <= 0) {
-        this.floodPhase = FLOOD_NONE; // drain back at the normal sea rate
+    } else if (this.floodPhase == FLOOD_SETTLING) {
+      this.floodElapsedMs += deltaMs;
+      final double t = Math.min(this.floodElapsedMs / this.floodSettleMs, 1);
+      final double p = t * t * (3 - 2 * t);
+      this.seaFrac = LXUtils.lerp(SEA_FLOOD, nominal, p); // settle to the live nominal
+      if (t >= 1) {
+        this.floodPhase = FLOOD_NONE;
       }
+    } else {
+      final double seaRate = 1000 / this.lx.engine.tempo.period.getValue(); // full sweep in one beat
+      this.seaFrac += LXUtils.constrain(nominal - this.seaFrac, -seaRate * dt, seaRate * dt);
     }
-    this.seaFrac += LXUtils.constrain(seaGoal - this.seaFrac, -seaRate * dt, seaRate * dt);
 
     // -- Cataclysm shake envelope (<= 0.5 s, linearly decaying)
     double shakeAmp = 0;
@@ -617,14 +635,41 @@ public class Terraform extends ApotheneumPattern {
    * Book one new mountain on each surface (random independent centers),
    * sized by drive and the Uplift knob, optionally scaled by ampScale. The
    * rise is an eased envelope completing exactly on the tempo grid.
-   * Zero-allocation; called from the render path and from the Erupt trigger.
+   * Zero-allocation; called from the spontaneous/bass render path. The Erupt
+   * trigger uses spawnEruption instead (guaranteed to breach the sea).
    */
   private void spawnUplift(double ampScale) {
-    final double amp = ampScale * this.upliftSize.getValue() * Ranges.lin(this.drive, UPLIFT_AMP_AMBIENT, UPLIFT_AMP_PEAK);
+    final double ampFrac = ampScale * this.upliftSize.getValue() * Ranges.lin(this.drive, UPLIFT_AMP_AMBIENT, UPLIFT_AMP_PEAK);
     final double sigmaFrac = Ranges.lin(this.drive, UPLIFT_SIGMA_AMBIENT, UPLIFT_SIGMA_PEAK);
     final double durMs = upliftDurationMs();
-    bookUplift(this.cubeUplifts, this.cubeTarget, this.cubeHeight, Apotheneum.GRID_HEIGHT, amp, sigmaFrac, durMs);
-    bookUplift(this.cylinderUplifts, this.cylinderTarget, this.cylinderHeight, Apotheneum.CYLINDER_HEIGHT, amp, sigmaFrac, durMs);
+    final int cubeW = this.cubeUplifts.overlay.length;
+    final int cylW = this.cylinderUplifts.overlay.length;
+    bookUplift(this.cubeUplifts, this.cubeTarget, this.cubeHeight, Apotheneum.GRID_HEIGHT,
+      this.random.nextInt(cubeW), ampFrac * Apotheneum.GRID_HEIGHT, sigmaFrac, durMs);
+    bookUplift(this.cylinderUplifts, this.cylinderTarget, this.cylinderHeight, Apotheneum.CYLINDER_HEIGHT,
+      this.random.nextInt(cylW), ampFrac * Apotheneum.CYLINDER_HEIGHT, sigmaFrac, durMs);
+  }
+
+  /**
+   * Erupt: raise one new mountain on each surface whose crest always lands
+   * ERUPT_MARGIN_ROWS above the current sea surface, so a new peak is always
+   * visibly above the water regardless of the sea level or the local terrain.
+   */
+  private void spawnEruption() {
+    final double ampFrac = this.upliftSize.getValue() * Ranges.lin(this.drive, UPLIFT_AMP_AMBIENT, UPLIFT_AMP_PEAK);
+    final double sigmaFrac = Ranges.lin(this.drive, UPLIFT_SIGMA_AMBIENT, UPLIFT_SIGMA_PEAK);
+    final double durMs = upliftDurationMs();
+    bookEruption(this.cubeUplifts, this.cubeTarget, this.cubeHeight, Apotheneum.GRID_HEIGHT, ampFrac, sigmaFrac, durMs);
+    bookEruption(this.cylinderUplifts, this.cylinderTarget, this.cylinderHeight, Apotheneum.CYLINDER_HEIGHT, ampFrac, sigmaFrac, durMs);
+  }
+
+  /** Book one eruption: amplitude forced high enough to breach the current sea. */
+  private void bookEruption(UpliftPool pool, double[] target, double[] height, int fullHeight,
+                            double ampFrac, double sigmaFrac, double durMs) {
+    final int center = this.random.nextInt(pool.overlay.length);
+    final double baseAmpRows = ampFrac * fullHeight;
+    final double neededRows = this.seaFrac * fullHeight + ERUPT_MARGIN_ROWS - height[center];
+    bookUplift(pool, target, height, fullHeight, center, Math.max(baseAmpRows, neededRows), sigmaFrac, durMs);
   }
 
   /**
@@ -644,7 +689,7 @@ public class Terraform extends ApotheneumPattern {
   }
 
   private void bookUplift(UpliftPool pool, double[] target, double[] height, int fullHeight,
-                          double ampFrac, double sigmaFrac, double durMs) {
+                          int center, double ampRows, double sigmaFrac, double durMs) {
     final int w = pool.overlay.length;
     int slot = -1;
     for (int i = 0; i < MAX_UPLIFTS; ++i) {
@@ -673,8 +718,8 @@ public class Terraform extends ApotheneumPattern {
       addOverlayBump(pool.overlay, pool.center[slot], -p * pool.ampRows[slot], pool.sigmaCols[slot]);
       pool.durMs[slot] = 0;
     }
-    pool.center[slot] = this.random.nextInt(w);
-    pool.ampRows[slot] = ampFrac * fullHeight;
+    pool.center[slot] = center;
+    pool.ampRows[slot] = ampRows;
     pool.sigmaCols[slot] = Math.max(2, sigmaFrac * w);
     pool.elapsedMs[slot] = 0;
     pool.durMs[slot] = durMs;
@@ -721,6 +766,8 @@ public class Terraform extends ApotheneumPattern {
     final double grassTop = GRASS_TOP * fullHeight + shiftRows;
     final double rockTop = ROCK_TOP * fullHeight + shiftRows;
     final double flashFloor = rockTop - FLASH_ROCK_SPILL_ROWS;
+    // Anti-alias half-width (rows) for band and sea-surface edges; 0 = hard edges
+    final double hw = this.smoothing.getValue() * SMOOTH_MAX_ROWS;
     // White flash on white caps would be invisible; crackle the peaks dark instead
     final boolean flashDarkPeaks = this.whiteCaps.isOn();
     final Apotheneum.Column[] columns = surface.columns();
@@ -733,39 +780,50 @@ public class Terraform extends ApotheneumPattern {
       final int len = column.points.length;
       for (int yi = 0; yi < len; ++yi) {
         final int elev = fullHeight - 1 - yi; // rows above the physical ground
-        int c;
-        if (elev <= seaRows) {
-          // Water sits in front of any submerged land; top water row is the
-          // specular waterline accent
-          c = (elev > seaRows - 1) ? WATERLINE : WATER_DEEP;
-        } else if (elev <= h) {
-          if (elev < sandTop) {
-            c = this.bandColor[3];
-          } else if (elev < grassTop) {
-            c = this.bandColor[2];
-          } else if (elev < rockTop) {
-            c = this.bandColor[1];
-          } else {
-            c = this.bandColor[0];
+
+        // Land color with smoothed band-to-band edges: chained lerps across the
+        // band tops. Bands are far wider than hw, so at most one edge blends.
+        int land = this.bandColor[3];
+        land = LXColor.lerp(land, this.bandColor[2], (float) edge(elev, sandTop, hw));
+        land = LXColor.lerp(land, this.bandColor[1], (float) edge(elev, grassTop, hw));
+        land = LXColor.lerp(land, this.bandColor[0], (float) edge(elev, rockTop, hw));
+        // Treble flash: white bursts on the peaks band plus a short spill into
+        // the rock band; the flashing subset is stable across one flash's decay
+        // (hash re-seeded per hit) so it reads as a burst
+        if ((flashLevel > 0) && (elev >= flashFloor)) {
+          int hh = (x * 0x9E3779B1) ^ (elev * 0x85EBCA6B) ^ this.flashSeed;
+          hh ^= hh >>> 15;
+          hh *= 0x2C1B3C6D;
+          hh ^= hh >>> 12;
+          if ((hh & 0xFF) < flashByte) {
+            final int flashColor = (flashDarkPeaks && (elev >= rockTop)) ? LXColor.BLACK : LXColor.WHITE;
+            land = LXColor.lerp(land, flashColor, (float) flashLevel);
           }
-          // Treble flash: white bursts on the peaks band plus a short spill
-          // into the rock band; the flashing subset is stable across one
-          // flash's decay (hash re-seeded per hit) so it reads as a burst
-          if ((flashLevel > 0) && (elev >= flashFloor)) {
-            int hh = (x * 0x9E3779B1) ^ (elev * 0x85EBCA6B) ^ this.flashSeed;
-            hh ^= hh >>> 15;
-            hh *= 0x2C1B3C6D;
-            hh ^= hh >>> 12;
-            if ((hh & 0xFF) < flashByte) {
-              final int flashColor = (flashDarkPeaks && (elev >= rockTop)) ? LXColor.BLACK : LXColor.WHITE;
-              c = LXColor.lerp(c, flashColor, (float) flashLevel);
-            }
-          }
-        } else {
-          c = SKY;
         }
-        this.colors[column.points[yi].index] = c;
+
+        // Above the water: land up to the terrain top, sky beyond. The land/sky
+        // silhouette at h stays a hard edge (only bands and the sea top smooth).
+        final int aboveWater = (elev <= h) ? land : SKY;
+
+        // Water (bright specular waterline on the top row), then the smoothed
+        // sea surface: water below, the above-water color above.
+        final int waterCol = (elev > seaRows - 1) ? WATERLINE : WATER_DEEP;
+        this.colors[column.points[yi].index] =
+          LXColor.lerp(waterCol, aboveWater, (float) edge(elev, seaRows, hw));
       }
     }
+  }
+
+  /**
+   * Edge weight for an anti-aliased boundary: 0 below the boundary, 1 above,
+   * smoothstepped across +/- halfWidth rows. A halfWidth <= 0 collapses to a
+   * hard step matching the original integer thresholds.
+   */
+  private static double edge(double elev, double boundary, double halfWidth) {
+    if (halfWidth <= 0) {
+      return elev < boundary ? 0 : 1;
+    }
+    final double t = LXUtils.constrain((elev - boundary) / (2 * halfWidth) + 0.5, 0, 1);
+    return t * t * (3 - 2 * t);
   }
 }
