@@ -202,11 +202,16 @@ repo; the LX source is easy to misread on these.
 - **Scoped modulation JSON** (pattern-level `children.modulation`): paths are
   RELATIVE to the host component — source
   `{"id": <modId>, "path": "/modulation/modulator/1"}`, target
-  `{"componentId": <patternId>, "parameterPath": "compositeLevel", "path":
-  "/compositeLevel"}` (`LXParameterModulation.save` uses
+  `{"componentId": <patternId>, "parameterPath": "color/brightness", "path":
+  "/color/brightness"}` (`LXParameterModulation.save` uses
   `getCanonicalPath(scope.getParent())`). A clip lane targeting that
   modulator uses the full root path:
   `/lx/mixer/channel/N/pattern/M/modulation/modulator/K/<param>`.
+- **Scoped modulations cannot target ancestor parameters**: a modulator
+  inside a pattern's modulation engine can only drive parameters on that
+  pattern (or below). Targeting the channel-owned `compositeLevel` of the
+  pattern silently does nothing — modulate a pattern-local stand-in instead
+  (e.g. a SolidPattern's `color/brightness` resting at 0%).
 - **Clip-lane events**: all `ParameterClipLane$*` subtypes (Normalized,
   Discrete, Boolean, Trigger) share the event shape
   `{"cursor": {millis, beatCount, beatBasis}, "normalized": <0-1>}` — key is
@@ -217,3 +222,28 @@ repo; the LX source is easy to misread on these.
   wall with RELATIVE normalization. Horizontal axis within a face is world
   **X on Front/Back** but **Z on Left/Right** — masks and patterns need a
   per-face axis choice (compare `model.xRange` vs `zRange` at runtime).
+
+## MIR-verify support (Text pattern, font, 3D-label plugin)
+
+Built for the Claude-MIR-pipeline light organ (`mir compose`), but general:
+
+- `patterns/Text.java` — view-based LED text in a 5px bitmap font
+  (`util/PixelFont5.java`, uppercase A-Z/0-9/`# : - . /`, authored as ASCII art;
+  run its `main` to preview). Params: `text` (StringParameter), scale, rotation,
+  x/y offset, line/char spacing, hue/sat/bright, flip. Layout is in **world
+  units** so rotation stays undistorted on any face aspect; rendering maps each
+  LED through the inverse text transform (exact at 0/90/180/270°). Free-text
+  entry uses `UITextBox.setParameter(text)` in `buildDeviceControls`
+  (`implements UIDeviceControls<Text>`); Chromatik has **no multi-line text
+  widget**, so the pattern parses literal `\n` (and real newlines set via JSON).
+  `StringParameter` serializes into the .lxp for free.
+- `MirVerifyLabelsPlugin.java` — `@LXPlugin.Name`/`LXStudio.Plugin` that draws 3D
+  preview labels via GLX's built-in `heronarts.glx.ui.text3d.UI3dText`
+  (`addLabel(text).setPosition(...).setOrientation(CAMERA).setTextScale(WORLD)...`).
+  A **pattern cannot draw in 3D** — only a plugin gets `onUIReady` +
+  `ui.preview.addComponent(...)` (add to `ui.preview` AND `ui.previewAux`).
+  `UI3dText(glx)` takes the GLX (LXStudio is one). `Apotheneum.initialize(lx)` in
+  the plugin's `initialize` populates `Apotheneum.cube` before use. The built-in
+  `Label` has no per-label rotation setter, so outward-facing = billboard
+  (`TextOrientation.CAMERA`); TE's `UIModelLabels` is the reference if you ever
+  need true world-oriented, per-label rotation (custom font-atlas shaders).
