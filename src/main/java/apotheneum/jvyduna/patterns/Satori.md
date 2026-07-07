@@ -53,25 +53,39 @@ the motion is inherently smooth, slow, and full-field.
     folded-diagonal angular term. Mirror symmetry makes sector seams and face
     edges continuous by construction (CURATE: radial/angular mix seeded
     0.35–0.65).
-- **Per-frame color**: `colors[i] = LUT[frac(field[i]·cycles + phase +
-  pulseDepth·pulseDist[i])]`, posterized to band centers. That's one
-  multiply-add, a `frac`, a quantize and an array lookup per point — zero
-  allocation, no trig, no per-frame geometry. `Smooth` widens each band edge
-  into a smoothstep ramp over the trailing `smooth` fraction of the band
-  (0 = hard edges as above; 1 = every pixel smoothsteps continuously from one
-  band's center color to the next; the cyclic LUT index mask handles the
-  last-band wrap). One branch + a few multiplies per point when engaged.
+- **Per-frame color**: `colors[i] = LUT[bandPos(band(field[i]·cycles + phase +
+  pulseDepth·pulseDist[i]))]`. A multiply-add, a `frac`, a band index and an
+  array lookup per point — zero allocation, no trig, no per-frame geometry.
+  Two independent edge softeners (both default 0, opt-in):
+  - `RnbwSm` (rainbow smooth, the old `smooth`) smoothsteps *along the LUT*
+    between adjacent band positions — travels the palette/hue path.
+  - `Smooth` softens motion and transitions two ways: a per-pixel **temporal**
+    color low-pass (`prevColor` EMA, `alpha = 1 − exp(−Δt/(smooth·TAU_MS))`,
+    `TAU_MS = 300` CURATE) and a **spatial** linear-RGB anti-alias that mixes
+    toward the *next band's* color directly (low hue shift), keyed off the same
+    trailing-fraction smoothstep. All primitive int/double math; `LXColor.lerp`
+    returns an int, so still zero allocation.
+- **Band → LUT position table** (`bandPos[MAX_BANDS]`, rebuilt only when Bands
+  or the swatch count `n` change): makes bands land on **exact palette colors**.
+  Because the LUT places palette color `k` at position `k/n`, a band color is
+  just a LUT position (so treble shimmer still applies). `n < 2` → rainbow even
+  centers `(i+0.5)/bands` (unchanged look); `bands ≤ n` → band `i` = palette
+  color `i` exactly (strict first-N subset — fixes the old bug where band
+  centers sampled palette midtones); `bands > n` → every palette color anchored
+  at band `round(k·bands/n)` (>1 apart, no collisions) with interpolated fillers
+  between anchors. Sampled with `Math.round` to halve LUT-quantization error.
 - **Color LUT**: 256-entry persistent `int[]`. Built from the project palette
   swatch (`lx.engine.palette.swatch`) when it has ≥ 2 colors — evenly spaced,
   lerped between neighbors, wrapping back to the first for cycle continuity —
   otherwise a `PerceptualHue` evenly-spaced rainbow. Rebuilt **only when the
   cached swatch colors actually change** (dynamic swatches trigger rebuilds
   automatically; 256 lerps, event-rate in practice).
-- **Buffers**: `field`, `pulseDist` allocated on first build / model change
-  only; `baseLut`, `frameLut`, swatch cache and all seed arrays preallocated.
-  Field regeneration is flagged by triggers/parameter events and executed as
-  one O(n) pass at the top of the next frame (thread-safe equivalent of
-  regenerating inside the trigger handler).
+- **Buffers**: `field`, `fieldOld` (morph snapshot), `pulseDist`, `prevColor`
+  (Smooth temporal buffer) allocated on first build / model change only;
+  `baseLut`, `frameLut`, `bandPos`, swatch cache and all seed arrays
+  preallocated. Field regeneration is flagged by triggers/parameter events and
+  executed as one O(n) pass at the top of the next frame (thread-safe equivalent
+  of regenerating inside the trigger handler).
 - **Door columns**: all loops iterate `column.points.length`, never assuming
   full height; shortened columns simply sample fewer rows of the same field.
 
@@ -113,11 +127,30 @@ gains below are unverified at the new levels):
 
 ## Tempo mapping
 
-None (as of 2026-07-06). The original build quantized the band-advance
-period to the tempo grid via `TempoLock.quantizePeriod()` and fired a
-grid-breath pulse on each `TempoDiv` boundary; both were removed along with
-the `Sync`/`TempoDiv` parameters during curation — free-running timing reads
-better for this pattern and the extra controls weren't earning their space.
+Sustained color rotation is free-running (wall-clock `phase`). The **only**
+tempo coupling is the transition morph (2026-07-07): changing `Field` or `Bands`
+kicks off a **one-beat, decelerating (ease-out cubic) morph** rather than a
+snap. Beat length comes from `lx.engine.tempo.period.getValue()` (ms/beat,
+floored at `MIN_MORPH_MS = 250` CURATE so extreme tempi don't strobe). No
+`Sync`/`TempoDiv` params, no `TempoLock` — the morph just times a one-shot ease.
+
+- **Field change:** `fieldOld` snapshots the pre-change field before rebuild;
+  each frame the effective field is `lerp(fieldOld, field, e)` per pixel, so the
+  old color regions flow to their new locations. Band count stays integer → no
+  seam, pure field flow.
+- **Bands change:** the band count eases `bandsOld → bands`; `floor(pos·bandsEff)`
+  splits bands in place as the count grows and merges them as it shrinks.
+- **Color-count mismatch strategy:** framed as **nucleation along the field's
+  own iso-lines**, not offscreen entry — the phase field has no offscreen, and
+  its maxima (interference/ring centers) act as natural emitters. New band
+  boundaries appear where `pos·bandsEff` crosses new integers, so a new color is
+  born in place along a contour and spreads as the boundary sweeps; shrinking
+  merges neighbors. During a Bands morph the color mapping uses the continuous
+  `i/n` positions (exact when `bandsEff ≤ n`); a small settle-pop can occur only
+  when landing on a `Bands > n` rest state where the anchored table differs.
+  Escape hatch (not shipped): rebuild `bandPos` from `round(bandsEff)` each morph
+  frame (≤16 iters, zero alloc) to erase that pop.
+
 (`TempoLock` itself remains in the util package; other patterns use it.)
 
 ## Energy mapping
@@ -142,12 +175,17 @@ immediately after them, then pattern parameters, Audio last.
 | `fieldMode` | Field | EnumParameter&lt;FieldMode&gt; | INTERFERENCE | 4 variants | static phase-field variant |
 | `speed` | Speed | CompoundParameter (%) | 1 (100%) | 0..2 | cycle rate: 0% pauses, 100% = 8s/cycle, 200% = 4s |
 | `width` | Width | CompoundParameter | 5 | 1..6 | band width: higher = wider bands, fewer repeats (`cycles = 7 − width`) |
-| `posterize` | Bands | CompoundDiscreteParameter | 6 | 2..16 | quantize the LUT into N bold bands |
-| `smooth` | Smooth | CompoundParameter | 0 | 0..1 | band-edge interpolation: 0 = hard edges, 1 = full smoothstep gradient |
+| `posterize` | Bands | CompoundDiscreteParameter | 6 | 2..16 | quantize into N bold bands; ≤ palette count → first N palette colors exactly, > count → all palette colors + interpolated fillers |
+| `rnbwSm` | RnbwSm | CompoundParameter | 0 | 0..1 | rainbow band-edge smoothing: smoothstep along the LUT (hue path) between band colors; 0 = hard edges (the old `smooth`) |
+| `smooth` | Smooth | CompoundParameter | 0 | 0..1 | soften motion/transitions: temporal color low-pass (τ ≤ 300 ms) + linear-RGB (low hue-shift) edge anti-alias; 0 = as-is |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth: 0 = pure screensaver, 1 = full |
 
 Renames/removals (2026-07-06): `energy`, `sync`, `tempoDiv` removed;
-`spread` → `width` (action reversed); `meta` → `rndTrig`. Any `.lxp`
+`spread` → `width` (action reversed); `meta` → `rndTrig`.
+Renames (2026-07-07): old `smooth`/"Smooth" band-edge interpolation → `rnbwSm`/
+"RnbwSm"; the freed key `smooth` is reused for the **new** Smooth (temporal +
+linear-RGB AA), so `.lxp` automation on `smooth` now drives the new param and
+old RnbwSm values (key `rnbwSm`) start fresh at 0. Any `.lxp`
 modulation/automation bound to the old keys must be re-bound.
 
 ## Triggers
@@ -204,10 +242,13 @@ strobe — see Triggers).
 
 **Bold forms.** The posterize default of 6 bands over 2 cycles (`width = 5`)
 gives ≈17 columns per band on the cube ring (200 / 12) — large,
-high-contrast slabs with hard edges, legible through LED gaps. Smooth
-gradients are opt-in via high `Bands` values or the `Smooth` knob. CURATE:
-at the extremes (`width = 1` → 6 cycles × `Bands = 16`, ≈2 columns/band)
-bands approach fine texture; if illegible on sculpture, re-range or cap.
+high-contrast slabs with hard edges, legible through LED gaps. As of 2026-07-07
+band colors **anchor to exact palette colors** at rest (band `i` = palette color
+`i` when `Bands ≤ palette count`), so the default look now reads the swatch
+directly instead of even LUT samples. Smooth gradients are opt-in via high
+`Bands` values or the `RnbwSm`/`Smooth` knobs. CURATE: at the extremes
+(`width = 1` → 6 cycles × `Bands = 16`, ≈2 columns/band) bands approach fine
+texture; if illegible on sculpture, re-range or cap.
 
 **Brightness.** Colors come straight from the palette swatch / PerceptualHue
 at full saturation; shimmer lerps toward white by up to 100% on loud treble
@@ -225,3 +266,4 @@ trim on the physical LEDs is still unverified.
 | 2026-07-06 | Curation pass from sculpture review: removed `Energy` (targets now fixed constants: `CYCLE_SEC = 8`, `PULSE_DEPTH = 1.3`, `SHIMMER_MAX = 1.0`, shimmer energy-gate deleted); removed tempo locking entirely (`Sync`, `TempoDiv`, `TempoLock` usage, grid breath, traversal-cap budget); `Speed` re-ranged 0..2 (%, multiplies rate: 0% pauses, 100% = old max 8s/cycle, 200% = 4s); `Spread` → `Width` with action reversed (`cycles = 7 − width`); added `Smooth` (smoothstep band-edge interpolation, 0 = old hard bands); Audio max effect ×6 (speed boost now boost-only `1 + 3·level`, old 0.5× silence floor removed); `Meta` → `RndTrig`; speed jump range 0.5..1.5 | Jeff's curation notes: Energy/Sync not earning their space, Audio imperceptible, Spread direction backwards, wanted pause + faster ceiling on Speed and optional smooth color interpolation |
 | 2026-07-06 | Series RndTrig ordering: `rndTrig` moved from last to 4th, immediately after the three triggers (no rename needed — already RndTrig) | Jeff 2026-07-06: TriggerBag meta trigger sits right after the other trigger params in every pattern |
 | 2026-07-06 | Series RndTrig ordering: `rndTrig` moved from last to 4th, immediately after the three triggers (already named RndTrig) | Series convention: TriggerBag meta trigger sits right after the other trigger params |
+| 2026-07-07 | Revision pass (R1–R4): (R1) old `smooth`/"Smooth" → `rnbwSm`/"RnbwSm" (rainbow/hue-path band-edge smoothstep, behavior unchanged); (R2) new `smooth`/"Smooth" (default 0) softens motion/transitions via a per-pixel temporal color low-pass (`prevColor` EMA, `TAU_MS = 300` CURATE) plus a linear-RGB low-hue-shift edge anti-alias; (R3) `Field`/`Bands` changes now **morph over one beat** with an ease-out-cubic (decelerating) curve — `fieldOld` snapshot lerps per pixel, band count eases, beat length from `tempo.period` floored at `MIN_MORPH_MS = 250` CURATE, color-count mismatch handled as in-place nucleation along field iso-lines; (R4) band→LUT-position table makes bands land on **exact palette colors** (`Bands ≤ n` → first N palette colors; `Bands > n` → all palette colors anchored + interpolated fillers), fixing the bug where e.g. `Bands = 2` at max `Width` showed palette midtones instead of `palette[0]`/`palette[1]`. CURATE: `TAU_MS`, `MIN_MORPH_MS`, the ease-out exponent, and the bands-morph settle-pop (ship option 1) unverified on sculpture; R4 changes the shipped default look at `Bands = 6` (now exact palette anchors) | Jeff's revision notes: free "Smooth" for a motion/transition smoother, morph field/bands transitions on the beat, and make low band counts use the palette's first colors exactly |
