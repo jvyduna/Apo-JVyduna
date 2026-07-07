@@ -98,6 +98,9 @@ public class Pipes3D extends ApotheneumPattern {
   /** Elbow ball: extra radius in px beyond the pipe half-thickness */
   private static final double BALL_EXTRA_PX = 1;
 
+  /** Width in px of the antialiased edge ramp (silhouettes and end-caps) */
+  private static final double AA_WIDTH = 1.5; // CURATE: edge softness
+
   /** Thickness parameter bounds (px); THICK_MAX also sizes the sparkle
    *  visibility tolerance in sparkleOverlay() */
   private static final double THICK_MIN = 1, THICK_MAX = 6;
@@ -191,7 +194,7 @@ public class Pipes3D extends ApotheneumPattern {
 
   public final TriggerParameter drain = bag.register(
     new TriggerParameter("Drain", this::startDrain)
-    .setDescription("Fade the room out, concluding exactly on a beat (0.5-1.5 beats), then restart with the Pipes-knob count in the next palette color"));
+    .setDescription("Fade the room out, concluding exactly on a beat (0.5-1.5 beats), then restart with the Pipes-knob count in the first palette colors"));
 
   public final TriggerParameter teleport = bag.register(
     new TriggerParameter("Teleport", this::teleportRandomPipe)
@@ -345,7 +348,6 @@ public class Pipes3D extends ApotheneumPattern {
   private boolean draining = false;
   private double drainRemainMs = 0;
   private double drainTotalMs = 1;
-  private int drainCount = 0; // advances the palette color index each drain
 
   public Pipes3D(LX lx) {
     super(lx);
@@ -450,18 +452,18 @@ public class Pipes3D extends ApotheneumPattern {
 
   /**
    * Pipe color at run start, straight from the project palette (series house
-   * rules: full H/S/B from the swatch, no hue knob). With enough swatch
-   * entries, pipe i takes slot (drainCount + i) so each drain advances the
-   * rotation and concurrent pipes get distinct entries. A short swatch keeps
-   * its defined colors and fills the remainder with perceptually-even
-   * fully-saturated hues (the Rubik computeFaceColors template); an empty
-   * swatch degenerates to an even perceptual spread. Event-rate only.
+   * rules: full H/S/B from the swatch, no hue knob). Pipe i always wears
+   * palette slot i, so the look is consistent across drains (no per-drain
+   * rotation). A short swatch keeps its defined colors and fills the
+   * remainder with perceptually-even fully-saturated hues (the Rubik
+   * computeFaceColors template); an empty swatch degenerates to an even
+   * perceptual spread. Event-rate only.
    */
   private int pipeColor(int i) {
     final List<LXDynamicColor> swatch = this.lx.engine.palette.swatch.colors;
     final int n = swatch.size();
     if (n >= MAX_PIPES) {
-      return swatch.get((this.drainCount + i) % n).getColor();
+      return swatch.get(i % n).getColor();
     }
     for (int d = 0; d < n; ++d) {
       final int c = swatch.get(d).getColor();
@@ -472,7 +474,7 @@ public class Pipes3D extends ApotheneumPattern {
     for (int j = 0; j < MAX_PIPES - n; ++j) {
       this.pipeColors[n + j] = PerceptualHue.color(this.hueOut[j]);
     }
-    return this.pipeColors[(this.drainCount + i) % MAX_PIPES];
+    return this.pipeColors[i % MAX_PIPES];
   }
 
   /** Capture a full palette color into pipe i's H/S/B slots */
@@ -852,13 +854,12 @@ public class Pipes3D extends ApotheneumPattern {
 
   /**
    * Drain finished (on a beat): fresh room at the (possibly jumped) density,
-   * next palette color, the Pipes-knob count of pipes (the knob never moves
-   * on its own). Caps stay phase-aligned to the global tempo grid — a drain
-   * does not reset cap phase.
+   * the Pipes-knob count of pipes (the knob never moves on its own), each in
+   * its consistent palette slot. Caps stay phase-aligned to the global tempo
+   * grid — a drain does not reset cap phase.
    */
   private void finishDrain() {
     this.draining = false;
-    ++this.drainCount;
     for (int i = 0; i < MAX_PIPES; ++i) {
       this.pAlive[i] = false;
     }
@@ -1039,12 +1040,13 @@ public class Pipes3D extends ApotheneumPattern {
   }
 
   /**
-   * Rasterize one retained segment into all four wall buffers: a thick 2D
-   * line stepped ~1 px along its screen length with a perpendicular span of
-   * ~thickness px, depth-tested and depth-shaded per step. The sun-specular
-   * stripe (world-fixed light, so highlights slide around pipes as the
-   * lattice rotates) is written in a second pass so the span sweep cannot
-   * clobber it at equal depth.
+   * Rasterize one retained segment into all four wall buffers as a projected
+   * capsule. Each wall projects the segment's endpoints, then GATHERS: it
+   * iterates the destination pixels in the capsule's bounding box and, per
+   * pixel, evaluates the exact 2D point-to-segment distance for coverage
+   * (antialiased silhouette + end-caps) and the cross-pipe cylinder
+   * parameter for per-pixel Phong (sun + fills + specular). Gather, not
+   * scatter, so no interior pixel is ever skipped.
    */
   private void rasterSegment(int s) {
     xformPoint(this.segAx[s], this.segAy[s], this.segAz[s]);
@@ -1063,7 +1065,6 @@ public class Pipes3D extends ApotheneumPattern {
     final float satPct = this.segSat[s];
     final float briPct = this.segBri[s];
     final double halfPx = this.frameHalfPx;
-    final int span = Math.max(1, (int) Math.round(2 * halfPx));
 
     for (int w = 0; w < WALLS; ++w) {
       final double u0 = wallU(w, wax, waz), u1 = wallU(w, wbx, wbz);
@@ -1119,72 +1120,84 @@ public class Pipes3D extends ApotheneumPattern {
         }
       }
 
-      final int steps = Math.max(1, (int) Math.ceil(screenLen));
-      final double m2u = -dv / screenLen, m2v = du / screenLen;
-      // Shading widens the span one pixel each side for the soft AA rim
-      final int spanPix = shading ? span + 2 : span;
-      final double tNorm = 1 / Math.max(halfPx, 0.5);
+      // Fill-light dot pairs, evaluated once at the projected segment
+      // midpoint: the fills sit ~FILL_DIST half-widths out, so their
+      // direction barely varies along one segment (CURATE: per-segment
+      // approximation — avoids two normalizes per pixel)
+      double aF1 = 0, bF1 = 0, aF2 = 0, bF2 = 0;
+      if (lit) {
+        final double mx = (wax + wbx) * 0.5, my = (way + wby) * 0.5, mz = (waz + wbz) * 0.5;
+        double lx0 = this.fillPos[0][0] - mx, ly0 = this.fillPos[0][1] - my, lz0 = this.fillPos[0][2] - mz;
+        double ll = Math.sqrt(lx0 * lx0 + ly0 * ly0 + lz0 * lz0);
+        if (ll > 1e-9) { lx0 /= ll; ly0 /= ll; lz0 /= ll; }
+        aF1 = mhx * lx0 + mhy * ly0 + mhz * lz0;
+        bF1 = vpx * lx0 + vpy * ly0 + vpz * lz0;
+        double lx1 = this.fillPos[1][0] - mx, ly1 = this.fillPos[1][1] - my, lz1 = this.fillPos[1][2] - mz;
+        ll = Math.sqrt(lx1 * lx1 + ly1 * ly1 + lz1 * lz1);
+        if (ll > 1e-9) { lx1 /= ll; ly1 /= ll; lz1 /= ll; }
+        aF2 = mhx * lx1 + mhy * ly1 + mhz * lz1;
+        bF2 = vpx * lx1 + vpy * ly1 + vpz * lz1;
+      }
 
-      for (int k = 0; k <= steps; ++k) {
-        final double f = (double) k / steps;
-        final double cu = u0 + du * f, cv = v0 + dv * f;
-        final float dnk = dn0 + (dn1 - dn0) * (float) f;
-        final float bf = 1 - DEPTH_DIM * dnk;
+      // Gather: iterate the destination LEDs (buffer pixels) covered by the
+      // projected capsule and evaluate an exact 2D distance field. This is
+      // per-LED, so no interior pixel can be missed (the scatter it replaced
+      // floor-rounded perpendicular spans and left holes on diagonals), and
+      // the distance drives smooth coverage on every silhouette and end-cap.
+      final double r = halfPx;
+      final double pad = AA_WIDTH * 0.5 + 1;
+      final int uMin = Math.max(0, (int) Math.floor(Math.min(u0, u1) - r - pad));
+      final int uMax = Math.min(W - 1, (int) Math.ceil(Math.max(u0, u1) + r + pad));
+      final int vMin = Math.max(0, (int) Math.floor(Math.min(v0, v1) - r - pad));
+      final int vMax = Math.min(H - 1, (int) Math.ceil(Math.max(v0, v1) + r + pad));
+      final double invLen2 = 1 / (screenLen * screenLen);
+      final double invR = 1 / Math.max(halfPx, 0.5);
+      final double covDenom = 1 / AA_WIDTH;
+      final double rEdge = r + AA_WIDTH * 0.5, rEdge2 = rEdge * rEdge;
+      final double rHard2 = (r + 0.5) * (r + 0.5);
 
-        if (!shading) {
-          // Flat fast path: exactly the pre-shading render (Shaded = 0)
-          final int colMain = LXColor.hsb(hueDeg, satPct, briPct * bf);
-          for (int j = 0; j < spanPix; ++j) {
-            final double o = j - (spanPix - 1) * 0.5;
-            final int pu = (int) Math.floor(cu + m2u * o);
-            final int pv = (int) Math.floor(cv + m2v * o);
-            if (pu < 0 || pu >= W || pv < 0 || pv >= H) {
-              continue;
-            }
-            final int idx = pv * W + pu;
-            if (dnk <= dBuf[idx]) {
+      for (int pv = vMin; pv <= vMax; ++pv) {
+        final int rowBase = pv * W;
+        final double py = pv + 0.5;
+        for (int pu = uMin; pu <= uMax; ++pu) {
+          final double px = pu + 0.5;
+          double t = ((px - u0) * du + (py - v0) * dv) * invLen2;
+          if (t < 0) t = 0; else if (t > 1) t = 1;
+          final double dcu = px - (u0 + du * t), dcv = py - (v0 + dv * t);
+          final double dist2 = dcu * dcu + dcv * dcv;
+          final float dnk = (float) (dn0 + (dn1 - dn0) * t);
+          final float bf = 1 - DEPTH_DIM * dnk;
+          final int idx = rowBase + pu;
+
+          if (!shading) {
+            if (dist2 <= rHard2 && dnk <= dBuf[idx]) {
               dBuf[idx] = dnk;
-              cBuf[idx] = colMain;
+              cBuf[idx] = LXColor.hsb(hueDeg, satPct, briPct * bf);
             }
+            continue;
           }
-          continue;
-        }
 
-        // Fill-light dot pairs at this step's centerline point (the fills
-        // are point sources: direction varies along the pipe)
-        double aF1 = 0, bF1 = 0, aF2 = 0, bF2 = 0;
-        if (lit) {
-          final double px = wax + ddx * f, py = way + ddy * f, pz = waz + ddz * f;
-          double lx0 = this.fillPos[0][0] - px, ly0 = this.fillPos[0][1] - py, lz0 = this.fillPos[0][2] - pz;
-          double ll = Math.sqrt(lx0 * lx0 + ly0 * ly0 + lz0 * lz0);
-          if (ll > 1e-9) { lx0 /= ll; ly0 /= ll; lz0 /= ll; }
-          aF1 = mhx * lx0 + mhy * ly0 + mhz * lz0;
-          bF1 = vpx * lx0 + vpy * ly0 + vpz * lz0;
-          double lx1 = this.fillPos[1][0] - px, ly1 = this.fillPos[1][1] - py, lz1 = this.fillPos[1][2] - pz;
-          ll = Math.sqrt(lx1 * lx1 + ly1 * ly1 + lz1 * lz1);
-          if (ll > 1e-9) { lx1 /= ll; ly1 /= ll; lz1 /= ll; }
-          aF2 = mhx * lx1 + mhy * ly1 + mhz * lz1;
-          bF2 = vpx * lx1 + vpy * ly1 + vpz * lz1;
-        }
-
-        for (int j = 0; j < spanPix; ++j) {
-          final double o = j - (spanPix - 1) * 0.5;
-          final double cov = clamp(halfPx + 0.5 - Math.abs(o), 0, 1);
+          if (dist2 > rEdge2) {
+            continue;
+          }
+          double cov = (rEdge - Math.sqrt(dist2)) * covDenom;
           if (cov <= 0) {
             continue;
           }
-          final int pu = (int) Math.floor(cu + m2u * o);
-          final int pv = (int) Math.floor(cv + m2v * o);
-          if (pu < 0 || pu >= W || pv < 0 || pv >= H) {
-            continue;
+          if (cov > 1) {
+            cov = 1;
           }
           double diff, spec;
           if (lit) {
-            final double t = clamp(o * tNorm, -1, 1);
-            final double sN = Math.sqrt(Math.max(0, 1 - t * t));
-            diff = KD_SUN * Math.max(0, aSun * t + bSun * sN)
-                 + KD_FILL * (Math.max(0, aF1 * t + bF1 * sN) + Math.max(0, aF2 * t + bF2 * sN));
-            final double nh = Math.max(0, aH * t + bH * sN);
+            // Signed cross-pipe cylinder parameter: (p-c) projected onto M̂'s
+            // screen axis m2 = (-dv, du)/screenLen (exact perpendicular in
+            // the body; a smooth radial falloff at the rounded caps)
+            double tC = (du * dcv - dv * dcu) / screenLen * invR;
+            if (tC < -1) tC = -1; else if (tC > 1) tC = 1;
+            final double sN = Math.sqrt(Math.max(0, 1 - tC * tC));
+            diff = KD_SUN * Math.max(0, aSun * tC + bSun * sN)
+                 + KD_FILL * (Math.max(0, aF1 * tC + bF1 * sN) + Math.max(0, aF2 * tC + bF2 * sN));
+            final double nh = Math.max(0, aH * tC + bH * sN);
             final double nh2 = nh * nh;
             // Exponent 4 (broad lobe). CURATE: exponent/gain
             spec = Math.min(1, nh2 * nh2 * this.frameSpecScale);
@@ -1192,7 +1205,7 @@ public class Pipes3D extends ApotheneumPattern {
             diff = KD_SUN + KD_FILL; // degenerate frame: neutral fully-lit
             spec = 0;
           }
-          compositePixel(cBuf, dBuf, pv * W + pu, dnk, cov, hueDeg, satPct, briPct, bf, diff, spec);
+          compositePixel(cBuf, dBuf, idx, dnk, cov, hueDeg, satPct, briPct, bf, diff, spec);
         }
       }
     }
@@ -1255,7 +1268,7 @@ public class Pipes3D extends ApotheneumPattern {
                          double half, float dn, double wx, double wy, double wz,
                          float hueDeg, float sat, float bri, float boost) {
     final boolean shading = this.frameShadeMix > 0;
-    final double pad = shading ? 1 : 0;
+    final double pad = shading ? AA_WIDTH * 0.5 + 1 : 0;
     final int iu0 = Math.max(0, (int) Math.floor(cu - half - pad));
     final int iu1 = Math.min(W - 1, (int) Math.ceil(cu + half + pad) - 1);
     final int iv0 = Math.max(0, (int) Math.floor(cv - half - pad));
@@ -1323,7 +1336,7 @@ public class Pipes3D extends ApotheneumPattern {
       for (int u = iu0; u <= iu1; ++u) {
         final double dxp = u + 0.5 - cu;
         final double dist = Math.sqrt(dxp * dxp + dyp * dyp);
-        final double cov = clamp(r + 0.5 - dist, 0, 1);
+        final double cov = clamp((r + AA_WIDTH * 0.5 - dist) / AA_WIDTH, 0, 1);
         if (cov <= 0) {
           continue;
         }

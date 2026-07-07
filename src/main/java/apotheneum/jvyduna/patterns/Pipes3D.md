@@ -77,14 +77,20 @@ variant to the cylinder is a follow-up curation item.
   stitch into one object. Rotated content can project outside the 50×45
   viewport or the [0, gz] depth range — pixels clip and depth clamps (the
   object "sticks out of the frame" at 45°, which reads fine).
-- **Raster paths**: segments draw as thick 2D lines (~1 px steps along the
-  screen length, a perpendicular span of ~thickness px, depth lerped per
-  step); balls stamp slightly-oversized **discs**; both are depth-tested
-  (nearer wins), and balls draw after segments so joints win ties. End-on
-  segments collapse to a small disc (a circular pipe cross-section). Discs,
-  not squares (2026-07-06 second pass): joints are spheres, and a sphere's
-  orthographic projection is a circle from any viewing angle — screen-aligned
-  squares betrayed the projection as soon as the lattice rotated.
+- **Raster paths — gather, not scatter** (fifth pass): each segment projects
+  to a 2D **capsule** per wall and iterates the destination pixels (= LEDs,
+  1:1 with the wall buffer) inside its bounding box, evaluating the exact
+  point-to-segment distance per pixel for coverage and the cross-pipe
+  cylinder parameter for shading. Balls stamp sphere-shaded **discs**; both
+  are depth-tested (nearer wins), and balls draw after segments so joints win
+  ties. End-on segments collapse to a small disc. This replaced the earlier
+  *scatter* (step along the centerline, floor-round a perpendicular span),
+  which left off-pixel holes inside diagonal tubes — a gather evaluates every
+  destination LED, so no interior pixel can be missed. Discs, not squares
+  (second pass): joints are spheres, and a sphere's orthographic projection
+  is a circle from any viewing angle — screen-aligned squares betrayed the
+  projection as soon as the lattice rotated. Capsule end-caps are rounded
+  (natural pipe tips; the joint ball covers the overlap).
 - **Lighting** (fourth pass — full-surface Phong replaces the 1 px specular
   stripe): a rig of one directional **sun** (`SUN ∝ (0.35, −0.85, 0.35)` at
   rig angle 0; rows index top-down, so up is −y) plus **two fill point
@@ -98,21 +104,28 @@ variant to the cylinder is a follow-up curation item.
   Shaded)` with `AMBIENT = 0.15`, `diffuse = 0.65·(N·sun)₊ +
   0.30·Σ(N·fillⱼ)₊` — tuned so pipes usually reach peak saturated
   brightness somewhere on their lit side in a dark scene (all `CURATE:`).
+  The sun and specular half-vector are per-segment constants; the two fill
+  directions are evaluated once at the segment **midpoint** (they sit far
+  out, so their direction barely varies along a segment — fifth pass, avoids
+  two normalizes per pixel; `CURATE:`).
   Specular stays Blinn-Phong exponent 4, now evaluated per pixel:
   `spec = min(1, (N·H_w)⁴ · SPEC_GAIN · (2·Shaded + 1.5·audioLevel))`,
   pushing brightness toward full and saturation toward the 35 floor. Because
   the rig rotates independently of the lattice, the bright crest slides
   around the tubes even when the lattice is static.
-- **Antialiasing** (part of shading): spans/discs widen 1 px and edge pixels
-  get coverage `clamp(edge + 0.5 − dist, 0, 1)` folded into brightness;
+- **Antialiasing** (part of shading): the exact distance field drives a
+  smooth coverage ramp `clamp((r + AA_WIDTH/2 − dist)/AA_WIDTH, 0, 1)`
+  (`AA_WIDTH = 1.5` px, `CURATE:`) on every silhouette AND the rounded
+  capsule/disc end-caps; coverage folds into brightness, and
   partial-coverage rim pixels blend via `lightest()` WITHOUT writing the
-  depth buffer, so soft rims never occlude. Kills the jaggies on rotated
-  diagonals and rounds the tube silhouettes.
+  depth buffer, so soft rims never occlude. Widened from the fourth pass's
+  fixed 1 px ramp (fifth pass) for smoother edges.
 - **Shaded = 0 fast path**: the knob (renamed from Hglht, fourth pass)
-  disables ALL shading processing — flat per-step color, hard edges, no
-  per-pixel lighting or hsb — restoring the cheap pre-shading render. Cost
-  at Shaded > 0 is ~2–3× the flat path (~200 K shaded pixels worst case,
-  still ~1–3 ms; `CURATE:` verify frame time at density 12 + rotation).
+  disables the per-pixel lighting — the gather collapses to a hard binary
+  coverage (`dist ≤ r + 0.5`) with flat depth-cued color, no lights and no
+  AA. Still gap-free (it is the same gather), just cheap and hard-edged.
+  Cost at Shaded > 0 is ~2–3× the flat path (`CURATE:` verify frame time at
+  density 12 + rotation + Shaded 1; Shaded 0 is the escape hatch).
 - **Rotation**: `RotX`/`RotY` are **speeds** — 100% = 90° per beat, angles
   accumulate on the tempo clock (`angle += rate·90°·dBeats`), so 25% at
   CapDiv=1 drifts a quarter-turn every 4 beats. `RstRot` zeros both speeds
@@ -245,7 +258,7 @@ nothing was obviously droppable given the feature set).
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
-| `drain` | Drain | TriggerParameter | — | — | fade out concluding exactly on a beat (0.5–1.5 beats), clear, restart with the Pipes-knob count in the next palette color |
+| `drain` | Drain | TriggerParameter | — | — | fade out concluding exactly on a beat (0.5–1.5 beats), clear, restart with the Pipes-knob count in the first palette colors |
 | `teleport` | Teleport | TriggerParameter | — | — | one random growing pipe caps and jumps to a random free cell (the classic) |
 | `pipes` | Pipes | DiscreteParameter | 1 | 1..3 | concurrent pipe count; raising spawns a fresh pipe, lowering culls the oldest (capped where it stopped) |
 | `sparkle` | Sparkle | TriggerParameter | — | — | flash ALL recent elbow joints white at full brightness (manual bass sparkle) |
@@ -275,9 +288,10 @@ old `.lxp` `hglht`/enum-speed values drop or restore oddly, accepted. Old
 an unknown-parameter warning for each.
 
 Pipe color (third pass — series house rules, no hue knob): full H/S/B
-straight from the palette swatch. With ≥3 entries, pipe i takes slot
-`(drainCount + i) % n` — each drain advances the rotation and concurrent
-pipes get distinct entries. A shorter swatch keeps its defined colors and
+straight from the palette swatch. Pipe i always wears slot `i % n` — so the
+look is **consistent across drains** (fifth pass: the per-drain slot rotation
+was retired by request; concurrent pipes still get distinct entries). A
+shorter swatch keeps its defined colors and
 fills the remainder with perceptually-even fully-saturated hues
 (`PerceptualHue.fillCircle`, the Rubik `computeFaceColors` template); an
 empty swatch degenerates to an even perceptual spread. The palette color's
@@ -306,9 +320,10 @@ stays):
   measured at trigger time to conclude **exactly on a beat**, between 0.5 and
   1.5 beats out (if the next beat is closer than half a beat, it targets the
   one after; a mid-drain BPM change drifts the conclusion — accepted). Then
-  the room clears, the pending density applies, the palette color advances,
-  and the **Pipes-knob count** of pipes respawns (caps stay phase-aligned to
-  the global tempo grid — a drain does not reset cap phase, fourth pass; the
+  the room clears, the pending density applies, and the **Pipes-knob count**
+  of pipes respawns in the **first palette colors** (fifth pass — consistent
+  every drain, no palette rotation; caps stay phase-aligned to the global
+  tempo grid — a drain does not reset cap phase, fourth pass; the
   knob is the single source of truth and never moves on
   its own — supersedes the round-1 "one pipe" behavior). Also fires
   automatically at >60% fill, if a teleport/spawn finds no free cell, or on
@@ -393,6 +408,7 @@ performance tempos.
 | 2026-07-05 | Fixed sparkle overlay self-occlusion; enforced ≥5 s traversal cap at all densities via `minSegMs` floor; added `audio` depth knob (default 0) wired through `AudioReactive.setDepth`; migrated tempo handling to shared `TempoLock` with `sync`/`tempoDiv`; removed `growthDiv`; added `Sparkle` manual trigger; corrected false door-column claim | Review session (Fable): bug fixes + series-convention upgrade |
 | 2026-07-05 | Integration pass: `TriggerBag.jumpable(DiscreteParameter, lo, hi)` subrange overload added; `tempoDiv` in the meta pool over SIXTEENTH..HALF; fixed a stale-gate nit (`crossed()` polled every frame) | Pipes3D agent's util request + series `crossed()` idiom |
 | 2026-07-06 | Series RndTrig ordering: `meta` → `rndTrig` (label RndTrig), moved from last to immediately after the plain triggers; `.lxp` values on the old `meta` path are dropped on load | Series convention: TriggerBag meta trigger sits right after the other trigger params |
+| 2026-07-06 (5th pass) | Live-curation round 5, from a screenshot. **Gap bug fixed**: the shaded rasterizer was a *scatter* (step the projected centerline, floor-round perpendicular pixel spans), which missed interior pixels on rotated diagonals — rewrote `rasterSegment`'s per-wall emission as a **gather** over destination LEDs: per pixel in the projected capsule's bounding box, evaluate the exact 2D point-to-segment distance for coverage and the signed cross-pipe parameter for shading. Gap-free by construction, and per-LED (the user's question — was per-model-point scattered, now per projected LED). **More AA**: coverage is a `clamp((r + AA_WIDTH/2 − dist)/AA_WIDTH)` ramp (`AA_WIDTH = 1.5` px) on silhouettes and the rounded capsule/disc end-caps (was a fixed 1 px). `stampDisc` rim switched to the same ramp; segment caps now rounded (joint balls cover the overlap). Fills moved from per-step to per-segment-midpoint (far lights, negligible variation). **Drain color reset**: `drainCount` removed — pipe i always wears palette slot i, so pipes come back in the same first-N colors every drain (per-drain rotation retired by request). CURATE: `AA_WIDTH`, fill-midpoint approx, gather frame-time | User live-curation notes (5th round): fix interior gaps, smoother edges, consistent drain colors |
 | 2026-07-06 (4th pass) | Live-curation round 4. **Lighting rig**: the Phong sun now rotates about Y (one revolution per 32 beats) together with two new corner fill point lights (`FILL_CORNERS`, `FILL_DIST = 3` half-extents, direction-only) — a third coordinate system beside the fixed walls and the RotX/RotY lattice; RstRot leaves the rig alone. **Full-surface Phong** replaces the 1 px stripe: per-pixel cylinder normals on pipe bodies and sphere normals on joints/end-caps, `AMBIENT = 0.15`, `KD_SUN = 0.65`, `KD_FILL = 0.30`, spec exponent 4 per pixel — tubes read as rounded, and coverage-based AA (widened spans/discs, lightest-blend rims without depth writes) removes projection jaggies. `Hglht` → **`Shaded`**: the flat↔phong mix and spec gain; **0 disables all shading processing** (flat fast path). **Planner** rebuilt Mystify-style: cap times are hard targets on the GLOBAL tempo grid (absolute-beat CapDiv multiples — the pattern-local epoch is gone; drains no longer reset cap phase); per-frame velocity is derived from remaining-distance/remaining-time (exact arrival, BPM-robust; the Speed knob no longer moves in-flight runs); one `scheduleCap` rule covers caps, spawns, teleports, pause-resume and clock jumps (nearest grid point to the ideal arrival, ≥0.5 divisions out, with a half-division escape when a whole division is ≥2× too slow — congestion degrades speed, never grid alignment). **Speed** back to continuous (0–64, exponent-3 knob); 0 still pauses. **CapDiv** ordered right after Speed. All lighting constants + escape thresholds `CURATE:` | User live-curation notes (4th round): rotate highlight source; phong-shade everything (AA + rounded pipes) with a corner-fill rig; CapDiv after Speed; Mystify-style grid-first planner |
 | 2026-07-06 (3rd pass) | Live-curation feedback round 3. **Params**: RstRot moved to sit right after RotX/RotY in the UI; `onBeats` relabeled **CapDiv** (key kept); `hue` REMOVED — color now follows the series palette house rules (full H/S/B from the swatch, `(drainCount + i)` slot rotation, `PerceptualHue.fillCircle` fill for short swatches per the Rubik template; retained geometry stores H/S/B, palette S/B respected under depth shading). **Hglht** knob added (0..1, default 0.5 = nominal): scales the Blinn-Phong gain, 0 skips the stripe pass; lobe exponent lowered 8 → 4 so most orientations show a highlight ("I only see some" fix). **Speed** → EnumParameter&lt;Rate&gt; over a 16-step geometric ladder 0–64 cells/beat: 0 PAUSES growth (heads + caps freeze; spawns park at infinite cap time); resume realigns every in-flight cap onto the CapDiv grid 0.5–1.5 divisions out via new `realignCaps` + stored `pGoal` run targets. **Audio**: bass hits flash a loudness-scaled number of recent caps (ring buffer 16 → 48, `1 + 47·min(1, 2·level)`); `audio.level` also boosts the specular gain (AUDIO_SPEC_BOOST = 1.5). Jump pool: −hue, +hglht, speed → ordinal 0.5..4 (PAUSE excluded) | User live-curation notes (3rd round); palette rules matched to Satori/Rubik/Terraform/Zot house idiom |
 | 2026-07-06 (2nd pass) | Live-curation feedback round. **Elbow distribution**: run length now uniform over 1..maxRun (was max-of-two long-biased, which compounded with the length-weighted direction pick and pushed all corners to the walls) — every free candidate cell is now an equally likely elbow target. **Disc joints**: square stamps → discs (`stampDisc`, +0.25 px rounding margin) for balls and end-on cross-sections — a sphere projects as a circle from any angle, so joints stay correct under rotation. **Thick**: range 1–6 px, cell-size clamp removed, and thickness reads the live knob at raster time (whole-model realtime; `segHalfPx`/`ballHalfPx` capture arrays deleted). **Pipes knob**: `newPipe` trigger → `pipes` DiscreteParameter (1–3) reconciled by `syncPipeCount()` via `onParameterChanged` — raising births a fresh pipe, lowering culls the oldest (birth-stamped in `spawnPipe`; teleports keep their stamp), capped where it stopped; drain now respawns the knob count (knob never moves on its own — supersedes round-1 "one pipe"). **Speed**: clamp removed (`speedEff()`/`TRAVERSAL_MIN_MS` deleted), range 0.25–16 cells/beat — the ≥5 s growth floor is explicitly retired; pace saturates at roomSize/OnBeats once runs fit one interval. Meta pool: −newPipe, +pipes(1..3) | User live-curation notes (2nd round) + decisions: drain respawns knob count; thickness unclamped |
