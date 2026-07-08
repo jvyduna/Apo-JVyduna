@@ -71,6 +71,13 @@ explicit approval. Never open PRs unless asked.**
 
 ### Local Mac sessions (Jeff's machine)
 
+- **Preferred norm (the review cycle):** every review-cycle turn of pattern-dev
+  work ends by merging that work back into `pattern-dev` (do this at turn end,
+  once the work is approved — don't leave it sitting as uncommitted edits), and
+  every subsequent turn begins by rebasing on the current `pattern-dev` head
+  before making new edits. So the loop is: rebase on `pattern-dev` → work →
+  merge into `pattern-dev` → (next turn) rebase again. The bullets below are the
+  mechanics of that loop.
 - Sessions develop in worktrees under `.claude/worktrees/` on
   `worktree-bridge-*` branches; the repo root stays on `main`.
 - **Minimal remote activity.** When a turn of improvements is done, merge it
