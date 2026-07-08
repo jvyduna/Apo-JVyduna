@@ -16,6 +16,21 @@ Monospaced bitmap fonts behind the `GlyphFont` interface (`util/`):
 | `ZX`   | 5×7  | Clean, thin, modern — Sinclair-ZX / classic dot-matrix |
 | `CRT`  | 6×7  | Chunky two-pixel strokes — early-computer / terminal ROM |
 | `7Seg` | 4×7  | Seven-segment "digital" — calculator / LED-clock look |
+| `File` | —    | An OTF/TTF/TTC loaded from disk (see below) |
+
+### OTF/TTF mode (`Font = File`)
+
+Pick a font with the **Font File...** button (or set `fontFile` to an absolute
+path; it serializes into the `.lxp`). Rendering uses headless-AWT
+(`util/OtfTypeface`): the file's main face is loaded with **kerning enabled**,
+each text block is rasterized once to a ~48px-per-line antialiased coverage
+bitmap (rebuilt only when text/path/spacing change), and LEDs bilinear-sample
+it — so edges are smooth and brightness carries the antialiasing. `charSpacing`
+is ignored in this mode (kerning governs); `scale`, `rotation`, offsets,
+`lineSpacing`, multi-line `\n`, and all projection/legibility params work
+unchanged. An unloadable path logs once and falls back to the 5px builtin.
+Tiny text (< ~8 LED px per line) looks better in the bitmap fonts — that's what
+they're for.
 
 All cover A–Z, 0–9, and `space # : - . /` (unknown chars → `?`). Each font class
 has a `main()` that dumps every glyph as ASCII (`BitmapFont.preview`) and asserts
@@ -30,15 +45,21 @@ A surface's exterior and interior are physically **distinct LED layers** that fa
 opposite ways (interior column *i* is co-located with exterior column *i* but
 points inward), so identical content reads **mirror-reversed** from the far side.
 
-- **`Auto`** (`autoProj`, on by default) — classifies each LED as interior or
-  exterior *from the model* (`Apotheneum.cube/cylinder.interior` collections, built
-  once, no render-loop cost) and applies one reflection to the interior layer's
-  sampling. The text block stays in the **same bounding box** on both layers, so it
-  reads correctly from **both** sides at once. Works whether the view is scoped to
-  exterior-only, interior-only, or spans both.
-- **`FlipProj`** (`flipProj`) — with Auto on, inverts which layer is treated as the
-  front-readable side (for a surface wired opposite expectation, or an audience
-  mostly on the inside). With Auto off, it manually mirrors the whole projection.
+**Guiding principle: the opposite faces of any given surface are ALWAYS reversed
+from each other**, so text is L-to-R legible from the majority of viewpoints both
+inside and outside each boundary.
+
+- **`Auto`** (`autoProj`, on by default) — derives each LED's **emission normal**
+  from the model (cube-face planes + cylinder column radials via
+  `Apotheneum.cube/cylinder`, built once, no render-loop cost). World-planar text
+  is legible only from one side of its plane (`N = up × h`); any LED layer facing
+  away from `N` gets one corrective reflection. Consequences: front-wall exterior
+  and back-wall *interior* render unmirrored while their opposite layers mirror;
+  the cylinder splits at the tangent columns so the half facing each audience
+  reads. The text block stays in the **same bounding box** on every layer. Works
+  on exterior-only, interior-only, and both-layer views.
+- **`FlipProj`** (`flipProj`) — with Auto on, inverts the auto decision everywhere
+  (global sign swap). With Auto off, it manually mirrors the whole projection.
 - **`FlipRead`** (`flipRead`) — reflects on the **vertical** axis instead of the
   horizontal. For 90°-rotated text (a word climbing bottom-to-top) the two axis
   choices differ by a 180° rotation, so this picks whether the facing projection
@@ -57,5 +78,6 @@ cylinder) for correct results — which is also where dual-layer legibility matt
 ## Parameters
 
 `text`, `scale`, `rotation`, `xOffset`/`yOffset`, `lineSpacing`/`charSpacing`,
-`hue`/`saturation`/`brightness`, plus `fontSel`, `flip`, `autoProj`, `flipProj`,
-`flipRead`. UI columns: Text (+ font) · Layout · Place · Proj · Color.
+`hue`/`saturation`/`brightness`, plus `fontSel`, `fontFile`, `flip`, `autoProj`,
+`flipProj`, `flipRead`. UI columns: Text (+ font + file picker) · Layout · Place ·
+Proj · Color.

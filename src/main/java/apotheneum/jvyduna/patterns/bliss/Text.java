@@ -5,8 +5,10 @@ import apotheneum.jvyduna.util.FontCrt;
 import apotheneum.jvyduna.util.FontSeg;
 import apotheneum.jvyduna.util.FontZx;
 import apotheneum.jvyduna.util.GlyphFont;
+import apotheneum.jvyduna.util.OtfTypeface;
 import apotheneum.jvyduna.util.PixelFont5;
 import apotheneum.jvyduna.util.PixelFont5Font;
+import heronarts.glx.ui.component.UIButton;
 import heronarts.glx.ui.component.UITextBox;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
@@ -42,25 +44,30 @@ import heronarts.lx.studio.ui.device.UIDeviceControls;
  *
  * A surface's interior and exterior are physically distinct LED layers that face
  * opposite ways, so identical content reads mirror-reversed from the far side.
- * {@code autoProj} (on by default) classifies each LED from the model
- * ({@link Apotheneum} interior collections) and mirrors the interior layer's
- * sampling so the same block reads correctly from BOTH sides at once; use it on a
- * single-surface (both-layer) view. {@code flipProj} inverts which layer is
- * canonical (or, with auto off, mirrors everything), and {@code flipRead} swaps
- * the mirror to the vertical axis so 90°-rotated text reads the intended
- * direction. The bitmap font is selectable via {@code fontSel}.
+ * {@code autoProj} (on by default) derives each LED's emission normal from the
+ * model ({@link Apotheneum} cube-face planes and cylinder column radials) and
+ * mirrors the sampling for any LED whose layer faces away from the text plane's
+ * readable side. Guiding principle: the opposite faces of any given surface are
+ * ALWAYS reversed from each other, so text reads L-to-R from the majority of
+ * viewpoints both inside and outside each boundary (both cube-wall layers, both
+ * cylinder layers, near and far halves alike). {@code flipProj} inverts the
+ * auto decision (or, with auto off, mirrors everything), and {@code flipRead}
+ * swaps the corrective mirror to the vertical axis so 90°-rotated text reads
+ * the intended direction. Bitmap font selectable via {@code fontSel}; an OTF/TTF
+ * file can be loaded from disk ({@code fontFile}) for kerned, antialiased text.
  */
 @LXCategory("Apotheneum/jvyduna")
 @LXComponent.Name("Text")
-@LXComponent.Description("Multi-line bitmap-font text with scale/rotation/translation and interior/exterior legibility; type \\n for line breaks")
+@LXComponent.Description("Multi-line text (bitmap fonts or an OTF/TTF file) with scale/rotation/translation and auto interior/exterior legibility; type \\n for line breaks")
 public class Text extends LXPattern implements UIDeviceControls<Text> {
 
-  /** Selectable bitmap fonts. Constant NAMES are the .lxp serialization key — keep stable. */
+  /** Selectable fonts. Constant NAMES are the .lxp serialization key — keep stable. */
   public enum Font {
     FIVE("5px", PixelFont5Font.INSTANCE),
     ZX("ZX", FontZx.INSTANCE),
     CRT("CRT", FontCrt.INSTANCE),
-    SEG("7Seg", FontSeg.INSTANCE);
+    SEG("7Seg", FontSeg.INSTANCE),
+    OTF("File", null);  // OTF/TTF from fontFile; falls back to 5px when unloadable
 
     public final String label;
     public final GlyphFont font;
@@ -123,11 +130,15 @@ public class Text extends LXPattern implements UIDeviceControls<Text> {
 
   public final EnumParameter<Font> fontSel =
     new EnumParameter<Font>("Font", Font.FIVE)
-    .setDescription("Bitmap font");
+    .setDescription("Font: builtin bitmap fonts, or File = OTF/TTF from fontFile");
+
+  public final StringParameter fontFile =
+    new StringParameter("FontFile", "")
+    .setDescription("Absolute path to an .otf/.ttf font file (used when Font = File)");
 
   public final BooleanParameter autoProj =
     new BooleanParameter("Auto", true)
-    .setDescription("Auto-mirror the interior LED layer so both sides read");
+    .setDescription("Mirror back-facing LED layers so text reads L-to-R from every viewpoint");
 
   public final BooleanParameter flipProj =
     new BooleanParameter("FlipProj", false)
@@ -137,13 +148,29 @@ public class Text extends LXPattern implements UIDeviceControls<Text> {
     new BooleanParameter("FlipRead", false)
     .setDescription("Mirror vertically instead of horizontally (reading direction for 90° text)");
 
-  /** Per-global-index interior-layer flags, built once from the model (no render-loop alloc). */
-  private boolean[] interior;
+  /**
+   * Per-global-index LED emission normals (x/z components; y is never a surface
+   * normal here), built once from the model (no render-loop alloc). Zero for
+   * points not on a known Apotheneum surface.
+   */
+  private float[] nx;
+  private float[] nz;
   private Object cachedCube;
   private Object cachedCylinder;
 
+  /** OTF raster state; rebuilt only when text/path/spacing change, never per frame. */
+  private final OtfTypeface otf = new OtfTypeface();
+  private String rasterText;
+  private String rasterPath;
+  private float rasterSpacing = Float.NaN;
+  private String failLogged;
+
   public Text(LX lx) {
     super(lx);
+    // Idempotent; installs the model listener that populates Apotheneum.cube /
+    // .cylinder. ApotheneumPattern subclasses do this too, but Text extends
+    // LXPattern directly, so nothing else guarantees it in a Text-only session.
+    Apotheneum.initialize(lx);
     addParameter("text", this.text);
     addParameter("scale", this.scale);
     addParameter("rotation", this.rotation);
@@ -156,46 +183,126 @@ public class Text extends LXPattern implements UIDeviceControls<Text> {
     addParameter("brightness", this.brightness);
     addParameter("flip", this.flip);
     addParameter("fontSel", this.fontSel);
+    addParameter("fontFile", this.fontFile);
     addParameter("autoProj", this.autoProj);
     addParameter("flipProj", this.flipProj);
     addParameter("flipRead", this.flipRead);
   }
 
   /**
-   * Build (or rebuild) the interior-layer lookup from the model's per-surface
-   * collections. Lazy because {@link Apotheneum}'s statics are populated by its
-   * own global LX listener, whose ordering vs. a pattern lifecycle hook isn't
-   * guaranteed. Rebuilds only when the model's cube/cylinder references change.
+   * Build (or rebuild) the per-LED emission-normal lookup from the model's
+   * per-surface collections. Cube wall normals are a fixed world axis with sign
+   * from the face plane vs. the cube center; cylinder normals are per-column
+   * radials; interior layers emit opposite their exterior twins. Lazy because
+   * {@link Apotheneum}'s statics are populated by its own global LX listener,
+   * whose ordering vs. a pattern lifecycle hook isn't guaranteed. Rebuilds only
+   * when the model's cube/cylinder references change.
    */
-  private void ensureInterior() {
-    if (this.interior != null
+  private void ensureNormals() {
+    if (this.nx != null
       && this.cachedCube == Apotheneum.cube
       && this.cachedCylinder == Apotheneum.cylinder) {
       return;
     }
-    this.interior = new boolean[getLX().getModel().size];
-    if (Apotheneum.exists && Apotheneum.hasInterior) {
-      if (Apotheneum.cube != null && Apotheneum.cube.interior != null) {
-        for (Apotheneum.Cube.Face face : Apotheneum.cube.interior.faces) {
-          markInterior(face.columns);
+    final int size = getLX().getModel().size;
+    this.nx = new float[size];
+    this.nz = new float[size];
+    if (Apotheneum.exists) {
+      if (Apotheneum.cube != null) {
+        float centerX = 0, centerZ = 0;
+        for (Apotheneum.Cube.Face face : Apotheneum.cube.exterior.faces) {
+          centerX += face.model.cx;
+          centerZ += face.model.cz;
+        }
+        centerX /= 4f;
+        centerZ /= 4f;
+        markCubeNormals(Apotheneum.cube.exterior, centerX, centerZ, 1f);
+        if (Apotheneum.cube.interior != null) {
+          markCubeNormals(Apotheneum.cube.interior, centerX, centerZ, -1f);
         }
       }
-      if (Apotheneum.cylinder != null && Apotheneum.cylinder.interior != null) {
-        markInterior(Apotheneum.cylinder.interior.columns);
+      if (Apotheneum.cylinder != null) {
+        float centerX = 0, centerZ = 0;
+        final Apotheneum.Column[] extColumns = Apotheneum.cylinder.exterior.columns;
+        for (Apotheneum.Column column : extColumns) {
+          centerX += column.model.cx;
+          centerZ += column.model.cz;
+        }
+        centerX /= extColumns.length;
+        centerZ /= extColumns.length;
+        markCylinderNormals(Apotheneum.cylinder.exterior, centerX, centerZ, 1f);
+        if (Apotheneum.cylinder.interior != null) {
+          markCylinderNormals(Apotheneum.cylinder.interior, centerX, centerZ, -1f);
+        }
       }
     }
     this.cachedCube = Apotheneum.cube;
     this.cachedCylinder = Apotheneum.cylinder;
   }
 
-  private void markInterior(Apotheneum.Column[] columns) {
-    for (Apotheneum.Column column : columns) {
-      for (LXPoint p : column.points) {
-        if (p.index < this.interior.length) {
-          this.interior[p.index] = true;
-        }
+  /** emit = +1 for the exterior layer (outward), -1 for interior (inward). */
+  private void markCubeNormals(Apotheneum.Cube.Orientation orientation,
+    float centerX, float centerZ, float emit) {
+    for (Apotheneum.Cube.Face face : orientation.faces) {
+      // The wall's normal axis is the degenerate (near-zero-range) one
+      final boolean xNormal = face.model.xRange < face.model.zRange;
+      final float fnx = xNormal ? (face.model.cx >= centerX ? emit : -emit) : 0f;
+      final float fnz = xNormal ? 0f : (face.model.cz >= centerZ ? emit : -emit);
+      for (Apotheneum.Column column : face.columns) {
+        setNormals(column, fnx, fnz);
       }
     }
+  }
+
+  private void markCylinderNormals(Apotheneum.Cylinder.Orientation orientation,
+    float centerX, float centerZ, float emit) {
+    for (Apotheneum.Column column : orientation.columns) {
+      float dx = column.model.cx - centerX;
+      float dz = column.model.cz - centerZ;
+      final float len = (float) Math.sqrt(dx * dx + dz * dz);
+      if (len > 0) {
+        dx /= len;
+        dz /= len;
+      }
+      setNormals(column, dx * emit, dz * emit);
+    }
+  }
+
+  private void setNormals(Apotheneum.Column column, float fnx, float fnz) {
+    for (LXPoint p : column.points) {
+      if (p.index < this.nx.length) {
+        this.nx[p.index] = fnx;
+        this.nz[p.index] = fnz;
+      }
+    }
+  }
+
+  /**
+   * Load the OTF/TTF file and (re)build its coverage raster when the text,
+   * path, or line spacing changed. Per-frame cost when nothing changed is a
+   * couple of string equals — no allocation. Returns whether a raster is ready.
+   */
+  private boolean prepareOtf(String raw) {
+    final String path = this.fontFile.getString();
+    if (!this.otf.load(path)) {
+      if (path != null && !path.isEmpty() && !path.equals(this.failLogged)) {
+        LX.error("Text: could not load font file: " + path);
+        this.failLogged = path;
+      }
+      this.rasterText = null;
+      return false;
+    }
+    // Quantized so a modulated lineSpacing doesn't rebuild the raster every frame
+    final float spacing = Math.round(this.lineSpacing.getValuef() * 4f) * 0.25f;
+    if (!raw.equals(this.rasterText) || !path.equals(this.rasterPath)
+      || spacing != this.rasterSpacing) {
+      this.rasterText = raw;
+      this.rasterPath = path;
+      this.rasterSpacing = spacing;
+      // lineSpacing knob is in 5px-font pixels; one such pixel = lineHeight/5
+      this.otf.render(raw.replace("\\n", "\n").split("\n", -1), spacing / 5f);
+    }
+    return this.otf.hasRaster();
   }
 
   @Override
@@ -207,10 +314,15 @@ public class Text extends LXPattern implements UIDeviceControls<Text> {
     }
     final String[] lines = raw.replace("\\n", "\n").split("\n", -1);
 
-    ensureInterior();
-    final GlyphFont glyphFont = this.fontSel.getEnum().font;
-    final int FW = glyphFont.width();
-    final int FH = glyphFont.height();
+    ensureNormals();
+
+    // OTF mode samples a kerned, antialiased raster; builtins sample a glyph
+    // grid. OTF falls back to the 5px builtin when no font file is loaded.
+    final boolean otfMode = (this.fontSel.getEnum() == Font.OTF) && prepareOtf(raw);
+    final GlyphFont glyphFont = otfMode ? null
+      : (this.fontSel.getEnum().font != null) ? this.fontSel.getEnum().font : PixelFont5Font.INSTANCE;
+    final int FW = otfMode ? 0 : glyphFont.width();
+    final int FH = otfMode ? 0 : glyphFont.height();
 
     final float vRange = this.model.yRange;
     final boolean useX = this.model.xRange >= this.model.zRange;
@@ -218,21 +330,26 @@ public class Text extends LXPattern implements UIDeviceControls<Text> {
     final float hMin = useX ? this.model.xMin : this.model.zMin;
     final float vMin = this.model.yMin;
 
-    final float em = this.scale.getValuef() * vRange / FH;
+    // em = world units per font/raster pixel; scale = one line height as a
+    // fraction of the view height in both modes
+    final float em = this.scale.getValuef() * vRange
+      / (otfMode ? this.otf.lineHeight() : FH);
     if (em <= 0 || vRange <= 0) {
       setColors(LXColor.BLACK);
       return;
     }
 
-    final float cellW = FW + this.charSpacing.getValuef();
-    final float lineH = FH + this.lineSpacing.getValuef();
+    final float cellW = otfMode ? 1f : FW + this.charSpacing.getValuef();
+    final float lineH = otfMode ? 1f : FH + this.lineSpacing.getValuef();
     int maxLen = 0;
     for (String ln : lines) {
       maxLen = Math.max(maxLen, ln.length());
     }
     final int nLines = lines.length;
-    final float wEm = (maxLen > 0) ? (maxLen * cellW - this.charSpacing.getValuef()) : 0;
-    final float hEm = nLines * lineH - this.lineSpacing.getValuef();
+    final float wEm = otfMode ? this.otf.width()
+      : (maxLen > 0) ? (maxLen * cellW - this.charSpacing.getValuef()) : 0;
+    final float hEm = otfMode ? this.otf.height()
+      : nLines * lineH - this.lineSpacing.getValuef();
 
     final float anchorH = hMin + this.xOffset.getValuef() * hRange;
     final float anchorV = vMin + this.yOffset.getValuef() * vRange;
@@ -244,18 +361,25 @@ public class Text extends LXPattern implements UIDeviceControls<Text> {
     final boolean autoOn = this.autoProj.isOn();
     final boolean flipProjOn = this.flipProj.isOn();
     final boolean flipReadOn = this.flipRead.isOn();
-    final boolean[] interiorFlags = this.interior;
+    final float[] nxArr = this.nx;
+    final float[] nzArr = this.nz;
 
     final int color = LXColor.hsb(
       this.hue.getValue(), this.saturation.getValue(), this.brightness.getValue());
 
     for (LXPoint p : this.model.points) {
-      // A back-facing (interior) layer reads mirror-reversed; correct it with one
-      // reflection taken about the text anchor (not the model center) so the block
-      // stays co-located on both layers. flipRead picks the vertical axis instead,
-      // which for rotated text flips the reading direction (they differ by 180°).
-      final boolean interiorPt = (p.index < interiorFlags.length) && interiorFlags[p.index];
-      final boolean mirrorThis = autoOn ? (interiorPt ^ flipProjOn) : flipProjOn;
+      // World-planar text with +h rightward is legible only from the side its
+      // readable normal N = up x h points to (h=+X -> N=-Z; h=+Z -> N=+X, anchored
+      // empirically by exterior column order reading L-to-R from outside). Any LED
+      // layer emitting away from N shows mirrored text to its own viewers, so give
+      // it one corrective reflection, taken about the text anchor (not the model
+      // center) so the block stays co-located on both layers. Opposite layers have
+      // opposite normals, so the two faces of a surface are always mutually
+      // reversed. flipRead picks the vertical axis instead, which for rotated text
+      // flips the reading direction (the two axes differ by 180°).
+      final boolean mirrorAuto = (p.index < nzArr.length)
+        && (useX ? (nzArr[p.index] > 0f) : (nxArr[p.index] < 0f));
+      final boolean mirrorThis = autoOn ? (mirrorAuto ^ flipProjOn) : flipProjOn;
       final boolean hRef = flipOn ^ (mirrorThis && !flipReadOn);
       final boolean vRef = mirrorThis && flipReadOn;
       final float hWorld = useX ? p.x : p.z;
@@ -274,6 +398,12 @@ public class Text extends LXPattern implements UIDeviceControls<Text> {
       final float by = vDown + hEm / 2f;
       if (bx < 0 || bx >= wEm || by < 0 || by >= hEm) {
         this.colors[p.index] = LXColor.BLACK;
+        continue;
+      }
+      if (otfMode) {
+        final float cov = this.otf.sample(bx, by);
+        this.colors[p.index] =
+          (cov <= 0f) ? LXColor.BLACK : LXColor.lerp(LXColor.BLACK, color, cov);
         continue;
       }
       final int line = (int) (by / lineH);
@@ -299,7 +429,22 @@ public class Text extends LXPattern implements UIDeviceControls<Text> {
     uiDevice.setLayout(UIDevice.Layout.HORIZONTAL, 4);
     addColumn(uiDevice, 130, "Text (\\n = line break)",
       new UITextBox(0, 0, 130, 16, pattern.text).setEmptyValueAllowed(true),
-      newDropMenu(pattern.fontSel, 130)
+      newDropMenu(pattern.fontSel, 130),
+      new UIButton.Action(130, 16, "Font File...") {
+        @Override
+        public void onClick() {
+          ui.lx.showOpenFileDialog(
+            "Open Font",
+            "Font File",
+            new String[] { "otf", "ttf", "ttc" },
+            null,
+            (path) -> {
+              pattern.fontFile.setValue(path);
+              pattern.fontSel.setValue(Font.OTF);
+            }
+          );
+        }
+      }
     ).setChildSpacing(6);
     addVerticalBreak(ui, uiDevice);
     addColumn(uiDevice, "Layout",
