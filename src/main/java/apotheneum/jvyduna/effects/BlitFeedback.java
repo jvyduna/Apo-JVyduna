@@ -97,7 +97,7 @@ public class BlitFeedback extends ApotheneumEffect {
   public final BooleanParameter randomGate =
     new BooleanParameter("Random", false)
     .setMode(BooleanParameter.Mode.MOMENTARY)
-    .setDescription("Hold to blit with randomized shape/motion/surface params from a high-contrast source region; release restores your settings");
+    .setDescription("Hold to blit with randomized shape/motion params on two random surfaces, sourced from a high-contrast region; release restores your settings");
 
   public final EnumParameter<Tempo.Division> tempoDiv =
     new EnumParameter<Tempo.Division>("Tempo", Tempo.Division.SIXTEENTH)
@@ -204,6 +204,10 @@ public class BlitFeedback extends ApotheneumEffect {
     private Apotheneum.Orientation orientation;
     private double cx, cy;
 
+    // While the Random gate is held, only flagged layers receive new stamps.
+    // Compositing is untouched, so other surfaces keep showing their ghosts.
+    private boolean randTarget;
+
     private Layer(int width, int height, double srcXOffset, BooleanParameter surface) {
       this.width = width;
       this.height = height;
@@ -296,12 +300,12 @@ public class BlitFeedback extends ApotheneumEffect {
     addParameter("cylExt", this.cylExt);
     addParameter("cylInt", this.cylInt);
 
-    // Params the Random gate stashes, randomizes, and restores. Surfaces are
-    // last so restore() also brings back exactly which surfaces were enabled.
+    // Params the Random gate stashes, randomizes, and restores. The surface
+    // toggles are NOT touched: Random restricts stamping via Layer.randTarget,
+    // so a held Random never mutes other surfaces' existing content.
     this.randTargets = new LXListenableNormalizedParameter[] {
       this.sampleSrc, this.shape, this.size, this.aspRatio, this.blitAng,
-      this.sourceX, this.sourceY, this.angle, this.step, this.border,
-      this.cubeExt, this.cubeInt, this.cylExt, this.cylInt
+      this.sourceX, this.sourceY, this.angle, this.step, this.border
     };
     this.randStash = new double[this.randTargets.length];
   }
@@ -311,6 +315,7 @@ public class BlitFeedback extends ApotheneumEffect {
     super.onEnable();
     for (Layer layer : this.layers) {
       Arrays.fill(layer.buf, 0);
+      layer.randTarget = false;
     }
     this.prevGate = false;
     this.prevRandGate = false;
@@ -363,7 +368,9 @@ public class BlitFeedback extends ApotheneumEffect {
     if (gate && (rising || tick)) {
       prepareTick();
       for (Layer layer : this.layers) {
-        if (layer.active()) {
+        // While Random is held, stamps land only on its chosen target layers;
+        // compositing below stays on for every active surface regardless.
+        if (layer.active() && (!randGate || layer.randTarget)) {
           blit(layer, blendFn, levelMask);
         }
       }
@@ -403,9 +410,9 @@ public class BlitFeedback extends ApotheneumEffect {
 
   /**
    * Randomize the visual params over their declared ranges (Size is
-   * lower-bounded at RAND_MIN_SIZE so the copy stays readable) and light two
-   * of the currently-available surfaces. Orientations are already refreshed
-   * for this frame, so "available" = layers with a non-null orientation.
+   * lower-bounded at RAND_MIN_SIZE so the copy stays readable) and flag two
+   * of the currently-active surfaces as stamp targets. Orientations are
+   * already refreshed for this frame, so "active" is current.
    * SrcX/SrcY are not uniform rolls: pickContrastSource() aims them at a
    * high-contrast region of the live frame on the chosen surfaces.
    */
@@ -420,12 +427,14 @@ public class BlitFeedback extends ApotheneumEffect {
     randCompound(this.step);
     this.border.setValue(true); // always outline random copies (debug aid, for now)
 
-    // Collect available surfaces, turn all off, then partial Fisher-Yates to
-    // switch exactly min(2, available) distinct ones back on.
+    // Restrict new stamps to min(2, active) surfaces via partial Fisher-Yates
+    // over the currently-active layers. Only Layer.randTarget is set — the
+    // surface toggle parameters stay untouched, so the non-chosen surfaces
+    // keep compositing their existing ghosts while Random is held.
     int n = 0;
     for (int k = 0; k < this.layers.length; ++k) {
-      this.layers[k].surface.setValue(false);
-      if (this.layers[k].orientation != null) {
+      this.layers[k].randTarget = false;
+      if (this.layers[k].active()) {
         this.availOrder[n++] = k;
       }
     }
@@ -435,7 +444,7 @@ public class BlitFeedback extends ApotheneumEffect {
       final int tmp = this.availOrder[p];
       this.availOrder[p] = this.availOrder[r];
       this.availOrder[r] = tmp;
-      this.layers[this.availOrder[p]].surface.setValue(true);
+      this.layers[this.availOrder[p]].randTarget = true;
     }
 
     // Aim the source at contrast, now that the active surfaces are known
@@ -444,7 +453,7 @@ public class BlitFeedback extends ApotheneumEffect {
 
   /**
    * Contrast-guided SrcX/SrcY. Scans every pixel of the live frame on the
-   * active surfaces (~18K worst case, event-rate only), accumulating integer
+   * chosen stamp-target surfaces (~18K worst case, event-rate only), accumulating integer
    * luma sum/sum-of-squares per zone of a ZONES_X x ZONES_Y grid laid out in
    * normalized source space — so one zone means the same SrcX/SrcY on every
    * surface. Each zone is scored by luma variance, then the source lands at
@@ -458,7 +467,8 @@ public class BlitFeedback extends ApotheneumEffect {
     Arrays.fill(this.zoneCount, 0);
 
     for (Layer layer : this.layers) {
-      if (!layer.active()) {
+      // Scan only the chosen stamp targets — that's where sampling will happen
+      if (!layer.active() || !layer.randTarget) {
         continue;
       }
       final Apotheneum.Column[] cols = layer.orientation.columns();
