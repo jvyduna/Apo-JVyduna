@@ -11,13 +11,14 @@ accumulated copies to transparent over one **Fade** division.
 A second momentary gate, **Random**, is a live "surprise me": on press it
 stashes the current control values, randomizes the visual params (SampleSrc,
 Shape, AspRatio, BlitAng, Angle, Step; Size over [0.25, 1] — the lower bound
-keeps the copy readable), and lights two of the available surfaces at random,
-then blits exactly like **On**. Border is currently forced on for random
+keeps the copy readable), then blits exactly like **On** but restricted to
+two of the currently-active surfaces, chosen at random. The restriction is a
+per-layer stamp flag (`Layer.randTarget`), NOT the surface toggle params —
+compositing stays governed by the user's toggles, so a held Random never
+mutes the other surfaces' existing ghosts (an earlier version flipped the
+toggles and did exactly that). Border is currently forced on for random
 copies as a debug aid. On release it restores every stashed value, so
-repeated presses never drift from the pre-press baseline. Restore fires on
-the release edge; with the default all-surfaces-on config the two random
-surfaces are back in the active set, so their ghosts fade out normally over
-**Fade**.
+repeated presses never drift from the pre-press baseline.
 
 SrcX/SrcY are not uniform rolls — the press aims them at contrast. The live
 frame on the two chosen surfaces is scanned (every pixel, ~18K worst case,

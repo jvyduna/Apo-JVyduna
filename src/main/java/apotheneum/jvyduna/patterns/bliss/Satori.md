@@ -151,7 +151,8 @@ floored at `MIN_MORPH_MS = 250` CURATE so extreme tempi don't strobe). No
   Escape hatch (not shipped): rebuild `bandPos` from `round(bandsEff)` each morph
   frame (≤16 iters, zero alloc) to erase that pop.
 
-(`TempoLock` itself remains in the util package; other patterns use it.)
+Otherwise no tempo gating — all timing free-runs (Sync/TempoDiv/Meta convention
+retired 2026-07-08).
 
 ## Energy mapping
 
@@ -163,15 +164,13 @@ inline).
 
 ## Parameters
 
-UI order (2026-07-06 series convention): triggers first with RndTrig
-immediately after them, then pattern parameters, Audio last.
+UI order: triggers first, then pattern parameters, Audio last.
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
 | `newField` | NewField | TriggerParameter | — | — | reseed centers/seeds, keep the current variant |
 | `reverse` | Reverse | TriggerParameter | — | — | flip the color-cycle direction |
 | `pulse` | Pulse | TriggerParameter | — | — | launch the radial phase pulse manually (full strength) |
-| `rndTrig` | RndTrig | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
 | `fieldMode` | Field | EnumParameter&lt;FieldMode&gt; | INTERFERENCE | 4 variants | static phase-field variant |
 | `speed` | Speed | CompoundParameter (%) | 1 (100%) | 0..2 | cycle rate: 0% pauses, 100% = 8s/cycle, 200% = 4s |
 | `width` | Width | CompoundParameter | 5 | 1..6 | band width: higher = wider bands, fewer repeats (`cycles = 7 − width`) |
@@ -181,7 +180,8 @@ immediately after them, then pattern parameters, Audio last.
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth: 0 = pure screensaver, 1 = full |
 
 Renames/removals (2026-07-06): `energy`, `sync`, `tempoDiv` removed;
-`spread` → `width` (action reversed); `meta` → `rndTrig`.
+`spread` → `width` (action reversed); `meta` → `rndTrig`. Removal (2026-07-08):
+`rndTrig` dropped with the TriggerBag convention.
 Renames (2026-07-07): old `smooth`/"Smooth" band-edge interpolation → `rnbwSm`/
 "RnbwSm"; the freed key `smooth` is reused for the **new** Smooth (temporal +
 linear-RGB AA), so `.lxp` automation on `smooth` now drives the new param and
@@ -190,7 +190,7 @@ modulation/automation bound to the old keys must be re-bound.
 
 ## Triggers
 
-Three non-RndTrig triggers spanning small → large:
+Three triggers spanning small → large:
 
 - `reverse` (small) — band motion direction flips. Takes a few seconds to
   read at ambient rates (bands visibly change travel direction);
@@ -204,19 +204,6 @@ Three non-RndTrig triggers spanning small → large:
   centers, wavelengths, arms, folds) in the current variant. Reads instantly
   as a scene change; the ongoing color rotation resumes over the new
   geometry, so it settles within one perceptual beat.
-
-## Jump candidates
-
-Rows mirror the `bag.jumpable(...)` lines in the constructor 1:1. Status is
-updated during curation. (`newField`, `reverse` and `pulse` are also
-registered into the bag as triggers.)
-
-| Param | Jump range | Status | Notes |
-|---|---|---|---|
-| `fieldMode` | all 4 variants | candidate | variant swap without reseeding — A/B on one layout |
-| `speed` | 0.5..1.5 | candidate | curated subrange; avoids jumping to a frozen pattern |
-| `width` | 1..6 (full) | candidate | CURATE: width 1 (6 cycles) with 16 bands may be too fine (see compliance) |
-| `posterize` | 2..16 (full) | candidate | 2 = duotone slabs, 16 = near-smooth gradient |
 
 ## Simulation-principles compliance
 
@@ -267,3 +254,4 @@ trim on the physical LEDs is still unverified.
 | 2026-07-06 | Series RndTrig ordering: `rndTrig` moved from last to 4th, immediately after the three triggers (no rename needed — already RndTrig) | Jeff 2026-07-06: TriggerBag meta trigger sits right after the other trigger params in every pattern |
 | 2026-07-06 | Series RndTrig ordering: `rndTrig` moved from last to 4th, immediately after the three triggers (already named RndTrig) | Series convention: TriggerBag meta trigger sits right after the other trigger params |
 | 2026-07-07 | Revision pass (R1–R4): (R1) old `smooth`/"Smooth" → `rnbwSm`/"RnbwSm" (rainbow/hue-path band-edge smoothstep, behavior unchanged); (R2) new `smooth`/"Smooth" (default 0) softens motion/transitions via a per-pixel temporal color low-pass (`prevColor` EMA, `TAU_MS = 300` CURATE) plus a linear-RGB low-hue-shift edge anti-alias; (R3) `Field`/`Bands` changes now **morph over one beat** with an ease-out-cubic (decelerating) curve — `fieldOld` snapshot lerps per pixel, band count eases, beat length from `tempo.period` floored at `MIN_MORPH_MS = 250` CURATE, color-count mismatch handled as in-place nucleation along field iso-lines; (R4) band→LUT-position table makes bands land on **exact palette colors** (`Bands ≤ n` → first N palette colors; `Bands > n` → all palette colors anchored + interpolated fillers), fixing the bug where e.g. `Bands = 2` at max `Width` showed palette midtones instead of `palette[0]`/`palette[1]`. CURATE: `TAU_MS`, `MIN_MORPH_MS`, the ease-out exponent, and the bands-morph settle-pop (ship option 1) unverified on sculpture; R4 changes the shipped default look at `Bands = 6` (now exact palette anchors) | Jeff's revision notes: free "Smooth" for a motion/transition smoother, morph field/bands transitions on the beat, and make low band counts use the palette's first colors exactly |
+| 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path). For Satori this meant dropping `rndTrig` (the renamed Meta) and its TriggerBag/jump-candidate machinery — `sync`/`tempoDiv`/TempoLock were already removed 2026-07-06; the one-beat Field/Bands morph (plain `tempo.period` read) is unaffected | Jeff retired the project-wide Sync/TempoDiv + Meta pattern-control convention |

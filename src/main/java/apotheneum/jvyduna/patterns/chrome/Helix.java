@@ -8,90 +8,71 @@ import apotheneum.ApotheneumPattern;
 import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.Ranges;
 import apotheneum.jvyduna.util.SurfaceCanvas;
-import apotheneum.jvyduna.util.TempoLock;
-import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
-import heronarts.lx.Tempo;
+import heronarts.lx.LXLayer;
 import heronarts.lx.color.LXColor;
 import heronarts.lx.color.LXDynamicColor;
-import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundParameter;
-import heronarts.lx.parameter.EnumParameter;
-import heronarts.lx.parameter.TriggerParameter;
 
 /**
- * Chrome Country finale centerpiece (~4:05): a lightning strike to earth (echoing
- * the Zot vocabulary) opening into a white DNA-like double-helix ascension that
- * twists UP the cylinder, ringed by a counter-rotating parallax starfield. Bright
- * pulses ride up the strands; as the held note sustains, the two strands UNSTRAND
- * (separate vertically) while the twist tightens, and an XOR-blended copy of the
- * strands is mixed in to develop an interference MOIRE.
+ * Chrome Country centerpiece: a triple-helix ascension twisting UP the cylinder,
+ * ringed by a counter-rotating parallax starfield, with bright pulses riding the
+ * strands and a swarm of electrons spiralling up the strand paths. As the held
+ * note sustains the strands UNSTRAND (fan apart in angle and slide apart
+ * vertically) while the twist tightens, and an XOR-blended copy develops an
+ * interference MOIRE.
  *
- * The two strands are drawn directly in cylindrical-unwrap space: a canvas column
- * IS the angular position around the ring, so a strand that advances Twist full
- * turns from bottom to top is a physically correct spiral. Two strands a half-turn
- * apart form the double helix. "Ascension" is the whole winding rotating slowly
- * around the ring over time (spin), capped so one full turn always takes >= 5 s.
+ * The strands are drawn directly in cylindrical-unwrap space: a canvas column IS
+ * the angular position around the ring, so a strand that advances Twist full
+ * turns from bottom to top is a physically correct spiral. All three strands
+ * coincide exactly when Unstrnd = 0 and fan into an evenly-spaced trefoil as it
+ * rises. "Ascension" is the whole winding rotating slowly around the ring over
+ * time (spin); signed Climb sets both the rate and the direction.
  *
- * The moire copy is drawn into a separate scratch canvas with MAX blending, then
- * XOR-composited onto the main canvas — the classic interference look, without the
- * self-cancellation a directly-XORed overlapping polyline would suffer.
+ * Cylinder-only. The interior mirrors the exterior (copyCylinderExterior) so the
+ * audience standing inside is enclosed by the ascension.
  *
- * Cylinder-primary; the cube ring is an optional secondary echo (Cube). Interiors
- * mirror their exteriors (copyCylinderExterior / copyCubeExterior) so the audience
- * standing inside is enclosed by the ascension.
- *
- * This is a beatless song (see chrome-brief.md): the Sync/TempoDiv pair is present
- * per series convention but is intended OFF here — the pattern is envelope- and
- * Audio-driven, and free-running is its native mode.
+ * Beatless song (see chrome-brief.md): envelope- and Audio-driven; all timing
+ * free-runs. The electron swarm uses the LXLayer-per-entity idiom (one Electron
+ * layer each), composited in afterLayers().
  *
  * See Helix.md (beside this file) for the full design note.
  */
 @LXCategory("Apotheneum/jvyduna")
 @LXComponent.Name("Helix")
-@LXComponent.Description("Chrome finale: a lightning strike to earth opening into a white double-helix ascension up the cylinder, ringed by a counter-rotating parallax starfield, with pulses riding the strands, unstranding separation, tightening twist and an XOR moire")
+@LXComponent.Description("Chrome: a triple-helix ascension up the cylinder, ringed by a counter-rotating parallax starfield, with pulses riding the strands, an electron swarm spiralling up them, unstranding separation, tightening twist and an XOR moire")
 public class Helix extends ApotheneumPattern {
 
   // ---- Structural maxima (all state preallocated at these sizes) --------------
 
-  private static final int STRAND_COUNT = 2;
+  private static final int STRAND_COUNT = 3;
   private static final int MAX_PULSES = 24;
   private static final int MAX_STARS = 160;
-  /** Bolt column samples along the normalized height (top -> ground) */
-  private static final int BOLT_SAMPLES = 64;
+  private static final int MAX_ELECTRONS = 48;
   /** Upper bound on helix draw sub-steps per strand per frame */
   private static final int MAX_HELIX_STEPS = 6000;
 
   // ---- Motion caps / envelope constants ---------------------------------------
 
-  /** Helix spin (ascension twist) in turns/sec: ambient (e=0) .. peak (e=1).
-   *  Peak 0.12 turns/s -> one full ring turn in 8.3 s; the Climb multiplier
-   *  (<= 1.5) tops out at 0.18 turns/s = 5.5 s/turn, still >= the 5 s cap. */
+  /** Helix spin (ascension twist) in turns/sec: ambient (Speed=0) .. peak (=1),
+   *  before the signed Climb multiplier. Climb's wide/signed range intentionally
+   *  relaxes the >=5s traversal cap (Chrome is the per-song tempo outlier). */
   private static final double SPIN_TURNS_AMBIENT = 0.03;
   private static final double SPIN_TURNS_PEAK = 0.12;
 
-  /** Pulse travel speed in normalized-height/sec: ambient .. peak. Peak 0.18
-   *  -> a pulse crosses the full height in 5.5 s (>= the 5 s cap). */
-  private static final double PULSE_SPEED_AMBIENT = 0.11;
-  private static final double PULSE_SPEED_PEAK = 0.18;
+  /** Pulse travel speed in normalized-height/sec at PlsSpd 0 .. 1. CURATE. */
+  private static final double PULSE_SPEED_MIN = 0.05;
+  private static final double PULSE_SPEED_MAX = 0.50;
 
-  /** Nearest-star counter-rotation in turns/sec: ambient .. peak. Peak 0.13
-   *  -> 7.7 s for the nearest layer to sweep the ring (>= 5 s). */
+  /** Nearest-star counter-rotation in turns/sec: ambient .. peak. */
   private static final double STAR_TURNS_AMBIENT = 0.06;
   private static final double STAR_TURNS_PEAK = 0.13;
 
   /** Auto-pulse spacing (ms) at Pulses = 0 (sparse) .. 1 (dense) */
   private static final double PULSE_INTERVAL_SPARSE_MS = 2000;
   private static final double PULSE_INTERVAL_DENSE_MS = 450;
-
-  /** Lightning strike total visual life and initial full-bright flash (ms).
-   *  Life >= 1.5 s satisfies the event-like-motion minimum. */
-  private static final double BOLT_LIFE_MS = 1600;
-  private static final double BOLT_FLASH_MS = 140;
-  /** Random-walk jaggedness of the descending bolt (normalized column units) */
-  private static final double BOLT_JAG = 0.06;
 
   /** Max vertical HALF-separation each strand slides at Unstrnd = 1 (normalized
    *  height); total opened gap is twice this. */
@@ -110,43 +91,47 @@ public class Helix extends ApotheneumPattern {
   /** Treble star twinkle depth */
   private static final double TREBLE_TWINKLE = 0.5;
 
-  /** Deep-red fallback when the palette swatch is empty (CURATE: picked blind) */
-  private static final int FALLBACK_RED = LXColor.hsb(0, 90, 100);
+  /** Floor on the live beat period (ms) for the electron death timer */
+  private static final double MIN_BEAT_MS = 50;
+
+  // ---- Electron swarm tunables (CURATE: first-guess screensaver values) -------
+
+  private static final double ELECTRON_BIRTH_PER_SEC_MAX = 12;
+  private static final double ELECTRON_CLIMB_MIN = 0.08; // norm-height/sec
+  private static final double ELECTRON_CLIMB_MAX = 0.35;
+  private static final double ELECTRON_ORBIT_MIN = 1.5;  // rad/sec
+  private static final double ELECTRON_ORBIT_MAX = 4.0;
+  private static final double ELECTRON_ORBIT_AMP = 3.0;  // columns
+  private static final double ELECTRON_ORBIT_BOB = 0.02; // normalized height
+  private static final double ELECTRON_RADIUS = 1.0;     // raster px
+  /** Fade time-constant, in beats, toward the Electro target (death within ~1 beat) */
+  private static final double ELECTRON_FADE_BEATS = 0.4;
+  private static final double ELECTRON_DEATH_EPS = 0.03;
+
+  /** Fallbacks when the palette swatch is short (CURATE: picked blind) */
+  private static final int FALLBACK_STRAND = LXColor.hsb(0, 90, 100);   // deep red
+  private static final int FALLBACK_ELECTRON = LXColor.hsb(190, 80, 100); // cyan
 
   // ---- Parameters -------------------------------------------------------------
 
-  private final TriggerBag bag = new TriggerBag("Helix");
   private final AudioReactive audio;
-  private final TempoLock tempoLock;
   private final Random random = new Random();
 
-  public final TriggerParameter pulse = bag.register(
-    new TriggerParameter("Pulse", this::firePulse)
-    .setDescription("Inject one bright pulse riding up each strand from the base"));
-
-  public final TriggerParameter reverse = bag.register(
-    new TriggerParameter("Reverse", this::reverse)
-    .setDescription("Reverse the ascension twist direction of the helix"));
-
-  public final TriggerParameter strike = bag.register(
-    new TriggerParameter("Strike", this::strike)
-    .setDescription("Fire a white lightning bolt to earth — the finale-ignition event"));
-
-  public final CompoundParameter energy =
-    new CompoundParameter("Energy", 0.35)
-    .setDescription("Master energy: scales ascension/pulse/star speed within the >=5s traversal cap");
+  public final CompoundParameter speed =
+    new CompoundParameter("Speed", 0.35)
+    .setDescription("Master rate for the ascension spin and star drift");
 
   public final CompoundParameter climb =
-    new CompoundParameter("Climb", 1.0, 0, 1.5)
-    .setDescription("Ascension twist-rate multiplier (helix rotation around the ring over time)");
+    new CompoundParameter("Climb", 1.0, -5, 5)
+    .setDescription("Signed ascension twist-rate: sign sets direction, magnitude the rate (wide; cap relaxed)");
 
   public final CompoundParameter twist =
-    new CompoundParameter("Twist", 3.0, 0.5, 8)
-    .setDescription("Helix tightness: whole turns each strand winds around the ring over the full height");
+    new CompoundParameter("Twist", 3.0, 0, 8)
+    .setDescription("Helix tightness: whole turns each strand winds around the ring (0 = vertical)");
 
   public final CompoundParameter unstrand =
     new CompoundParameter("Unstrnd", 0)
-    .setDescription("Strand separation: 0 = paired double helix, 1 = strands slid fully apart (twist also tightens)");
+    .setDescription("Strand separation: 0 = all three converged, 1 = fanned into a trefoil and slid apart");
 
   public final CompoundParameter moire =
     new CompoundParameter("Moire", 0)
@@ -158,35 +143,31 @@ public class Helix extends ApotheneumPattern {
 
   public final CompoundParameter pulses =
     new CompoundParameter("Pulses", 0.5)
-    .setDescription("Auto-emitted pulse density riding the strands (free-running) or intensity on the grid (Sync)");
+    .setDescription("Auto-emitted pulse density (inverse spacing) riding the strands");
+
+  public final CompoundParameter plsSpd =
+    new CompoundParameter("PlsSpd", 0.4)
+    .setDescription("Pulse travel speed up the strands");
+
+  public final CompoundParameter electro =
+    new CompoundParameter("Electro", 0.3)
+    .setDescription("Electron swarm: 0 = all die within one beat, 1 = more, faster and brighter electrons spiralling up the strands");
 
   public final CompoundParameter thick =
     new CompoundParameter("Thick", 1.5, 1, 3)
     .setDescription("Strand stroke thickness in raster pixels");
 
-  public final BooleanParameter cube =
-    new BooleanParameter("Cube", false)
-    .setDescription("Also render the helix on the cube ring as a secondary echo (default cylinder-only)");
+  public final CompoundParameter desat =
+    new CompoundParameter("Desat", 0)
+    .setDescription("Desaturates the palette-sampled colors toward white; 0 = pure palette");
 
-  public final CompoundParameter hue =
-    new CompoundParameter("Hue", 0, 0, 360)
-    .setDescription("Rotates the palette-sampled colors (0 = pure project palette)");
+  public final CompoundParameter smooth =
+    new CompoundParameter("Smooth", 1.0)
+    .setDescription("Motion blending + antialiasing: 0 = steppy/pixel-snapped/hard edges, 1 = smooth sub-pixel motion and antialiased forms");
 
   public final CompoundParameter audioDepth =
     new CompoundParameter("Audio", 0)
     .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
-
-  public final BooleanParameter sync =
-    new BooleanParameter("Sync", true)
-    .setDescription("Lock pulse emission to the tempo grid; off restores free-running timing (this song is beatless — leave off)");
-
-  public final EnumParameter<Tempo.Division> tempoDiv =
-    new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.HALF)
-    .setDescription("Tempo division pulses emit on when Sync is enabled");
-
-  public final TriggerParameter meta =
-    new TriggerParameter("Meta", bag::fire)
-    .setDescription("Randomly fire one of Helix's triggers or jump a parameter");
 
   // ---- Canvases (preallocated) ------------------------------------------------
 
@@ -194,16 +175,11 @@ public class Helix extends ApotheneumPattern {
     new SurfaceCanvas(Apotheneum.Cylinder.Ring.LENGTH, Apotheneum.CYLINDER_HEIGHT); // 120x43
   private final SurfaceCanvas cylScratch =
     new SurfaceCanvas(Apotheneum.Cylinder.Ring.LENGTH, Apotheneum.CYLINDER_HEIGHT);
-  private final SurfaceCanvas cubeCanvas =
-    new SurfaceCanvas(Apotheneum.Cube.Ring.LENGTH, Apotheneum.GRID_HEIGHT); // 200x45
-  private final SurfaceCanvas cubeScratch =
-    new SurfaceCanvas(Apotheneum.Cube.Ring.LENGTH, Apotheneum.GRID_HEIGHT);
 
   // ---- Simulation state (all primitive / preallocated) ------------------------
 
   /** Accumulated helix spin in turns; drives the ascension twist over time */
   private double spin = 0;
-  private double spinDir = 1;
 
   /** Pulses: parallel arrays, t normalized 0 (base) .. 1 (top) along a strand */
   private final boolean[] pulseActive = new boolean[MAX_PULSES];
@@ -215,24 +191,26 @@ public class Helix extends ApotheneumPattern {
   private final double[] starV = new double[MAX_STARS];
   private final double[] starDepth = new double[MAX_STARS];
 
-  /** Lightning bolt: normalized column fraction along the height, plus envelope */
-  private final double[] boltCol = new double[BOLT_SAMPLES];
-  private double boltAgeMs = BOLT_LIFE_MS; // start inactive
-
   private double pulseTimerMs = 0;
+  private double electronTimerMs = 0;
+
+  /** Per-frame cached Smooth amount (AA / sub-pixel strength), set in render() */
+  private double smoothAmt = 1.0;
+
+  /** Audio bloom multiplier, stashed in render() for the afterLayers() blit */
+  private double bloom = 1;
 
   // ---- Palette cache (Satori-style change detection) --------------------------
 
-  private int cachedBase = 0;
-  private int cachedHueKey = Integer.MIN_VALUE;
-  private int strandArgb = FALLBACK_RED;
+  private int cachedHash = Integer.MIN_VALUE;
+  private int strandArgb = FALLBACK_STRAND;
   private int pulseArgb = 0xffffffff;
-  private int starArgb = FALLBACK_RED;
+  private int starArgb = FALLBACK_STRAND;
+  private int electronArgb = FALLBACK_ELECTRON;
 
   public Helix(LX lx) {
     super(lx);
     this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
-    this.tempoLock = new TempoLock(lx);
 
     // Seed the starfield once (event-rate init, not render-loop)
     for (int i = 0; i < MAX_STARS; ++i) {
@@ -240,53 +218,29 @@ public class Helix extends ApotheneumPattern {
       this.starV[i] = this.random.nextDouble();
       this.starDepth[i] = 0.25 + 0.75 * this.random.nextDouble();
     }
-    genBolt();
 
-    addParameter("pulse", this.pulse);
-    addParameter("reverse", this.reverse);
-    addParameter("strike", this.strike);
-    addParameter("energy", this.energy);
+    addParameter("speed", this.speed);
     addParameter("climb", this.climb);
     addParameter("twist", this.twist);
     addParameter("unstrand", this.unstrand);
     addParameter("moire", this.moire);
     addParameter("stars", this.stars);
     addParameter("pulses", this.pulses);
+    addParameter("plsSpd", this.plsSpd);
+    addParameter("electro", this.electro);
     addParameter("thick", this.thick);
-    addParameter("cube", this.cube);
-    addParameter("hue", this.hue);
+    addParameter("desat", this.desat);
+    addParameter("smooth", this.smooth);
     addParameter("audio", this.audioDepth);
-    addParameter("sync", this.sync);
-    addParameter("tempoDiv", this.tempoDiv);
-    addParameter("meta", this.meta);
-
-    // Meta jump candidates — mirrored 1:1 in the Jump candidates table in Helix.md
-    bag.jumpable(this.twist, 1, 6);
-    bag.jumpable(this.unstrand, 0, 1);
-    bag.jumpable(this.moire, 0, 0.7);
-    bag.jumpable(this.stars, 0.1, 0.8);
-    bag.jumpable(this.climb, 0.4, 1.3);
-    bag.jumpable(this.pulses, 0.2, 0.9);
   }
 
-  // ---- Trigger handlers -------------------------------------------------------
+  // ---- Pulse emission ---------------------------------------------------------
 
-  /** Small: one bright pulse released at the base of each strand */
+  /** One bright pulse released at the base of each strand */
   private void firePulse() {
-    spawnPulse(0);
-    spawnPulse(1);
-  }
-
-  /** Medium: flip the direction the helix twists as it ascends */
-  private void reverse() {
-    this.spinDir = -this.spinDir;
-  }
-
-  /** Large: fire the lightning bolt (regenerate geometry, reset envelope) */
-  private void strike() {
-    genBolt();
-    this.boltAgeMs = 0;
-    LX.log("Helix: strike");
+    for (int s = 0; s < STRAND_COUNT; ++s) {
+      spawnPulse(s);
+    }
   }
 
   private void spawnPulse(int strand) {
@@ -307,20 +261,6 @@ public class Helix extends ApotheneumPattern {
     this.pulseT[slot] = 0;
   }
 
-  /** Regenerate the descending bolt column profile (event-rate; writes in place) */
-  private void genBolt() {
-    final double start = 0.2 + this.random.nextDouble() * 0.6;
-    final double ground = 0.2 + this.random.nextDouble() * 0.6;
-    double c = start;
-    for (int i = 0; i < BOLT_SAMPLES; ++i) {
-      final double t = i / (double) (BOLT_SAMPLES - 1);
-      final double line = start + (ground - start) * t;
-      c += (this.random.nextDouble() - 0.5) * 2 * BOLT_JAG;
-      c += (line - c) * 0.15; // mean-revert toward the straight strike line
-      this.boltCol[i] = (c < 0) ? 0 : (c > 1) ? 1 : c;
-    }
-  }
-
   // ---- Render -----------------------------------------------------------------
 
   @Override
@@ -330,15 +270,17 @@ public class Helix extends ApotheneumPattern {
 
     updatePalette();
 
-    final double e = this.energy.getValue();
+    final double e = this.speed.getValue();
+    this.smoothAmt = this.smooth.getValue();
 
-    // Ascension twist: rotate the whole winding around the ring over time (capped)
+    // Ascension twist: signed Climb sets both rate and direction
     final double spinTurnsPerSec =
       this.climb.getValue() * Ranges.lin(e, SPIN_TURNS_AMBIENT, SPIN_TURNS_PEAK);
-    this.spin += this.spinDir * spinTurnsPerSec * deltaMs * 0.001;
+    this.spin += spinTurnsPerSec * deltaMs * 0.001;
 
-    // Pulses ride up the strands
-    final double pulseSpeed = Ranges.lin(e, PULSE_SPEED_AMBIENT, PULSE_SPEED_PEAK);
+    // Pulses ride up the strands at the dedicated PlsSpd rate
+    final double pulseSpeed =
+      Ranges.lin(this.plsSpd.getValue(), PULSE_SPEED_MIN, PULSE_SPEED_MAX);
     for (int i = 0; i < MAX_PULSES; ++i) {
       if (this.pulseActive[i]) {
         this.pulseT[i] += pulseSpeed * deltaMs * 0.001;
@@ -355,47 +297,36 @@ public class Helix extends ApotheneumPattern {
       this.starU[i] -= Math.floor(this.starU[i]);
     }
 
-    // Pulse emission: audio hits + auto (grid-gated when Sync, else free timer).
-    // crossed() is polled unconditionally every frame (see TempoLock javadoc).
-    final boolean crossed = this.tempoLock.crossed(this.tempoDiv.getEnum());
+    // Pulse emission: audio hits + a free-running density timer (Pulses = density)
     if (this.audio.bassHit()) {
       firePulse();
     }
     this.pulseTimerMs += deltaMs;
-    if (this.sync.isOn()) {
-      if (crossed) {
-        firePulse();
-      }
-    } else {
-      double interval = Ranges.lin(this.pulses.getValue(),
-        PULSE_INTERVAL_SPARSE_MS, PULSE_INTERVAL_DENSE_MS);
-      interval /= (1 + this.audio.level); // audio level thickens the stream
-      if (this.pulseTimerMs >= interval) {
-        this.pulseTimerMs = 0;
-        firePulse();
-      }
+    final double interval = Ranges.lin(this.pulses.getValue(),
+      PULSE_INTERVAL_SPARSE_MS, PULSE_INTERVAL_DENSE_MS);
+    if (this.pulseTimerMs >= interval) {
+      this.pulseTimerMs = 0;
+      firePulse();
     }
 
-    // Bolt envelope
-    if (this.boltAgeMs < BOLT_LIFE_MS) {
-      this.boltAgeMs += deltaMs;
-    }
+    // Electron births (the swarm itself is drawn by the Electron layers)
+    spawnElectrons(deltaMs);
 
-    // Exterior bloom on the finale swell (1.0 at silence)
-    final double bloom = 1 + LEVEL_BLOOM * this.audio.level;
+    // Exterior bloom on the finale swell (1.0 at silence), used in afterLayers()
+    this.bloom = 1 + LEVEL_BLOOM * this.audio.level;
 
+    // Draw stars + helix + pulses + moire into the canvas. Electron layers add
+    // themselves into the same canvas next, then afterLayers() blits + mirrors.
     renderSurface(this.cylCanvas, this.cylScratch);
-    this.cylCanvas.copyTo(Apotheneum.cylinder.exterior, this.colors, bloom, false);
-    copyCylinderExterior();
-
-    if (this.cube.isOn()) {
-      renderSurface(this.cubeCanvas, this.cubeScratch);
-      this.cubeCanvas.copyTo(Apotheneum.cube.exterior, this.colors, bloom, false);
-      copyCubeExterior();
-    }
   }
 
-  /** Compose one surface: stars behind, main helix, pulses, XOR moire copy, bolt */
+  @Override
+  protected void afterLayers(double deltaMs) {
+    this.cylCanvas.copyTo(Apotheneum.cylinder.exterior, this.colors, this.bloom, false);
+    copyCylinderExterior();
+  }
+
+  /** Compose one surface: stars behind, main helix, pulses, XOR moire copy */
   private void renderSurface(SurfaceCanvas main, SurfaceCanvas scratch) {
     main.fill(LXColor.BLACK);
     drawStars(main);
@@ -408,13 +339,9 @@ public class Helix extends ApotheneumPattern {
       drawHelix(scratch, MOIRE_SHIFT_FRAC, 1.0);
       compositeXor(main, scratch, m);
     }
-
-    if (this.boltAgeMs < BOLT_LIFE_MS) {
-      drawBolt(main);
-    }
   }
 
-  // ---- Drawing ----------------------------------------------------------------
+  // ---- Strand geometry --------------------------------------------------------
 
   /** Effective whole turns each strand winds: base Twist plus the tightening
    *  contributed by Unstrnd. */
@@ -422,17 +349,30 @@ public class Helix extends ApotheneumPattern {
     return this.twist.getValue() + this.unstrand.getValue() * UNSTRAND_EXTRA_TWIST;
   }
 
+  /** Angular phase of strand s. At Unstrnd = 0 all strands share phase 0
+   *  (converged); at Unstrnd = 1 they are evenly spaced around the ring. */
+  private double strandPhase(int s) {
+    return this.unstrand.getValue() * s * (2 * Math.PI / STRAND_COUNT);
+  }
+
+  /** Vertical offset of strand s (normalized height). Centered on the middle
+   *  strand and zero for all when Unstrnd = 0. */
+  private double strandYOff(int s) {
+    return this.unstrand.getValue() * (s - 1) * MAX_SEP_V;
+  }
+
+  // ---- Drawing ----------------------------------------------------------------
+
   /**
-   * Draw the double helix onto a canvas. Each strand advances effectiveTwist()
-   * whole turns from base to top; a canvas column is the angular position, so the
-   * strand is a physically correct spiral around the ring. Strand 1 is a half turn
-   * out of phase; Unstrnd slides the two apart vertically.
+   * Draw the helix onto a canvas. Each strand advances effectiveTwist() whole
+   * turns from base to top; a canvas column is the angular position, so the
+   * strand is a physically correct spiral around the ring. Strands fan apart in
+   * phase and slide apart vertically as Unstrnd rises, and coincide exactly at 0.
    */
   private void drawHelix(SurfaceCanvas c, double colShiftFrac, double brightMult) {
     final int w = c.width;
     final int h = c.height;
     final double tw = effectiveTwist();
-    final double sep = this.unstrand.getValue() * MAX_SEP_V;
     final double spinRad = this.spin * 2 * Math.PI;
     final double colShift = colShiftFrac * w;
     final double r = this.thick.getValue();
@@ -444,8 +384,8 @@ public class Helix extends ApotheneumPattern {
     }
 
     for (int s = 0; s < STRAND_COUNT; ++s) {
-      final double phase = s * Math.PI;
-      final double yOff = (s == 0) ? sep : -sep;
+      final double phase = strandPhase(s);
+      final double yOff = strandYOff(s);
       for (int i = 0; i <= steps; ++i) {
         final double t = i / (double) steps;
         final double up = t + yOff;
@@ -465,7 +405,6 @@ public class Helix extends ApotheneumPattern {
     final int w = c.width;
     final int h = c.height;
     final double tw = effectiveTwist();
-    final double sep = this.unstrand.getValue() * MAX_SEP_V;
     final double spinRad = this.spin * 2 * Math.PI;
     final double r = this.thick.getValue() + 1;
     for (int i = 0; i < MAX_PULSES; ++i) {
@@ -473,8 +412,8 @@ public class Helix extends ApotheneumPattern {
         continue;
       }
       final int s = this.pulseStrand[i];
-      final double phase = s * Math.PI;
-      final double yOff = (s == 0) ? sep : -sep;
+      final double phase = strandPhase(s);
+      final double yOff = strandYOff(s);
       final double t = this.pulseT[i];
       final double up = t + yOff;
       if (up < 0 || up > 1) {
@@ -489,7 +428,9 @@ public class Helix extends ApotheneumPattern {
     }
   }
 
-  /** Dim parallax starfield; nearer (higher depth) stars are brighter */
+  /** Dim parallax starfield; nearer (higher depth) stars are brighter. The
+   *  bilinear sub-pixel splat is gated by Smooth (sm=0 collapses to the floor
+   *  pixel), giving continuous drift with no rasterizer switch. */
   private void drawStars(SurfaceCanvas c) {
     final double amount = this.stars.getValue();
     if (amount <= 0.001) {
@@ -498,40 +439,22 @@ public class Helix extends ApotheneumPattern {
     final int w = c.width;
     final int h = c.height;
     final double twinkle = 1 + TREBLE_TWINKLE * this.audio.treble;
+    final double sm = this.smoothAmt;
     for (int i = 0; i < MAX_STARS; ++i) {
       final double b = amount * this.starDepth[i] * this.starDepth[i] * twinkle;
       if (b <= 0.02) {
         continue;
       }
-      final int col = (int) Math.round(this.starU[i] * w);
-      final int row = (int) Math.round(this.starV[i] * (h - 1));
-      c.setMax(col, row, scaleRGB(this.starArgb, b));
-    }
-  }
-
-  /** Draw the descending lightning bolt with its flash/glow envelope */
-  private void drawBolt(SurfaceCanvas c) {
-    final int w = c.width;
-    final int h = c.height;
-    final double age = this.boltAgeMs;
-    final double env;
-    if (age < BOLT_FLASH_MS) {
-      env = 1.0;
-    } else {
-      final double u = (age - BOLT_FLASH_MS) / (BOLT_LIFE_MS - BOLT_FLASH_MS);
-      env = 0.85 * (1 - u) * (1 - u);
-    }
-    final int argb = scaleRGB(0xffffffff, env);
-    final double r = this.thick.getValue();
-    for (int y = 0; y < h; ++y) {
-      final double t = y / (double) (h - 1);
-      int idx = (int) Math.round(t * (BOLT_SAMPLES - 1));
-      if (idx < 0) {
-        idx = 0;
-      } else if (idx >= BOLT_SAMPLES) {
-        idx = BOLT_SAMPLES - 1;
-      }
-      plotDisc(c, this.boltCol[idx] * w, y, r, argb);
+      final double fx = this.starU[i] * w;
+      final double fy = this.starV[i] * (h - 1);
+      final int ix = (int) Math.floor(fx);
+      final int iy = (int) Math.floor(fy);
+      final double tx = (fx - ix) * sm;
+      final double ty = (fy - iy) * sm;
+      c.setMax(ix,     iy,     scaleRGB(this.starArgb, b * (1 - tx) * (1 - ty)));
+      c.setMax(ix + 1, iy,     scaleRGB(this.starArgb, b * tx * (1 - ty)));
+      c.setMax(ix,     iy + 1, scaleRGB(this.starArgb, b * (1 - tx) * ty));
+      c.setMax(ix + 1, iy + 1, scaleRGB(this.starArgb, b * tx * ty));
     }
   }
 
@@ -551,52 +474,179 @@ public class Helix extends ApotheneumPattern {
     }
   }
 
-  /** Filled disc, max-blended; x wraps, out-of-range y dropped */
+  /**
+   * Filled disc, max-blended; x wraps, out-of-range y dropped. A single
+   * continuous formulation across the whole Smooth (cached in {@link #smoothAmt})
+   * range — no rasterizer switch, so there is no jump leaving Smooth = 0:
+   *   - the center is snapped to the nearest pixel at Smooth = 0 and interpolated
+   *     toward the true sub-pixel position as Smooth rises;
+   *   - the radius is a constant float {@code r} for all Smooth (the old integer
+   *     radius at Smooth 0 was the source of the thickness jump);
+   *   - the edge half-width grows continuously from 0.5 px (near-hard) to 1 px,
+   *     coverage-scaled via scaleRGB. CURATE: the 0.5..1 px half-width endpoints.
+   * Zero heap allocation.
+   */
   private void plotDisc(SurfaceCanvas c, double cxf, double cyf, double r, int argb) {
-    final int cx = (int) Math.round(cxf);
-    final int cy = (int) Math.round(cyf);
-    if (r <= 0.6) {
-      c.setMax(cx, cy, argb);
+    final double sm = this.smoothAmt;
+    final double rx = Math.round(cxf);
+    final double ry = Math.round(cyf);
+    final double cx = rx + (cxf - rx) * sm; // snapped at Smooth 0, true at 1
+    final double cy = ry + (cyf - ry) * sm;
+    final double hw = 0.5 + 0.5 * sm;       // CURATE: edge half-width in px
+    final double outer = r + hw;
+    final double denom = 2 * hw;
+    final int x0 = (int) Math.floor(cx - outer);
+    final int x1 = (int) Math.ceil(cx + outer);
+    final int y0 = (int) Math.floor(cy - outer);
+    final int y1 = (int) Math.ceil(cy + outer);
+    for (int py = y0; py <= y1; ++py) {
+      final double ddy = py - cy;
+      for (int px = x0; px <= x1; ++px) {
+        final double ddx = px - cx;
+        final double d = Math.sqrt(ddx * ddx + ddy * ddy);
+        final double cov = (outer - d) / denom;
+        if (cov <= 0) {
+          continue;
+        }
+        c.setMax(px, py, scaleRGB(argb, (cov >= 1) ? 1.0 : cov));
+      }
+    }
+  }
+
+  // ---- Electron swarm ---------------------------------------------------------
+
+  /** Spawn new electrons on a free-running timer scaled by Electro (0 = none),
+   *  capped at MAX_ELECTRONS. Deaths happen inside each Electron layer. */
+  private void spawnElectrons(double deltaMs) {
+    final double birthPerSec = Ranges.lin(this.electro.getValue(), 0, ELECTRON_BIRTH_PER_SEC_MAX);
+    if (birthPerSec <= 0.001) {
+      this.electronTimerMs = 0;
       return;
     }
-    final int ri = (int) Math.round(r);
-    for (int dy = -ri; dy <= ri; ++dy) {
-      final int dxMax = (int) Math.sqrt(r * r - dy * dy);
-      for (int dx = -dxMax; dx <= dxMax; ++dx) {
-        c.setMax(cx + dx, cy + dy, argb);
+    this.electronTimerMs += deltaMs;
+    final double interval = 1000.0 / birthPerSec;
+    int projected = getLayers().size();
+    while (this.electronTimerMs >= interval) {
+      this.electronTimerMs -= interval;
+      if (projected < MAX_ELECTRONS) {
+        addLayer(new Electron(this.lx));
+        ++projected;
       }
+    }
+  }
+
+  /**
+   * One electron: it climbs a strand while circling around the strand path, and
+   * fades toward the Electro level. At Electro = 0 the fade target is 0, so it
+   * dies within ~1 beat (ELECTRON_FADE_BEATS · beat period). Draws itself into
+   * the shared cylinder canvas so it inherits the AA / Smooth / wrap / bloom.
+   */
+  private class Electron extends LXLayer {
+
+    private final int strand;
+    private final double orbitSpeed; // rad/sec
+    private final double orbitAmp;   // columns
+    private final double orbitBob;   // normalized height
+    private final double climbJit;   // -0.3 .. 0.3
+    private double height;           // 0 (base) .. 1 (top) along the strand
+    private double orbitPhase;
+    private double fade;             // 0 .. 1 brightness envelope
+
+    private Electron(LX lx) {
+      super(lx);
+      final Random rnd = Helix.this.random;
+      this.strand = rnd.nextInt(STRAND_COUNT);
+      this.orbitSpeed = ELECTRON_ORBIT_MIN + (ELECTRON_ORBIT_MAX - ELECTRON_ORBIT_MIN) * rnd.nextDouble();
+      this.orbitAmp = ELECTRON_ORBIT_AMP * (0.6 + 0.8 * rnd.nextDouble());
+      this.orbitBob = ELECTRON_ORBIT_BOB * (0.6 + 0.8 * rnd.nextDouble());
+      this.climbJit = (rnd.nextDouble() - 0.5) * 0.6;
+      this.height = 0;
+      this.orbitPhase = rnd.nextDouble() * 2 * Math.PI;
+      this.fade = 0;
+    }
+
+    @Override
+    public void run(double deltaMs) {
+      final double dt = deltaMs * 0.001;
+      final double electroNow = Helix.this.electro.getValue();
+      final double beatMs = Math.max(Helix.this.lx.engine.tempo.period.getValue(), MIN_BEAT_MS);
+
+      // Climb the strand (faster at Electro = 1)
+      final double climbRate = Ranges.lin(electroNow, ELECTRON_CLIMB_MIN, ELECTRON_CLIMB_MAX);
+      this.height += climbRate * (1 + this.climbJit) * dt;
+
+      // Fade eases toward the Electro level; at Electro = 0 it dies within ~1 beat
+      final double tau = ELECTRON_FADE_BEATS * beatMs;
+      this.fade += (electroNow - this.fade) * (1 - Math.exp(-deltaMs / tau));
+
+      if (this.height > 1 || (electroNow < 0.02 && this.fade < ELECTRON_DEATH_EPS)) {
+        remove();
+        return;
+      }
+
+      // Circle the strand path as it climbs
+      this.orbitPhase += this.orbitSpeed * dt;
+
+      final SurfaceCanvas c = Helix.this.cylCanvas;
+      final int w = c.width;
+      final int h = c.height;
+      final double tw = Helix.this.effectiveTwist();
+      final double spinRad = Helix.this.spin * 2 * Math.PI;
+      final double phase = Helix.this.strandPhase(this.strand);
+      final double yOff = Helix.this.strandYOff(this.strand);
+
+      final double up = this.height + yOff + this.orbitBob * Math.sin(this.orbitPhase);
+      if (up < 0 || up > 1) {
+        return; // off the surface this frame; keep alive
+      }
+      final double angle = spinRad + tw * 2 * Math.PI * this.height + phase;
+      final double colf = angle / (2 * Math.PI) * w + this.orbitAmp * Math.cos(this.orbitPhase);
+      final double row = (1 - up) * (h - 1);
+      Helix.this.plotDisc(c, colf, row, ELECTRON_RADIUS, scaleRGB(Helix.this.electronArgb, this.fade));
     }
   }
 
   // ---- Palette ----------------------------------------------------------------
 
-  /** Refresh cached colors from the palette swatch, rebuilt only on change. */
+  /** Refresh cached role colors from the palette swatch + Desat, rebuilt only on
+   *  change. Strand/stars = swatch 1; pulses = swatch 2 (or white); electrons =
+   *  swatch 3 (or a cyan fallback). */
   private void updatePalette() {
     final List<LXDynamicColor> swatch = this.lx.engine.palette.swatch.colors;
-    final int base = swatch.isEmpty() ? FALLBACK_RED : swatch.get(0).getColor();
-    final int hk = (int) Math.round(this.hue.getValue());
-    if ((base == this.cachedBase) && (hk == this.cachedHueKey)) {
+    final int n = swatch.size();
+    final int c0 = (n >= 1) ? swatch.get(0).getColor() : FALLBACK_STRAND;
+    final int c1 = (n >= 2) ? swatch.get(1).getColor() : 0xffffffff;      // pulses: swatch 2 or white
+    final int c2 = (n >= 3) ? swatch.get(2).getColor() : FALLBACK_ELECTRON; // electrons: swatch 3
+    final int dk = (int) Math.round(this.desat.getValue() * 100);
+
+    int hash = 17;
+    hash = 31 * hash + c0;
+    hash = 31 * hash + c1;
+    hash = 31 * hash + c2;
+    hash = 31 * hash + dk;
+    if (hash == this.cachedHash) {
       return;
     }
-    this.cachedBase = base;
-    this.cachedHueKey = hk;
-    final int b2 = (hk == 0) ? base
-      : LXColor.hsb((LXColor.h(base) + hk) % 360, LXColor.s(base), LXColor.b(base));
-    this.strandArgb = b2;
-    this.pulseArgb = whiten(b2, 0.6); // pulses read near-white, tinted by palette
-    this.starArgb = b2;               // dim red stars derived from the palette
+    this.cachedHash = hash;
+
+    final double ds = this.desat.getValue();
+    this.strandArgb = desaturate(c0, ds);
+    this.pulseArgb = desaturate(c1, ds);
+    this.starArgb = this.strandArgb;
+    this.electronArgb = desaturate(c2, ds);
   }
 
   // ---- Color helpers ----------------------------------------------------------
 
-  private static int whiten(int argb, double f) {
-    final int r = (argb >> 16) & 0xff;
-    final int g = (argb >> 8) & 0xff;
-    final int b = argb & 0xff;
-    final int wr = (int) (r + (255 - r) * f);
-    final int wg = (int) (g + (255 - g) * f);
-    final int wb = (int) (b + (255 - b) * f);
-    return 0xff000000 | (wr << 16) | (wg << 8) | wb;
+  /** Pull a color's saturation down toward white by {@code amount} (0..1). */
+  private static int desaturate(int argb, double amount) {
+    if (amount <= 0) {
+      return 0xff000000 | (argb & 0x00ffffff);
+    }
+    final float h = LXColor.h(argb);
+    final float s = LXColor.s(argb);
+    final float b = LXColor.b(argb);
+    return LXColor.hsb(h, (float) (s * (1 - amount)), b);
   }
 
   private static int scaleRGB(int argb, double mult) {

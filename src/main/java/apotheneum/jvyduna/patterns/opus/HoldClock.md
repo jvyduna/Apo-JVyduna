@@ -40,33 +40,52 @@ Two committed beats come straight from the adversarial critique
 This is **fully built**: the phase state machine, every parameter, the
 tick/beat engine, the digit rasterizer, the bezel/tick/AA-hand analog face, the
 split-flap flip face, the binary dot-grid, the base-N occult dial, the
-multi-strand crystal-staircase shimmer cascade, the word-wrapped held message,
-the never-resolving "estimated wait" line and the VHS button-glitch melt are all
-implemented and compiling. Only the blind-picked CURATE constants (timings,
-brightness, mystic base, fallback phosphor) await a hardware tuning pass.
+multi-strand crystal-staircase shimmer cascade, the word-wrapped held message
+and the VHS button-glitch melt are all implemented and compiling. Only the
+blind-picked CURATE constants (timings, brightness, mystic base, fallback
+phosphor) await a hardware tuning pass.
+
+**2026-07-08 feedback pass** — the redundant low "estimated wait" line was
+removed; the numeric digital modes now read as an **alien base-8 (octal)
+counter** in a new 8-glyph set (`util/AlienGlyph8`, `:`-separated), HEX kept as
+the one real-numeral exception; interior copies are **horizontally mirrored** so
+every viewpoint reads L-R correct; cube digital text rides at **2/3 install
+height** (cylinder centered); and the timebase gained a **Speed TempoDiv**
+multiplier. See the Curation log.
 
 ## Rendering approach
 
 - **Base class**: `ApotheneumPattern` — draws the hold screen on the cube
   faces AND the cylinder ring (both, via `render()`), so it needs full
   cube+cylinder access, not `ApotheneumRasterPattern`'s cube-face-only reach.
-- **Surfaces**: the same centered clock is drawn onto a 50×45 face canvas and a
-  120×43 cylinder canvas. The face canvas is copied to `cube.exterior.front`,
-  then `copyCubeFace(front)` replicates it to all 8 cube faces (exterior +
-  interior). The cylinder canvas is copied to `cylinder.exterior`, then
-  `copyCylinderExterior()` mirrors it inside. So the whole building reads as
-  one "waiting room on hold." (CURATE: consider whether only the front face
-  should carry the clock with `left/right/back` dark for more negative space —
-  the brief's "front, with left/right/back optionally mirroring" — swap the
-  `copyCubeFace` for a single-face paint if curation prefers.)
+- **Surfaces**: the same clock is drawn onto a 50×45 face canvas and a 120×43
+  cylinder canvas. The face canvas is copied straight onto each of the four
+  **exterior** cube faces and **horizontally mirrored** (`copyToMirrored`) onto
+  each of the four **interior** faces; the cylinder canvas likewise paints
+  `cylinder.exterior` straight and `cylinder.interior` mirrored. The mirror is
+  because the interior LED layers face inward — a straight index-to-index copy
+  would read left-right reversed to a viewer on the ground inside; pre-mirroring
+  cancels that so text and forms read correct from **every** viewpoint. So the
+  whole building reads as one "waiting room on hold." (CURATE: consider whether
+  only the front face should carry the clock with `left/right/back` dark for
+  more negative space — the brief's "front, with left/right/back optionally
+  mirroring" — swap the all-faces paint for a single-face paint if curation
+  prefers.)
+- **Vertical placement**: the digital text modes (octal/flip/hex) anchor their
+  vertical center at `textCenterFrac` of the canvas height — `CUBE_TEXT_CENTER`
+  = 1/3 from the top (**2/3 install height** up from the ground) on the cube,
+  and 0.5 (centered) on the cylinder. The geometric faces (analog/binary/mystic)
+  stay centered on both surfaces.
 - **Geometry mapping**: two preallocated `SurfaceCanvas` buffers drawn in
   canvas space (Y=0 top) and copied column-major via `copyTo(surface, colors,
   mult, false)`, where `mult` is the phase/brightness multiplier so drawing
   stays full-color and dimming happens once at copy time.
 - **Buffers / zero-alloc**: both canvases, plus a reusable `char[32]` glyph
   assembly buffer, are allocated in the constructor. Digit strings are written
-  into the char buffer by hand (`writeTime`/`writeBinary`/`writeHex`) with no
-  `String` allocation, and glyphs are blitted straight from `PixelFont5`. The
+  into the char buffer by hand (`writeOctalTime`/`writeHex`) with no `String`
+  allocation; glyphs are blitted from `PixelFont5`, except octal digit chars
+  `'0'..'7'` in the octal/flip modes, which route to `AlienGlyph8` via
+  `glyphPixel`. The
   only per-frame allocation is none; trigger callbacks (event rate) may allocate
   minimally (enum `setValue`).
 - **Door columns**: `SurfaceCanvas.copyTo` already guards shortened columns via
@@ -91,19 +110,20 @@ kicks" is the whole story.)
 
 ## Tempo mapping
 
-The clock **ticks on the grid**. Each frame `TempoLock.crossed(tempoDiv)` is
-polled unconditionally (even when Sync is off, per the stale-cycle-count
-gotcha). With `Sync` on, `elapsedTicks` advances and the colon toggles on every
-`TempoDiv` crossing (default **QUARTER** — one tick per beat at 85 BPM, "on the
-beat"). With `Sync` off, the clock free-runs on a BPM-period accumulator
-(`beatPeriodMs`), so it still ticks at the musical rate but drifts off the grid
-phase — fully functional and good-looking standalone.
-
-The 85 BPM `opus` grid is rigid (fit residual ~10.7 ms), so `TempoLock` locks
-cleanly; everything snaps. No `retime` is used — the clock is a discrete
-grid-gated event, not a continuous motion that needs phase-nudging. The shimmer
-sweep is time-based (`SHIMMER_SWEEP_MS`), not grid-locked, since it's a brief
+The clock is **tempo-driven** with a **Speed** multiplier
+(`EnumParameter<Tempo.Division>`, default `QUARTER`): one tick per Speed
+division, `tickPeriodMs() = tempo.period / speed.multiplier`. At `Quarter` the
+clock advances one "second" per beat, so it runs 2× as fast at 120 vs 60 BPM
+(and reads real seconds at exactly 60 BPM); a whole note (1 bar) makes it 4×
+slower. The tick free-runs on that accumulator (no grid-phase locking — this is
+the old Sync-off path with a division-scaled period rather than a hard quarter
+note). The shimmer sweep stays time-based (`SHIMMER_SWEEP_MS`), a brief
 choreographed bloom driven by a clip lane over a fixed 10 s window.
+
+The counted value itself is **octal-native** in the alien digital modes:
+`writeOctalTime` derives HH:MM:SS from `elapsedTicks` where each field rolls at
+64 (both octal digits stay 0..7), so the base-8 read is internally consistent.
+HEX stays a real hexadecimal counter; BINARY stays a base-2 BCD dot-grid.
 
 ## Energy mapping
 
@@ -118,8 +138,8 @@ Sustained motion still respects the ≥5 s cap — see the compliance section.
 ## Parameters
 
 UI/registration order (house style; keys/labels are frozen once `.lxp` files
-reference them): triggers (Meta last of them, via the bag), pattern parameters,
-Audio, Sync, TempoDiv. No Energy param (see above).
+reference them): triggers, pattern parameters, Audio. No Energy param (see
+above).
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
@@ -127,17 +147,25 @@ Audio, Sync, TempoDiv. No Energy param (see above).
 | `boot` | Boot | TriggerParameter | — | — | leave the cold open, boot the clock (the 0:19 reveal) |
 | `baseFlip` | BaseFlip | TriggerParameter | — | — | step to the next (more esoteric) clock mode |
 | `glitch` | Glitch | TriggerParameter | — | — | arm a one-frame loop-glitch / VHS melt (button flourish) |
-| `meta` | Meta | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
 | `phase` | Phase | EnumParameter | Running | ColdOpen/Running/Blackout | top-level screen state (composition-driven; Running default for standalone) |
-| `clockMode` | Mode | EnumParameter | Decimal | Analog/Flip/Decimal/Binary/Hex/Mystic | clock face style; morphs across the outro |
+| `clockMode` | Mode | EnumParameter | Octal | Analog/Flip/Octal/Binary/Hex/Mystic | clock face style; morphs across the outro (enum constant stays `DECIMAL` for `.lxp` compatibility; label is `Octal`) |
+| `speed` | Speed | EnumParameter&lt;Tempo.Division&gt; | Quarter | any Tempo.Division | tempo division per clock tick: Quarter = one "second" per beat; whole note (1 bar) = 4× slower |
 | `brightness` | Bright | CompoundParameter | 0.35 | 0..1 | deadpan resting display brightness |
 | `hue` | Hue | CompoundParameter | 0 | 0..360 | rotates the palette-sampled phosphor hue (0 = pure palette) |
 | `shimmer` | Shimmer | CompoundParameter | 0 | 0..1 | crystal-staircase cascade intensity (committed beat 0:40–0:50) |
 | `freeze` | Freeze | BooleanParameter | false | — | latch the held "GOD PUT ME ON HOLD" punchline frame (committed beat ~1:25) |
 | `message` | Msg | StringParameter | "" | — | held-frame / cold-open text, driven by clip-lane string events |
+| `smooth` | Smooth | CompoundParameter | 1.0 | 0..1 | motion blending + antialiasing (0 = steppy/hard edges, 1 = smooth sub-pixel + AA) |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth (0 = pure clock) |
-| `sync` | Sync | BooleanParameter | true | — | tick on the tempo grid; off free-runs at the BPM period |
-| `tempoDiv` | TempoDiv | EnumParameter | QUARTER | Tempo.Division | division the clock ticks / colon blinks on |
+
+**Smooth** is the house AA/interpolation knob. It softens: the antialiased edges
+of every drawn line form (analog bezel/ticks/hands, the mystic dial ring/glyph
+marks/pointer, the shimmer staircase treads/risers) — Wu AA at 1, hard
+pixel-snapped integer lines at 0, the AA fringe fading in between — plus the
+eased crossfades of the cold-open dawn ramp, the shimmer brightness excursion,
+the shimmer highlight-band falloff, and the split-flap flap-fall (smoothstep-
+eased at 1, raw/stepped at 0). It does not touch the clock's beat-driven
+timing — the tick/blink still advances on the BPM-period accumulator.
 
 ### Composition-driven timeline (how the .lxp drives it)
 
@@ -145,15 +173,15 @@ Audio, Sync, TempoDiv. No Energy param (see above).
 |---|---|---|
 | 0:00 | cold open | `phase` = ColdOpen, `message` = "" (blinking colon), `brightness` low |
 | ~0:10 | recognition dawns | (automatic — the `DAWN_MS` ramp brings the colon in) |
-| 0:19 | first reveal (bass in) | `phase` = Running, `clockMode` = Decimal (or Analog) |
+| 0:19 | first reveal (bass in) | `phase` = Running, `clockMode` = Octal (or Analog) |
 | 0:40–0:50 | crystal staircase | ramp `shimmer` 0→1→0 over the 10 s window |
-| 1:04 | go esoteric | `baseFlip` (Decimal→Binary), later →Hex, →Mystic |
+| 1:04 | go esoteric | `baseFlip` (Octal→Binary), later →Hex, →Mystic |
 | ~1:25 | the button | `message` = "GOD PUT ME ON HOLD", `freeze` = on |
 | 1:29 | hard cut | `freeze` = off, `phase` = Blackout |
 
 ## Triggers
 
-Four non-Meta triggers, small → large state change:
+Four triggers, small → large state change:
 
 - `tick` (small) — advances the clock one unit and toggles the colon. Reads as
   a single quiet increment; instant.
@@ -168,19 +196,6 @@ Four non-Meta triggers, small → large state change:
   phase-wobble + occasional torn band + a per-column vertical drip that grows as
   the envelope fades (the VHS melt into near-black). CURATE: the wobble/tear/
   melt magnitudes are blind-picked — tune on hardware.
-
-## Jump candidates
-
-Rows mirror the `bag.jumpable(...)` lines in the constructor 1:1. All four
-non-Meta triggers are also registered in the bag.
-
-| Param | Jump range | Status | Notes |
-|---|---|---|---|
-| `clockMode` | all (Analog..Mystic) | candidate | full morph range; logged by label |
-| `brightness` | [0.2, 0.5] | candidate | stay in the deadpan band — never lush |
-| `hue` | [0, 360] (full) | candidate | any rotation is safe |
-
-Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [a,b]`.
 
 ## Simulation-principles compliance
 
@@ -230,9 +245,12 @@ Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [
   all authored blind; verify legibility and dot/hand thickness on the LEDs.
 - Glitch melt magnitudes (wobble 0.16·w, tear 1-in-8 bands, drip 0.55·h) are
   blind-picked — confirm the VHS flourish reads as intended before the cut.
-- Ticks are displayed as seconds 1:1 (`writeTime`); decide whether the clock
-  should show real wall-clock elapsed instead. Same for the "estimated wait"
-  line, which counts up in real elapsed ms since the clock started running.
+- The alien base-8 glyph shapes (`util/AlienGlyph8`) are a first authored pass —
+  run `AlienGlyph8.main()` to preview, and confirm on the LEDs that all 8 read
+  as distinct, non-Latin/non-numeric/non-math marks at hardware pitch. The
+  octal counter rolls each field at 64.
+- Confirm `CUBE_TEXT_CENTER` (1/3-from-top = 2/3 install height) lands the cube
+  readout at a comfortable eye line on the LEDs.
 - Single-face vs. all-faces question (see Rendering approach).
 
 ## Curation log
@@ -241,3 +259,6 @@ Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [
 |---|---|---|
 | 2026-07-07 | Initial first-pass, Claude autonomous session | Design doc + compiling stub: phase/mode state machine, tick engine, digit rasterizer, and the two committed beats (shimmer knob, freeze button) all wired and registered; analog/binary/mystic/flip/glitch/cascade/multi-line left as TODOs for the hardware pass |
 | 2026-07-07 | Full build-out, Claude session | Built every stubbed subsystem: multi-strand crystal-staircase shimmer cascade (seamless periodic staircase + ascending highlight, ≥5 s traversal); multi-line word-wrapped held message with auto-scale + never-resolving "EST WAIT" counter; analog face (bezel ring, 12 ticks, AA lineWu hands, smooth sub-tick sweep); split-flap FLIP styling with per-tick flap fall; binary 6×4 BCD dot-grid; base-N occult MYSTIC dial (esoteric glyph marks, counter-rotating inner ring, smooth pointer); and the VHS button-glitch melt (scratch-buffer phase-wobble + torn bands + per-column drip). Zero-alloc preserved (added bcd[6], line-range arrays, two scratch canvases, all preallocated); all parameters/keys unchanged |
+| 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path) | Project-wide retirement of the Sync/TempoDiv + Meta pattern-control convention. The clock now always ticks on the free-running BPM-period accumulator (`lx.engine.tempo.period`), the old Sync-off mode. |
+| 2026-07-08 | Added `Smooth` (house AA/interpolation convention), default 1.0 | Adopts the package-wide Smooth knob: gates edge antialiasing (Wu AA at 1 → hard pixel-snapped lines at 0, via `smoothLine`) on all line forms, and eases the dawn / shimmer-brightness / shimmer-highlight / flap-fall transitions (`eased` = smoothstep blended by Smooth) instead of hard steps. Clock stays beat-driven — no timing change. Default 1.0 preserves the prior fully-AA look with zero render overhead. |
+| 2026-07-08 | Feedback pass (Claude session) | (1) Removed the redundant low "EST WAIT" line from all modes (drop the call + method + `estWaitMs` state). (2) Numeric digital modes now render an **alien base-8 (octal) counter**: new `util/AlienGlyph8` 8-glyph set (⊥, diagonal-meets-bar, rotated-L corners, filled triangles — chosen to dodge Latin letters / numerals / math symbols at 5px), routed via `glyphPixel`/`alienDigits`; `writeOctalTime` counts octal-native (fields roll at 64); `:` separator kept; `DECIMAL` relabeled **Octal** (enum constant unchanged for `.lxp`). HEX kept as the real-numeral exception. (3) Interior cube faces + cylinder painted **horizontally mirrored** (`SurfaceCanvas.copyToMirrored`) so all viewpoints read L-R correct. (4) Cube digital text raised to **2/3 install height** (`CUBE_TEXT_CENTER`, `textTopY`/`textCenterFrac`); cylinder + geometric faces unchanged. (5) Timebase gained a **Speed `TempoDiv`** multiplier (`tickPeriodMs = period / speed.multiplier`; Quarter = 1 tick/beat, 1 bar = 4× slower). Zero-alloc preserved; `SurfaceCanvas` gained one additive method. |

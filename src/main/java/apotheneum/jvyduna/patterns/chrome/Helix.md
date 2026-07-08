@@ -1,8 +1,8 @@
 # Helix
 
-Chrome finale: a lightning strike to earth opening into a white double-helix
-ascension up the cylinder, ringed by a counter-rotating parallax starfield, with
-pulses riding the strands, unstranding separation, tightening twist and an XOR moire.
+Chrome: a triple-helix ascension up the cylinder, ringed by a counter-rotating
+parallax starfield, with pulses riding the strands, an electron swarm spiralling
+up them, unstranding separation, tightening twist and an XOR moire.
 
 > Sidecar design doc convention: this file lives beside `Helix.java` and is the
 > source of truth for design decisions and curation history. Mark any constant or
@@ -11,208 +11,208 @@ pulses riding the strands, unstranding separation, tightening twist and an XOR m
 
 ## Original / inspiration
 
-Not a screensaver recreation — this is the storyboarded payoff for the **4:05
-finale of "Chrome Country"** (Oneohtrix Point Never, closing track of *R Plus
-Seven*), the single most important cue in the whole 21-minute "Communicating"
-piece. From Jeff's finale storyboard (chrome-brief.md §4, §6 pattern #3): *"first
-hit of series (4:05) = lightning strike to earth; white helical ascension, pulses
-ride it, CMO unstrands, DNA twists tighter, XOR-blend moiré, outer stars in a
+The storyboarded payoff for the **4:05 finale of "Chrome Country"** (Oneohtrix
+Point Never, closing track of *R Plus Seven*). From Jeff's finale storyboard
+(chrome-brief.md §4, §6 pattern #3): *"white helical ascension, pulses ride it,
+CMO unstrands, DNA twists tighter, XOR-blend moiré, outer stars in a
 counter-rotating path just fast enough against the main helix twist."*
 
-The lightning vocabulary deliberately echoes the existing **Zot** pattern (After
-Dark "Zot!" — a bolt striking down the surfaces) so the finale ignition rhymes
-with the strike motif used elsewhere in the set; here it is a self-contained,
-lightweight bolt rather than a reuse of the `doved.lightning` library (kept simple
-for the first pass — CURATE: compare against a real Zot-style bolt on hardware and
-consider promoting to the shared generator if the look is thin).
-
-The visual signature to preserve: (1) an **event** — a white bolt cracks to earth;
-(2) a **long sustained ascension** — a DNA-like double helix spiraling up the
-cylinder, growing tighter and separating as the organ/choir note holds; (3) the
-**uncanny** hinge required by the brief — the strands read as almost-clean but
-develop an XOR interference moire, "beauty that is just slightly wrong."
+The visual signature to preserve: a **long sustained ascension** — a DNA-like
+helix spiraling up the cylinder, growing tighter and separating as the
+organ/choir note holds; the **uncanny** hinge required by the brief — the strands
+read as almost-clean but develop an XOR interference moire, "beauty that is just
+slightly wrong." The electron swarm adds a living, organic sparkle climbing the
+strands.
 
 ## Rendering approach
 
-- **Base class**: `ApotheneumPattern` — the finale is cylinder-primary with an
-  optional cube-ring echo, needs full ring geometry plus exterior→interior mirror
-  copies, and does its own canvas compositing (not cube-face-only, so
-  `ApotheneumRasterPattern` doesn't fit). Same shape as `Mystify` / `Zot`.
-- **Surfaces**: the **cylinder exterior** is the primary surface (SurfaceCanvas
-  120×43). The **cube ring** (SurfaceCanvas 200×45) is drawn only when the `Cube`
-  toggle is on. Interiors are an exact mirror of their exteriors via
-  `copyCylinderExterior()` / `copyCubeExterior()` — the audience standing inside is
-  enclosed by the ascension (brief: "interior-face use so the audience feels
-  enclosed by a nave").
-- **Geometry mapping**: the double helix is drawn directly in cylindrical-unwrap
-  space, where **a canvas column IS the angular position around the ring**. A
-  strand that advances `Twist` whole turns from base to top is therefore a
-  physically correct spiral: `col = (angle / 2π) · width`, `angle = spin +
-  Twist·2π·t + phase`. Two strands a half-turn (`π`) apart are the double helix; on
-  the real cylinder they are parallel spirals a half-ring apart (the sinusoidal
-  "crossing" look is only a 2D-projection artifact — the spiral is the true form).
-  `y = 0` is the top row (`SurfaceCanvas` convention); the strand parameter `t`
-  runs 0 at the base to 1 at the top.
+- **Base class**: `ApotheneumPattern` — cylinder-primary, needs full ring
+  geometry plus the exterior→interior mirror copy, and does its own canvas
+  compositing. Same shape as `Mystify`.
+- **Surface**: the **cylinder exterior** (SurfaceCanvas 120×43) is the only drawn
+  surface. The interior is an exact mirror via `copyCylinderExterior()` — the
+  audience standing inside is enclosed by the ascension. **Cylinder-only** (the
+  old cube-ring echo was removed per Jeff's feedback).
+- **Geometry mapping**: the helix is drawn directly in cylindrical-unwrap space,
+  where **a canvas column IS the angular position around the ring**: `col =
+  (angle / 2π) · width`, `angle = spin + Twist·2π·t + phase_s`. `y = 0` is the top
+  row (`SurfaceCanvas` convention); the strand parameter `t` runs 0 at the base to
+  1 at the top.
+- **Three converging strands**: `STRAND_COUNT = 3`. The per-strand angular phase
+  and vertical offset are both scaled by **Unstrnd**, chosen so **all three
+  coincide exactly at Unstrnd = 0** and fan apart as it rises:
+  - `phase_s = Unstrnd · s · (2π/3)` → strands 0,1,2 at 0, 120°, 240° at Unstrnd 1.
+  - `yOff_s  = Unstrnd · (s−1) · MAX_SEP_V` → −SEP, 0, +SEP at Unstrnd 1.
+  At Unstrnd 0 every strand has phase 0 and yOff 0, so the three (and their pulses
+  and electrons) are stacked on one path. This is the math guaranteeing "when
+  Unstrnd is back at 0 they have always converged."
 - **Ascension** is the whole winding slowly rotating around the ring over time
-  (`spin`, in turns), NOT a vertical scroll — so the strands appear to twist
-  upward continuously without any seam. Pulses add the literal upward travel.
-- **Buffers** (all preallocated in the constructor, zero-alloc render): two
-  SurfaceCanvas per surface (main + scratch for the moire copy); parallel pulse
-  arrays (`pulseActive/Strand/T`, MAX_PULSES = 24); parallel star arrays
-  (`starU/V/Depth`, MAX_STARS = 160, seeded once in the constructor); the bolt
-  column profile (`boltCol`, BOLT_SAMPLES = 64). Palette samples are cached with a
-  Satori-style change detector. Trigger callbacks (pulse spawn, bolt regen) run at
-  event rate and touch only preallocated state.
-- **Door-column handling**: none special — `SurfaceCanvas.copyTo` already guards
-  short (door) columns via `column.points.length`; pixels landing on door rows are
-  simply not written. The bolt/helix over the doors are lost, acceptable for a
-  full-height ascension.
+  (`spin`, in turns), NOT a vertical scroll. **Signed Climb** sets both the rate
+  and the direction (negative = the other way around the ring). Pulses and
+  electrons add the literal upward travel.
+- **Buffers** (preallocated, zero-alloc render): two SurfaceCanvas (main + scratch
+  for the moire copy); parallel pulse arrays (`pulseActive/Strand/T`,
+  MAX_PULSES = 24); parallel star arrays (`starU/V/Depth`, MAX_STARS = 160, seeded
+  once in the constructor). Palette samples are cached with a Satori-style change
+  detector.
+- **Electron swarm** uses the **LXLayer-per-entity idiom** (the `Raindrops.Drop`
+  model documented in the apotheneum-patterns skill): one `Electron extends
+  LXLayer` per particle, spawned with `addLayer(new Electron(lx))`, self-destruct
+  via `remove()`. The layers draw into the shared `cylCanvas` during the layer
+  loop; the cylinder **blit + interior mirror happen in `afterLayers()`** (not
+  `render()`) so the swarm is included and mirrored. This is a **mixed
+  architecture**: pulses/stars keep their preallocated arrays while the new swarm
+  uses layers — deliberate, since the layer idiom is the skill's stated preference
+  for entity systems and the array entities predate it.
+- **Door-column handling**: none special — `SurfaceCanvas.copyTo` guards short
+  (door) columns via `column.points.length`; pixels landing on door rows are
+  simply not written.
+
+## Electron swarm
+
+Palette **swatch 3** (`swatch.get(2)`, cyan-ish fallback when absent), climbing
+the strand paths while circling around them. Each electron holds its own state
+(strand, height, orbit phase/speed, climb jitter, fade), seeded from `random` at
+birth. `Electro` (0..1) drives the whole population:
+
+- **Births** (`render()`): a free-running timer emits at
+  `lin(Electro, 0, ELECTRON_BIRTH_PER_SEC_MAX)` per second — **0 at Electro 0**, so
+  no new electrons are born — capped at `MAX_ELECTRONS` via `getLayers().size()`.
+- **Climb**: `lin(Electro, ELECTRON_CLIMB_MIN, ELECTRON_CLIMB_MAX)` norm-height/s
+  (× per-particle jitter) — faster at Electro 1.
+- **Circling**: `orbitPhase += orbitSpeed·dt`; drawn column offset
+  `orbitAmp·cos(orbitPhase)`, with a small vertical bob `orbitBob·sin(orbitPhase)`
+  — an organic loop around the strand path as it ascends.
+- **Life / death within 1 beat**: `fade` eases toward `Electro` with time-constant
+  `ELECTRON_FADE_BEATS · beatMs` (`beatMs = lx.engine.tempo.period`, live). At
+  Electro 0 the target is 0, so every electron fades to < `ELECTRON_DEATH_EPS`
+  within ~1 beat and `remove()`s — satisfying "when Electro is 0 they all die off
+  within 1 beat." `fade` also sets brightness, so Electro 1 is birth-dense, fast
+  and bright.
+
+CURATE: `MAX_ELECTRONS 48`, `BIRTH_PER_SEC_MAX 12`, `CLIMB_MIN 0.08`/`MAX 0.35`,
+`ORBIT_MIN 1.5`/`MAX 4.0` rad/s, `ORBIT_AMP 3.0` cols, `ORBIT_BOB 0.02`,
+`RADIUS 1.0`, `FADE_BEATS 0.4`, `DEATH_EPS 0.03`, `FALLBACK_ELECTRON` cyan — all
+first-guess, tune on hardware.
+
+## Color
+
+Palette-driven with a Satori-style change cache (rebuilt only when a swatch color
+or `Desat` changes). Roles:
+
+- **Strand + stars** ← palette **swatch 1** (`swatch.get(0)`).
+- **Pulses** ← palette **swatch 2** (`swatch.get(1)`), or **white** if the swatch
+  has no second color (per Jeff's feedback).
+- **Electrons** ← palette **swatch 3** (`swatch.get(2)`), or a cyan fallback.
+
+**Desat** (replaces the old Hue rotation) pulls every role color's saturation down
+toward white: `sat' = sat · (1 − Desat)` in HSB (the `Lorre.java` idiom). At
+Desat 0 the pure palette shows; at 1 the strands/pulses/electrons wash white.
 
 ## Audio mapping
 
-`AudioReactive`, ticked as the first line of `render()`, gated by the **Audio
-depth knob** (`audio.setDepth(audioDepth)`):
+`AudioReactive`, ticked first in `render()`, gated by the **Audio depth knob**
+(`audio.setDepth(audioDepth)`, default 0 = pure screensaver):
 
-- **level** — exterior brightness **bloom**: the copy multiplier is
-  `1 + 0.30 · level`, so the whole ascension swells brighter as the organ/choir
-  finale surges (`LEVEL_BLOOM`). At silence (level 0) the multiplier is exactly 1.
-  Level also thickens the free-running auto-pulse stream (interval `/= 1 + level`).
-- **bassHit()** — emits one pulse up each strand on each detected bass transient
-  (the sparse rubato bass in the finale rides the helix).
+- **level** — exterior brightness **bloom**: the blit multiplier is
+  `1 + 0.30 · level` (`LEVEL_BLOOM`). At silence the multiplier is exactly 1.
+- **bassHit()** — emits one pulse up each strand on each detected bass transient.
 - **treble** — star **twinkle**: star brightness is lifted by `1 + 0.5 · treble`
-  (`TREBLE_TWINKLE`), so the surrounding field shimmers with the high-frequency
-  wash.
+  (`TREBLE_TWINKLE`).
 
-**Depth knob / silence behavior**: `Audio` defaults to 0 = pure screensaver. At
-depth 0 (or in true silence), level/treble read 0 and hits never fire: the pattern
-is a steadily-ascending red double helix with a slow drifting parallax starfield
-and auto-emitted pulses on the `Pulses` timer, at full (unbloomed) brightness. That
-is the pattern's native look — this is a **beatless, envelope-driven** song, so the
-Audio knob (raised via a clip/modulator across 4:05–4:40) is the primary engine,
-not a tempo grid. Raising the knob to 1 continuously adds the bloom, hit-driven
-pulses and star twinkle over the depth-0 baseline.
+At depth 0 (or true silence) the pattern is a steadily-ascending triple helix with
+a drifting parallax starfield, timer-emitted pulses, and the electron swarm, all
+at full (unbloomed) brightness — the native look.
 
 ## Tempo mapping
 
-**This song is beatless** (chrome-brief.md §1: grid mode `none`, "drive
-choreography from envelopes/sections, no 16th grid"). The `Sync`/`TempoDiv` pair is
-present for series-convention parity but is **intended OFF** for this song, and the
-default composition leaves it off. The pattern's native timing is fully
-free-running:
+Beatless song — timing free-runs. The only live-tempo read is the electron death
+timer (`lx.engine.tempo.period` = "one beat"), used so the "die within 1 beat"
+behavior tracks the project BPM automation. Pulses auto-emit on a density timer
+(`Pulses`), and spin / pulse-travel / star-drift are continuous, knob-scaled
+rates.
 
-- **Free-running (Sync off, the intended mode)**: pulses auto-emit on a timer whose
-  interval interpolates from `PULSE_INTERVAL_SPARSE_MS` (2000 ms at Pulses = 0) to
-  `PULSE_INTERVAL_DENSE_MS` (450 ms at Pulses = 1), shortened by audio level. Spin,
-  pulse travel and star drift are all continuous, energy-scaled rates.
-- **Sync on (optional)**: auto-pulse emission is instead gated to
-  `TempoLock.crossed(TempoDiv)` (default `HALF`), for the rare case someone wants
-  the finale pulses to land on a transport grid. `crossed()` is polled
-  unconditionally every frame (per the TempoLock javadoc) so toggling Sync never
-  fires a stale crossing.
+## Speed / rate mapping
 
-No `retime()` clamp overrides are used — nothing here schedules a single future
-event onto the grid; only discrete pulse emission is optionally grid-gated.
+Chrome is a per-song **outlier** (parts grid-driven, parts continuous), so the
+2026-07-08 blanket beat-relative conversion was skipped here and the rate knobs
+were decided with Jeff individually. Resolved 2026-07-08:
 
-## Energy mapping
-
-| Quantity | Ambient (e=0) | Peak (e=1) | Curve (lin/exp) |
-|---|---|---|---|
-| Helix spin (ascension twist) | 0.03 turns/s | 0.12 turns/s (×Climb, ≤0.18) | lin |
-| Pulse travel (full height) | 0.11 /s → 9.1 s | 0.18 /s → 5.5 s | lin |
-| Star counter-rotation (nearest layer) | 0.06 turns/s | 0.13 turns/s → 7.7 s/turn | lin |
-
-`Energy` defaults to 0.35 (the soothing-ambient regime). Every sustained rate above
-respects the ≥5 s full-traversal cap even at energy 1 — see the compliance section
-for the arithmetic, including the `Climb` multiplier headroom.
+| Quantity | Knob(s) | Basis |
+|---|---|---|
+| Helix ascension / spin | `Speed` × signed `Climb` | absolute turns/s; `lin(Speed, 0.03, 0.12)` × Climb. Climb −5..5 intentionally **relaxes** the ≥5 s/turn cap (Jeff's call — this is the outlier) |
+| Pulse travel | `PlsSpd` | absolute norm-height/s, `lin(PlsSpd, 0.05, 0.50)` — dedicated knob ("lose tempo, replace with PlsSpd") |
+| Pulse emission spacing | `Pulses` | pure density: interval `lin(Pulses, 2000, 450)` ms, free-run |
+| Star counter-rotation | `Speed` | absolute turns/s, `lin(Speed, 0.06, 0.13)` × depth |
+| Electron climb / birth / brightness | `Electro` | see Electron swarm; death timer is live-tempo-relative |
 
 ## Parameters
 
-UI/registration order convention (do not deviate; keys/labels must never be
-renamed once saved in a `.lxp`): triggers (non-meta), Energy, pattern-specific,
-Audio, Sync, TempoDiv, Meta (always last).
+Registration/UI order (do not deviate; keys/labels must never be renamed once
+saved in a `.lxp`). **No triggers** — the old `pulse`/`reverse`/`strike` triggers
+were all removed per Jeff's feedback; the ≥3-trigger template guideline is
+**waived** for this pattern (signed Climb subsumes Reverse; there is no
+strike/manual-pulse concept anymore).
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
-| `pulse` | Pulse | TriggerParameter | — | — | release one bright pulse up each strand |
-| `reverse` | Reverse | TriggerParameter | — | — | flip the ascension twist direction |
-| `strike` | Strike | TriggerParameter | — | — | fire the lightning bolt to earth (finale ignition) |
-| `energy` | Energy | CompoundParameter | 0.35 | 0..1 | master energy (ambient ↔ peak rates, capped) |
-| `climb` | Climb | CompoundParameter | 1.0 | 0..1.5 | ascension twist-rate multiplier |
-| `twist` | Twist | CompoundParameter | 3.0 | 0.5..8 | whole turns each strand winds over the full height |
-| `unstrand` | Unstrnd | CompoundParameter | 0 | 0..1 | strand vertical separation (also tightens the twist) |
-| `moire` | Moire | CompoundParameter | 0 | 0..1 | XOR strand-copy strength (interference moire); 0 = off |
+| `speed` | Speed | CompoundParameter | 0.35 | 0..1 | master rate for spin + star drift |
+| `climb` | Climb | CompoundParameter | 1.0 | −5..5 | signed ascension twist-rate (sign = direction; wide, cap relaxed) |
+| `twist` | Twist | CompoundParameter | 3.0 | 0..8 | whole turns each strand winds (0 = vertical) |
+| `unstrand` | Unstrnd | CompoundParameter | 0 | 0..1 | strand fan + vertical separation (all converged at 0) |
+| `moire` | Moire | CompoundParameter | 0 | 0..1 | XOR strand-copy strength; 0 = off |
 | `stars` | Stars | CompoundParameter | 0.4 | 0..1 | parallax starfield density/brightness |
-| `pulses` | Pulses | CompoundParameter | 0.5 | 0..1 | auto-pulse density (free-run) |
+| `pulses` | Pulses | CompoundParameter | 0.5 | 0..1 | auto-pulse density / inverse spacing |
+| `plsSpd` | PlsSpd | CompoundParameter | 0.4 | 0..1 | pulse travel speed up the strands |
+| `electro` | Electro | CompoundParameter | 0.3 | 0..1 | electron swarm (0 = die within a beat, 1 = more/faster/brighter) |
 | `thick` | Thick | CompoundParameter | 1.5 | 1..3 | strand stroke thickness (px) |
-| `cube` | Cube | BooleanParameter | false | — | also render the helix on the cube ring |
-| `hue` | Hue | CompoundParameter | 0 | 0..360 | rotate the palette-sampled colors (0 = pure palette) |
+| `desat` | Desat | CompoundParameter | 0 | 0..1 | desaturate palette colors toward white |
+| `smooth` | Smooth | CompoundParameter | 1.0 | 0..1 | motion blending + antialiasing (now continuous — see below) |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth (0 = pure screensaver) |
-| `sync` | Sync | BooleanParameter | true | — | grid-gate pulses (leave OFF — beatless song) |
-| `tempoDiv` | TempoDiv | EnumParameter | HALF | Tempo.Division | division pulses emit on when Sync is on |
-| `meta` | Meta | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
 
-CURATE: `Twist` default 3.0 turns, `Stars` 0.4, `Pulses` 0.5, `Thick` 1.5 — all
-first-guess screensaver values, tune on hardware. CURATE: `TempoDiv` default HALF
-is moot while Sync is off; picked blind.
+CURATE: `Twist` 3.0, `Stars` 0.4, `Pulses` 0.5, `PlsSpd` 0.4, `Electro` 0.3,
+`Thick` 1.5, `Climb` range ±5 — tune on hardware.
 
-## Triggers
+## Smooth (continuous)
 
-Three non-meta triggers, small → large, plus Meta:
+`Smooth` (default 1.0) blends motion + antialiasing: 0 = steppy/pixel-snapped/hard
+edges, 1 = smooth sub-pixel motion + antialiased forms. It is applied in exactly
+two places, each a **single continuous formulation** (no hidden rasterizer switch,
+so there is no jump the instant Smooth leaves 0 — the original bug):
 
-- `pulse` (small) — one bright pulse leaves the base of each strand and rides up
-  over ~5–9 s. A local highlight; reads immediately, resolves over the pulse life.
-- `reverse` (medium) — the helix ascension flips direction (twists the other way
-  around the ring). A continuous, few-seconds-to-read change of motion.
-- `strike` (large) — a white lightning bolt regenerates and cracks to earth with a
-  ~140 ms flash then a ~1.6 s glow decay. The full-field finale-ignition event.
-
-## Jump candidates
-
-Rows mirror the `bag.jumpable(...)` lines in the constructor 1:1. The three
-triggers are also registered in the bag.
-
-| Param | Jump range | Status | Notes |
-|---|---|---|---|
-| `twist` | [1, 6] | candidate | extremes excluded: <1 barely winds, >6 reads as vertical stripes at LED pitch |
-| `unstrand` | [0, 1] | candidate | full range safe (paired ↔ fully separated) |
-| `moire` | [0, 0.7] | candidate | upper reserved: full-strength XOR can strobe the strands to black |
-| `stars` | [0.1, 0.8] | candidate | floor keeps a few stars; ceiling avoids a solid red wash |
-| `climb` | [0.4, 1.3] | candidate | outer range reserved for manual performance use |
-| `pulses` | [0.2, 0.9] | candidate | avoids the fully-sparse and machine-gun extremes |
-
-Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [a,b]`.
+- `plotDisc` — the center is snapped at Smooth 0 and interpolated toward the true
+  sub-pixel position as Smooth rises; the radius is a **constant float `r` for all
+  Smooth** (the old integer radius `round(r)` at Smooth 0 was what made the stroke
+  jump thinner); the edge half-width grows continuously `hw = 0.5 + 0.5·Smooth`,
+  coverage-scaled. CURATE: the 0.5..1 px half-width endpoints.
+- `drawStars` — always the bilinear 2×2 sub-pixel splat with weights gated by
+  Smooth (`tx = (fx−ix)·Smooth`); at Smooth 0 it collapses to the floor pixel.
 
 ## Simulation-principles compliance
 
-- **Helix spin (sustained motion)** — one full turn around the ring = `1 /
-  turnsPerSec`. Peak `turnsPerSec = Climb · 0.12`; at Climb = 1.0 (default) that is
-  0.12 → **8.3 s/turn**, at Climb = 1.5 (max) it is 0.18 → **5.5 s/turn**, still
-  ≥ 5 s. Ambient (e=0) is 0.03 → 33 s/turn. The Climb range top (1.5) was chosen so
-  `1.5 · 0.12 = 0.18` sits exactly at the cap margin, never over.
-- **Pulse travel (sustained motion)** — full-height traversal = `1 / pulseSpeed`.
-  Peak 0.18 → **5.5 s**; ambient 0.11 → 9.1 s. Both ≥ 5 s. Pulses are the fastest
-  vertical motion and sit at the cap by construction (peak endpoint chosen = 0.18).
-- **Star counter-rotation (sustained motion)** — nearest layer (depth 1) sweeps the
-  ring in `1 / STAR_TURNS_PEAK = 7.7 s` at e=1; farther layers are slower
-  (`× depth`). ≥ 5 s. "Just fast enough against the main helix twist": at e=1 the
-  stars (0.13 turns/s) counter-rotate slightly faster than the helix (0.12 turns/s),
-  giving the parallax the brief calls for. CURATE: confirm the differential reads.
-- **Lightning strike (event-like)** — total life `BOLT_LIFE_MS = 1600` (≥ 1.5 s
-  event minimum), with a 140 ms full-bright flash then a quadratic glow decay. Fast,
-  but event-like motion is exempt from the 5 s cap and this clears the 1.5 s life
-  floor.
-- **Contrast / bold forms** — the strands are hard MAX-blended strokes (no
-  gradients); pulses are discrete bright discs; stars are single dim points. The
-  only fine texture is the intentional XOR moire, whose strength is a knob (default
-  0). Brightness is full at silence, blooming ≤ 1.30× on the audio swell.
-- CURATE: cube-ring render cost — at Twist 8 + Unstrnd (effective ~10 turns) on the
-  200-wide cube canvas the per-strand sub-step count approaches `MAX_HELIX_STEPS`;
-  confirm frame time is acceptable with `Cube` on, or lower the step density.
+- **Helix spin** — `Climb · lin(Speed, 0.03, 0.12)` turns/s. Climb's wide/signed
+  range intentionally lets spin exceed the ≥5 s/turn cap; this is a deliberate
+  exception for the Chrome outlier (Jeff wanted a much wider Climb).
+- **Pulse travel** — `lin(PlsSpd, 0.05, 0.50)` norm-height/s → full-height
+  traversal 20 s (PlsSpd 0) down to 2 s (PlsSpd 1). Also user-owned via PlsSpd.
+- **Star counter-rotation** — nearest layer sweeps the ring in `1 / 0.13 = 7.7 s`
+  at Speed 1; ≥ 5 s. "Just fast enough against the main helix twist" per the brief.
+  CURATE: confirm the differential reads.
+- **Electron swarm (event-like)** — births/deaths are event-rate; individual climb
+  (≤ 0.35 /s → ≥ ~3 s per full height) reads as organic sparkle, exempt from the
+  sustained-motion cap. CURATE: confirm density/brightness at Electro 1.
+- **Contrast / bold forms** — strands are hard MAX-blended strokes; pulses discrete
+  bright discs; stars single dim points; electrons small bright discs. The only
+  fine texture is the intentional XOR moire (default 0).
 - CURATE: strand thickness vs. LED pitch — verify a 1.5 px strand reads as a clean
-  line rather than a dotted spiral at high Twist, where adjacent windings crowd.
+  line at high Twist, where adjacent windings crowd.
+- CURATE: swarm frame cost — confirm frame time is fine at Twist 8 + full swarm.
 
 ## Curation log
 
 | Date | Change | Why |
 |---|---|---|
-| 2026-07-07 | Initial first-pass, Claude autonomous session — implemented cylinder-primary double-helix ascension (spin-based), riding pulses, unstranding vertical separation + tightening twist, XOR-scratch moire composite, counter-rotating parallax starfield, self-contained lightning-strike event, palette-driven deep-red colors with Satori change-cache; Sync/TempoDiv present but intended off (beatless song); compiles clean against the arrange API | Chrome 4:05 finale centerpiece per chrome-brief.md §6 pattern #3 + Jeff's storyboard |
+| 2026-07-07 | Initial first-pass — cylinder-primary double-helix ascension, riding pulses, unstranding separation + tightening twist, XOR moire, counter-rotating starfield, lightning-strike event, palette deep-red | Chrome 4:05 finale per chrome-brief.md §6 pattern #3 |
+| 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired) | Project-wide retirement of the Sync/TempoDiv + Meta control convention |
+| 2026-07-08 | Conventions pass: `energy`→`speed`; added `Smooth` (default 1.0) with a hard/smooth branch in `plotDisc`/`drawStars`; flagged Chrome's per-song speed units for a per-param decision | Package-wide param-naming + Smooth AA conventions |
+| 2026-07-08 | **Feedback revision** (this pass): (1) **Smooth made continuous** — removed the `sm≤0.001` rasterizer swap in `plotDisc`/`drawStars` (constant float radius + continuously-growing edge half-width + sub-pixel center); fixes the jump leaving 0. (2) **Twist** min 0.5→**0** (vertical). (3) **Climb** widened to signed **−5..5** (sign = direction), **Reverse trigger dropped**; cap intentionally relaxed. (4) **Pulses** = pure density; new **PlsSpd** knob owns pulse travel (dropped the Speed/audio coupling). (5) **Three strands** with Unstrnd-scaled phase+offset so all converge at Unstrnd 0. (6) **Electron swarm** added (LXLayer-per-entity, swatch 3, Electro-driven, death within 1 beat via live `tempo.period`); blit+mirror moved to `afterLayers()`. (7) **Desat** replaces **Hue**; **pulses** now from swatch 2 / white. (8) Removed **Strike**, **Pulse** and **Reverse** triggers, the **Cube** toggle + all lightning-bolt/cube machinery — cylinder-only, zero triggers. Resolved the "Speed units — DECISION NEEDED" section. | Jeff's Helix hardware/in-app feedback pass |

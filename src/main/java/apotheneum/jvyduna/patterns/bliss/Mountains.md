@@ -131,7 +131,7 @@ Hue actually change (Satori's cache idiom):
   forest 130/75/48, rock 30/45/62, snow 0/10/100). CURATE: picked blind.
 
 `Hue` now rotates the *sampled* colors (0 = pure project palette) — kept for
-live tweaking and RndTrig jumps. The per-range depth haze (`FAR_BRIGHTNESS`
+live tweaking. The per-range depth haze (`FAR_BRIGHTNESS`
 0.55 → 1.0, nearest boldest) multiplies on top per frame.
 
 ## Planet schemes (terrain structure only — no colors)
@@ -171,12 +171,11 @@ knob** (`audio.setDepth(audioDepth)`):
   and displayed at `80% + 20% × min(1, 1.25 × level)`. Gentle glow with the
   music, never clips.
 
-(The v1 bass-hit spawn gate was removed in the series RndTrig/Sync cleanup —
-spawns are always grid-gated now; see Tempo mapping.)
+(The v1 bass-hit spawn gate was removed in the series RndTrig/Sync cleanup.)
 
 **Depth knob / silence behavior**: `Audio` defaults to 0 = pure screensaver.
 At depth 0 (or with all taps at 0 in true silence), spawns run purely on the
-idle timer + tempo grid, ranges use the Rough knob + planet bias unmodified,
+idle timer, ranges use the Rough knob + planet bias unmodified,
 and the field sits at a steady 80% brightness. The full accumulate–fill–fade
 cycle runs identically without audio. Raising the knob continuously restores
 the two mappings above. Nothing in the pattern re-gates audio locally — the
@@ -184,29 +183,9 @@ knob is the single master gate.
 
 ## Tempo mapping
 
-Tempo locking is always on (the series RndTrig/Sync cleanup removed the Sync
-toggle). Two motion points lock to the grid against `TempoDiv` (default
-QUARTER):
-
-- **Range spawn** — once a spawn is due (idle interval elapsed), the field
-  holds until the next `TempoDiv` boundary (`TempoLock.crossed`, evaluated
-  once per frame and shared by both surfaces, so cube and cylinder spawn on
-  the same crossing when both are due). The full-field restart fade is gated
-  through the same crossing — the grid is the beat anchor.
-- **Reveal completion** — at spawn, the range's reveal duration is fixed and
-  retimed (`TempoLock.retime`) so the wipe closes the loop exactly on a
-  `TempoDiv` boundary. Clamp override `[0.7, 1.0]`: the wipe is only ever
-  *stretched* (up to 1.43×), never compressed, because the peak reveal speed
-  already sits exactly at the ≥ 5 s traversal cap. Since the spawn itself
-  landed on a boundary, the reveal is grid-aligned end to end. A range keeps
-  its fixed duration for its whole reveal (Energy or BPM changes mid-reveal
-  apply to the *next* range; a live BPM change can land the current range's
-  completion off-grid, self-correcting at the next spawn).
-
-The continuous wipe itself is never quantized — no stutter. `NewRidge`
-(manual trigger) bypasses the spawn gate but still retimes its completion.
-The `crossed()` gate ticks every frame so it never misreads a stale cycle
-count as an instant crossing.
+No tempo gating — all timing free-runs (Sync/TempoDiv/Meta convention retired
+2026-07-08): spawns fire as soon as the idle interval elapses and reveal wipes
+run at the live Energy-set duration.
 
 ## Energy mapping
 
@@ -215,16 +194,14 @@ count as an instant crossing.
 | Reveal wipe duration (full ring) | 8 s | 5 s | lin |
 | Idle gap between ranges | 14 s | 2.5 s | exp (÷ Spawn param) |
 
-Sustained motion respects the ≥5 s full-traversal cap even at e=1, including
-under grid retiming, which can only stretch the wipe (see compliance section).
+Sustained motion respects the ≥5 s full-traversal cap even at e=1 (see
+compliance section).
 
 ## Parameters
 
-UI order: triggers (RndTrig last of them), Energy, pattern parameters, camera
-parameters, Planet/Style, Audio, TempoDiv. Existing keys/labels are never
-renamed (saved `.lxp` files reference them); v2 adds seven new keys, and the
-series RndTrig/Sync cleanup (applied at merge) renamed `meta` → `rndTrig` and
-removed `sync`.
+UI order: triggers, Energy, pattern parameters, camera parameters,
+Planet/Style, Audio. Existing keys/labels are never renamed (saved `.lxp`
+files reference them); v2 added seven new keys.
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
@@ -246,8 +223,6 @@ removed `sync`.
 | `planet` | Planet | EnumParameter | Earth | 10 planets | terrain scheme; applies at next cycle |
 | `style` | Style | EnumParameter | Solid | Solid/Wire | banded fills vs After Dark Frame wireframe |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth (0 = pure screensaver) |
-| `tempoDiv` | TempoDiv | EnumParameter | QUARTER | Tempo.Division | grid division spawns/reveals lock to |
-| `rndTrig` | RndTrig | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
 
 Rough/Bands/Hue changes apply live (banding and colors are re-evaluated every
 frame in v2); roughness and the planet scheme are baked per range at its spawn.
@@ -256,39 +231,21 @@ than v1's flat 0) — pull back to 0 if curation prefers the original flat layou
 
 ## Triggers
 
-Four non-RndTrig triggers, small → large:
+Four triggers, small → large:
 
 - `glint` (small) — the whole field's display lift swells from the 80%
   baseline to 100% and settles back linearly over 2 s. No spatial motion;
   reads as moonlight glinting off the ranges. CURATE: verify a 80→100%
   whole-field swell is visible but subtle on hardware.
 - `newRidge` (medium) — an idle surface reveals its next range immediately
-  (skipping the idle timer and grid spawn gate); the range then takes its
-  normal 5–8 s wipe (still grid-retimed). Ignored while that surface is
-  revealing or fading (logged); on a full field it starts the restart fade
-  instead.
+  (skipping the idle timer); the range then takes its normal 5–8 s wipe.
+  Ignored while that surface is revealing or fading (logged); on a full field
+  it starts the restart fade instead.
 - `invert` (large) — instant whole-render vertical flip into/out of cave mode
   (mountains become stalactites hanging from the top). Event-like state change;
   the resulting image persists indefinitely.
 - `wipe` (large) — both surfaces fade to black over 2 s, then the accumulation
   restarts from the first (farthest) range. Reads immediately, resolves in 2 s.
-
-## Jump candidates
-
-Rows mirror the `bag.jumpable(...)` lines in the constructor 1:1. Status is
-updated during curation. All four triggers are also registered in the bag.
-
-| Param | Jump range | Status | Notes |
-|---|---|---|---|
-| `roughness` | [0.2, 0.9] | candidate | extremes excluded: 0 too flat, 1 + treble saturates |
-| `bandOffset` | [−0.75, 1.0] | candidate | full-negative floor avoided so base band survives |
-| `hueShift` | [0, 360] (full) | candidate | any rotation is safe |
-| `spawnRate` | [0.5, 2] | candidate | outer range reserved for manual performance use |
-| `rotY` | [0, 360] (full) | candidate | orbit jump: instant new vantage, seamless at any value |
-| `zoom` | [0.8, 1.6] | candidate | extremes excluded: <0.8 shrinks scene, >1.6 crops peaks |
-| `planet` | all (incl. Random) | candidate | applies at next cycle; logged at cycle start |
-
-Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [a,b]`.
 
 ## Simulation-principles compliance
 
@@ -296,14 +253,12 @@ Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [
   Ambient (e=0.35 → ~7 s; e=0 → 8 s): ≥ 25 col/s. Peak (e=1): 200 col / 5 s =
   40 col/s → **5.0 s full traversal, exactly at the ≥5 s cap**. The cylinder
   wipes its ring in the same 5–8 s, slower still. `REVEAL_SECONDS_PEAK` is a
-  named constant; the only thing that rescales the wipe is grid retiming,
-  whose clamp is `[0.7, 1.0]` — stretch-only, so the cap holds at every energy.
+  named constant; nothing rescales the wipe, so the cap holds at every energy.
 - **Camera parameters are static by default** — RotX/RotY/RotZ/Zoom/Persp
   default to a motionless scene identical in cadence to v1. They move only
-  when the operator (or a modulator/RndTrig jump) moves them; a *continuously
-  modulated* RotY should keep one full orbit ≥ 5 s (the operator's domain —
-  same convention as Lorre's rotation cap). CURATE: confirm a RndTrig rotY/zoom
-  jump (instant re-projection of a static scene) reads as a cut, not motion.
+  when the operator (or a modulator) moves them; a *continuously modulated*
+  RotY should keep one full orbit ≥ 5 s (the operator's domain — same
+  convention as Lorre's rotation cap).
 - **Restart fade (event-like)** — 2 s from full field to black, auto-triggered
   roughly once per cycle (~3 min ambient: 8 ranges × (reveal + idle)). 2 s ≥
   1.5 s event minimum, preceded by a full idle interval of hold.
@@ -330,9 +285,6 @@ Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [
   columns) — verify it reads as a generating grid, not noise, on hardware.
 - CURATE: random wipe start column per range — confirm it reads as intentional
   variety rather than inconsistency.
-- CURATE: grid spawn-hold (up to one TempoDiv after a spawn is due) — confirm
-  grid-locked spawns read as musical rather than hesitant at slow BPMs with
-  large divisions.
 
 ## Curation log
 
@@ -343,3 +295,4 @@ Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [
 | 2026-07-05 | Adversarial review fix: `crossed()` now ticks every frame regardless of Sync (`crossed(div) && frameSyncOn`) — previously, toggling Sync off then on made the first `crossed()` call compare a stale cycle count and fire a due spawn immediately, up to one full division off-grid | Grid gate must stay synchronized while dormant (matches Zot/Lorre usage) |
 | 2026-07-06 | v2 (Jeff's feedback): band colors are palette-driven (swatch first-4 / lerp-sampled / fixed fallback, Satori-style cache); renderer re-architected from baked column commits to a per-frame projected terrain ring so new live camera params work — RotX/RotZ ring tilt, RotY seamless orbit, Zoom, Persp; added Planet enum (the module's original Mercury..Pluto + Random list, recovered from the `MOUNTAIN.AD` binary) as terrain-structure schemes; added Style Solid/Wire (After Dark "Frame" grid); ranges are one coherent terrain (35% cross-range blend) with optional planet water plane; lifecycle/tempo/audio/trigger machinery unchanged, all existing parameter keys preserved | Palette-driven color + XYZ rotation + After Dark planet fidelity |
 | 2026-07-06 | Merge adaptation: applied the series RndTrig/Sync cleanup (from the parallel Lorre curation pass on main) onto v2 — removed the `sync` toggle (grid locking always on), removed the bass-hit spawn gate (`BASS_GATE_*`, `bassWaitMs`), renamed `meta` → `rndTrig` (registered after `glint`); doc sections updated to match | v2 was developed remotely from a pre-cleanup base; local main had already applied the cleanup series-wide |
+| 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path). Dropped `tempoDiv` and `rndTrig` params, the spawn/restart grid gate (`TempoLock.crossed`), the reveal-completion retime (`TempoLock.retime`, `REVEAL_RETIME_MAX`, `syncedRevealMs`) and the TriggerBag jump machinery — spawns now fire when the idle interval elapses and reveals run at the live Energy duration; `.lxp` values on `tempoDiv`/`rndTrig` are dropped on load | Jeff retired the project-wide Sync/TempoDiv + Meta pattern-control convention |

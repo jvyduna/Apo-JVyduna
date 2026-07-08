@@ -4,11 +4,10 @@ import java.util.List;
 
 import apotheneum.Apotheneum;
 import apotheneum.ApotheneumPattern;
+import apotheneum.jvyduna.util.AlienGlyph8;
 import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.PixelFont5;
 import apotheneum.jvyduna.util.SurfaceCanvas;
-import apotheneum.jvyduna.util.TempoLock;
-import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
@@ -49,16 +48,15 @@ import heronarts.lx.utils.LXUtils;
  * doubling down on darkness after `rafters`.
  *
  * Standalone (no composition driving it) the defaults are a good deadpan
- * screensaver: a decimal clock ticking on the quarter-note grid at a muted
- * phosphor brightness.
+ * screensaver: a decimal clock ticking at the quarter-note BPM period at a
+ * muted phosphor brightness.
  *
  * See HoldClock.md (beside this file) for the full design note. All visual
  * subsystems are built: the bezel/tick/AA-hand analog face, the split-flap
  * flip face, the binary dot-grid, the base-N occult dial, the multi-strand
- * crystal-staircase shimmer cascade, the word-wrapped held message, the
- * never-resolving "estimated wait" line and the VHS button-glitch melt. The
- * remaining CURATE constants (dawn/brightness/sweep timings, mystic base) are
- * blind-picked and want a hardware pass.
+ * crystal-staircase shimmer cascade, the word-wrapped held message and the VHS
+ * button-glitch melt. The remaining CURATE constants (dawn/brightness/sweep
+ * timings, mystic base) are blind-picked and want a hardware pass.
  */
 @LXCategory("Apotheneum/jvyduna")
 @LXComponent.Name("HoldClock")
@@ -98,6 +96,13 @@ public class HoldClock extends ApotheneumPattern {
   /** Number of positions on the mystical base-N dial. */
   private static final int MYSTIC_BASE = 12; // CURATE
 
+  /** Cube digital-text vertical center as a fraction from the TOP of the
+   *  canvas: 1/3 from the top = 2/3 of install height up from the ground, so
+   *  the octal/flip/hex readout rides at a comfortable eye line on the cube.
+   *  The cylinder keeps 0.5 (already correct). Geometric faces (analog/binary/
+   *  mystic) ignore this and stay centered. */
+  private static final double CUBE_TEXT_CENTER = 1.0 / 3.0; // CURATE
+
   /** Treads per staircase flight in the shimmer cascade. One flight spans the
    *  full canvas and scrolls up exactly one full height per SHIMMER_SWEEP_MS,
    *  so the sustained rise still honors the >= 5 s traversal cap. */
@@ -131,8 +136,8 @@ public class HoldClock extends ApotheneumPattern {
   /** Clock face style; baseFlip walks this list to morph the counter. */
   public enum ClockMode {
     ANALOG("Analog"),   // institutional hands (bezel, ticks, AA hands)
-    FLIP("Flip"),       // split-flap flip-clock digits
-    DECIMAL("Decimal"), // HH:MM:SS phosphor digits
+    FLIP("Flip"),       // split-flap flip-clock digits (alien octal)
+    DECIMAL("Octal"),   // HH:MM:SS phosphor digits in the alien base-8 glyph set
     BINARY("Binary"),   // binary BCD dot-grid counter
     HEX("Hex"),         // hexadecimal counter
     MYSTIC("Mystic");   // base-N occult dial
@@ -144,31 +149,25 @@ public class HoldClock extends ApotheneumPattern {
 
   // ---- Composition helpers ---------------------------------------------------
 
-  private final TriggerBag bag = new TriggerBag("HoldClock");
   private final AudioReactive audio;
-  private final TempoLock tempoLock;
 
   // ---- Parameters (registration order per house style) -----------------------
 
-  public final TriggerParameter tick = bag.register(
+  public final TriggerParameter tick =
     new TriggerParameter("Tick", this::tick)
-    .setDescription("Advance the clock by one unit immediately (a manual on-beat tick)"));
+    .setDescription("Advance the clock by one unit immediately (a manual on-beat tick)");
 
-  public final TriggerParameter boot = bag.register(
+  public final TriggerParameter boot =
     new TriggerParameter("Boot", this::boot)
-    .setDescription("The 0:19 reveal: leave the cold open and boot the hold-screen clock"));
+    .setDescription("The 0:19 reveal: leave the cold open and boot the hold-screen clock");
 
-  public final TriggerParameter baseFlip = bag.register(
+  public final TriggerParameter baseFlip =
     new TriggerParameter("BaseFlip", this::baseFlip)
-    .setDescription("Advance the clock to the next (more esoteric) mode: analog → flip → decimal → binary → hex → mystic"));
+    .setDescription("Advance the clock to the next (more esoteric) mode: analog → flip → decimal → binary → hex → mystic");
 
-  public final TriggerParameter glitch = bag.register(
+  public final TriggerParameter glitch =
     new TriggerParameter("Glitch", this::glitch)
-    .setDescription("One-frame loop-glitch / VHS melt of the current frame (the button flourish)"));
-
-  public final TriggerParameter meta =
-    new TriggerParameter("Meta", bag::fire)
-    .setDescription("Randomly fire one of HoldClock's triggers or jump a parameter");
+    .setDescription("One-frame loop-glitch / VHS melt of the current frame (the button flourish)");
 
   public final EnumParameter<Phase> phase =
     new EnumParameter<Phase>("Phase", Phase.RUNNING)
@@ -176,7 +175,11 @@ public class HoldClock extends ApotheneumPattern {
 
   public final EnumParameter<ClockMode> clockMode =
     new EnumParameter<ClockMode>("Mode", ClockMode.DECIMAL)
-    .setDescription("Clock face style; the song morphs decimal → binary → hex → mystic across the outro");
+    .setDescription("Clock face style; the song morphs octal → binary → hex → mystic across the outro");
+
+  public final EnumParameter<Tempo.Division> speed =
+    new EnumParameter<Tempo.Division>("Speed", Tempo.Division.QUARTER)
+    .setDescription("Tempo division per clock tick: Quarter = one 'second' per beat (so 2× as fast at 120 vs 60 BPM); a whole note (1 bar) = 4× slower");
 
   public final CompoundParameter brightness =
     new CompoundParameter("Bright", BRIGHT_DEFAULT, 0, 1)
@@ -198,17 +201,13 @@ public class HoldClock extends ApotheneumPattern {
     new StringParameter("Msg", "")
     .setDescription("Held-frame / cold-open text (e.g. GOD PUT ME ON HOLD, PLEASE HOLD); driven by clip-lane string events");
 
+  public final CompoundParameter smooth =
+    new CompoundParameter("Smooth", 1.0)
+    .setDescription("Motion blending + antialiasing: 0 = steppy/pixel-snapped/hard edges, 1 = smooth sub-pixel motion and antialiased forms");
+
   public final CompoundParameter audioDepth =
     new CompoundParameter("Audio", 0)
     .setDescription("Audio reactivity depth: 0 = pure clock (default), 1 = subtle per-kick jitter");
-
-  public final BooleanParameter sync =
-    new BooleanParameter("Sync", true)
-    .setDescription("Tick the clock on the tempo grid; off free-runs at the current BPM period");
-
-  public final EnumParameter<Tempo.Division> tempoDiv =
-    new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.QUARTER)
-    .setDescription("Tempo division the clock ticks (and the colon blinks) on when Sync is enabled");
 
   // ---- Surfaces (preallocated; zero-alloc render) ----------------------------
 
@@ -239,46 +238,41 @@ public class HoldClock extends ApotheneumPattern {
 
   private int elapsedTicks = 0;      // the clock's counted units (ticks ≈ seconds)
   private boolean colonOn = true;    // blinks each tick
-  private double freeRunMs = 0;      // free-running (Sync off) tick accumulator
+  private double freeRunMs = 0;      // free-running tick accumulator (BPM period)
   private double coldOpenMs = 0;     // time spent in COLD_OPEN, for the dawn ramp
   private double shimmerPhase = 0;   // 0..1 ascending-sweep position
   private double glitchMs = 0;       // remaining button-glitch envelope
   private int jitterX = 0;           // per-frame audio kick offset
-  private double estWaitMs = 0;      // institutional "estimated wait" — only ever grows
   private double glitchPhase = 0;    // horizontal wobble phase for the melt
   private int glitchSeed = 0;        // per-frame jitter seed for the row tears
   private int lastFlipTick = 0;      // last elapsedTicks a flap was armed for
   private double flipMs = 0;         // split-flap flap-fall envelope
+  private double smoothAA = 1.0;     // frame-cached Smooth: edge AA + eased transitions
+  private double textCenterFrac = 0.5; // per-surface digital-text vertical anchor (top-fraction)
+  private boolean alienDigits = false; // when set, digit glyphs render as the alien base-8 set
 
   public HoldClock(LX lx) {
     super(lx);
     this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
-    this.tempoLock = new TempoLock(lx);
     this.clockMode.setWrappable(true); // baseFlip wraps mystic → analog
 
-    // Triggers first (Meta last of them, via the bag)
+    // Triggers first
     addParameter("tick", this.tick);
     addParameter("boot", this.boot);
     addParameter("baseFlip", this.baseFlip);
     addParameter("glitch", this.glitch);
-    addParameter("meta", this.meta);
     // Pattern parameters
     addParameter("phase", this.phase);
     addParameter("clockMode", this.clockMode);
+    addParameter("speed", this.speed);
     addParameter("brightness", this.brightness);
     addParameter("hue", this.hue);
     addParameter("shimmer", this.shimmer);
     addParameter("freeze", this.freeze);
     addParameter("message", this.message);
-    // Audio, then Sync / TempoDiv
+    addParameter("smooth", this.smooth);
+    // Audio
     addParameter("audio", this.audioDepth);
-    addParameter("sync", this.sync);
-    addParameter("tempoDiv", this.tempoDiv);
-
-    // Meta jump candidates — mirrored 1:1 in HoldClock.md
-    bag.jumpable(this.clockMode);
-    bag.jumpable(this.brightness, 0.2, 0.5); // CURATE: stay in the deadpan band
-    bag.jumpable(this.hue, 0, 360);
   }
 
   // ---- Trigger handlers ------------------------------------------------------
@@ -311,12 +305,10 @@ public class HoldClock extends ApotheneumPattern {
   @Override
   protected void render(double deltaMs) {
     this.audio.tick(deltaMs);
+    this.smoothAA = LXUtils.constrain(this.smooth.getValue(), 0, 1);
     setColors(LXColor.BLACK);
 
-    // Poll the grid gate EVERY frame (even when Sync is off) so it never
-    // misreads a stale cycle count as an instant crossing when re-enabled.
-    final boolean beat = this.tempoLock.crossed(this.tempoDiv.getEnum());
-    advanceClock(deltaMs, beat);
+    advanceClock(deltaMs);
 
     // Cold-open dawn ramp + shimmer sweep + glitch envelope
     final Phase ph = this.phase.getEnum();
@@ -326,12 +318,6 @@ public class HoldClock extends ApotheneumPattern {
       this.glitchMs = Math.max(0, this.glitchMs - deltaMs);
       this.glitchPhase += deltaMs * 0.02;
       this.glitchSeed++;
-    }
-
-    // Institutional "estimated wait" — counts UP forever while the clock runs,
-    // never resolving (the on-hold gag). Frozen while the punchline is held.
-    if (ph == Phase.RUNNING && !this.freeze.isOn()) {
-      this.estWaitMs += deltaMs;
     }
 
     // Split-flap: arm a flap-fall whenever the counted value changes.
@@ -347,37 +333,51 @@ public class HoldClock extends ApotheneumPattern {
     // Overall display multiplier (brightness lives here so drawing stays full-color)
     final double mult = displayMult(ph);
 
-    // Draw the same deadpan scene onto both surfaces (centered), then paint
-    // exterior + interior on the cube (all faces) and the cylinder ring.
+    // Cube: digital text rides at 2/3 install height. Paint each exterior face
+    // straight and each interior face horizontally mirrored, so the clock reads
+    // left-to-right correct to viewers both outside and inside (the inward LED
+    // layer already reverses what it shows; the mirror cancels it).
+    this.textCenterFrac = CUBE_TEXT_CENTER;
     drawScene(this.faceCanvas, this.faceScratch, ph);
-    this.faceCanvas.copyTo(Apotheneum.cube.exterior.front, this.colors, mult, false);
-    copyCubeFace(Apotheneum.cube.exterior.front); // replicate to all 8 faces
+    final Apotheneum.Cube.Orientation cubeExt = Apotheneum.cube.exterior;
+    final Apotheneum.Cube.Orientation cubeInt = Apotheneum.cube.interior;
+    this.faceCanvas.copyTo(cubeExt.front, this.colors, mult, false);
+    this.faceCanvas.copyTo(cubeExt.right, this.colors, mult, false);
+    this.faceCanvas.copyTo(cubeExt.back, this.colors, mult, false);
+    this.faceCanvas.copyTo(cubeExt.left, this.colors, mult, false);
+    this.faceCanvas.copyToMirrored(cubeInt.front, this.colors, mult);
+    this.faceCanvas.copyToMirrored(cubeInt.right, this.colors, mult);
+    this.faceCanvas.copyToMirrored(cubeInt.back, this.colors, mult);
+    this.faceCanvas.copyToMirrored(cubeInt.left, this.colors, mult);
 
+    // Cylinder: text stays centered (already correct); interior mirrored too.
+    this.textCenterFrac = 0.5;
     drawScene(this.cylinderCanvas, this.cylinderScratch, ph);
     this.cylinderCanvas.copyTo(Apotheneum.cylinder.exterior, this.colors, mult, false);
-    copyCylinderExterior();
+    this.cylinderCanvas.copyToMirrored(Apotheneum.cylinder.interior, this.colors, mult);
   }
 
-  /** Advance the counted clock and colon blink on the tempo grid (Sync) or a
-   *  free-running BPM-period timer (Sync off). */
-  private void advanceClock(double deltaMs, boolean beat) {
+  /** Advance the counted clock and colon blink on a free-running BPM-period
+   *  timer (it ticks at the musical rate without grid-phase locking). */
+  private void advanceClock(double deltaMs) {
     if (this.freeze.isOn()) {
       return; // held button frame: the clock is frozen mid-tick
     }
-    if (this.sync.isOn()) {
-      if (beat) {
-        this.elapsedTicks++;
-        this.colonOn = !this.colonOn;
-      }
-    } else {
-      this.freeRunMs += deltaMs;
-      final double period = Math.max(1, this.tempoLock.beatPeriodMs());
-      while (this.freeRunMs >= period) {
-        this.freeRunMs -= period;
-        this.elapsedTicks++;
-        this.colonOn = !this.colonOn;
-      }
+    this.freeRunMs += deltaMs;
+    final double period = tickPeriodMs();
+    while (this.freeRunMs >= period) {
+      this.freeRunMs -= period;
+      this.elapsedTicks++;
+      this.colonOn = !this.colonOn;
     }
+  }
+
+  /** Duration of one clock tick in ms: the quarter-note beat period scaled by
+   *  the Speed division. Quarter → one tick per beat; a whole note (1 bar) →
+   *  four beats per tick (4× slower). Clamped to a sane floor. */
+  private double tickPeriodMs() {
+    final double beat = Math.max(1, this.lx.engine.tempo.period.getValue());
+    return beat / this.speed.getEnum().multiplier;
   }
 
   /** Overall brightness multiplier for the current phase / committed beats. */
@@ -390,12 +390,16 @@ public class HoldClock extends ApotheneumPattern {
         return 0;
       case COLD_OPEN: {
         final double dawn = LXUtils.constrain(this.coldOpenMs / DAWN_MS, 0, 1);
-        return this.brightness.getValue() * dawn; // near-black, dawning in
+        // Smooth eases the dawn ramp into a soft crossfade; at Smooth = 0 it is
+        // the raw linear (harder-stepping) fade-in.
+        return this.brightness.getValue() * eased(dawn); // near-black, dawning in
       }
       case RUNNING:
       default: {
         final double base = this.brightness.getValue();
-        final double sh = this.shimmer.getValue();
+        // Smooth eases the shimmer brightness excursion (soft rise/fall) rather
+        // than a linear step; gated so Smooth = 0 keeps the raw ramp.
+        final double sh = eased(this.shimmer.getValue());
         return base + sh * (SHIMMER_PEAK_MULT - base); // shimmer → brightest
       }
     }
@@ -407,6 +411,7 @@ public class HoldClock extends ApotheneumPattern {
    *  Brightness is applied later at copy time via {@link #displayMult}. */
   private void drawScene(SurfaceCanvas c, SurfaceCanvas scratch, Phase ph) {
     c.fill(LXColor.BLACK);
+    this.alienDigits = false; // messages / cold-open colon keep the real font
 
     // The held punchline frame overrides everything (hard cut).
     if (this.freeze.isOn()) {
@@ -459,10 +464,12 @@ public class HoldClock extends ApotheneumPattern {
         drawAnalog(c, color);
         break;
       case FLIP:
+        this.alienDigits = true; // base-8 alien glyphs on the split-flap cards
         drawFlip(c, color);
         break;
       case DECIMAL:
-        blitCentered(c, writeTime(this.displayBuf, this.colonOn), color);
+        this.alienDigits = true; // base-8 alien glyphs
+        blitCentered(c, writeOctalTime(this.displayBuf, this.colonOn), color);
         break;
       case BINARY:
         drawBinary(c, color);
@@ -475,22 +482,6 @@ public class HoldClock extends ApotheneumPattern {
         drawMystic(c, color);
         break;
     }
-    // The never-resolving "estimated wait", counting UP under the clock.
-    drawEstimatedWait(c, color);
-  }
-
-  /** The institutional-hold gag: an "EST WAIT MM:SS" status line under the
-   *  clock whose time only ever grows, never resolving. Falls back to a bare
-   *  MM:SS when the labelled form will not fit the surface width. */
-  private void drawEstimatedWait(SurfaceCanvas c, int color) {
-    final int cellW = PixelFont5.WIDTH + 1;
-    final int labelLen = writeEstWait(this.displayBuf, true);
-    final int fitLen = ((labelLen * cellW - 1) <= (c.width - 2))
-      ? labelLen
-      : writeEstWait(this.displayBuf, false);
-    final int dim = scaleColor(color, 0.55); // a quieter, secondary read
-    final int y0 = c.height - PixelFont5.HEIGHT - 1; // pinned to the bottom
-    blitText(c, fitLen, 1, y0, dim);
   }
 
   /**
@@ -601,7 +592,7 @@ public class HoldClock extends ApotheneumPattern {
       final double a = 2 * Math.PI * i / seg;
       final double x = cx + Math.cos(a) * r;
       final double y = cy + Math.sin(a) * r;
-      c.lineWu(px, py, x, y, dim, false, MAX);
+      smoothLine(c, px, py, x, y, dim, false);
       px = x;
       py = y;
     }
@@ -611,8 +602,8 @@ public class HoldClock extends ApotheneumPattern {
       final double a = 2 * Math.PI * k / 12 - Math.PI / 2;
       final double inner = (k % 3 == 0) ? r * 0.78 : r * 0.86;
       final int tc = (k % 3 == 0) ? color : scaleColor(color, 0.6);
-      c.lineWu(cx + Math.cos(a) * inner, cy + Math.sin(a) * inner,
-        cx + Math.cos(a) * r, cy + Math.sin(a) * r, tc, false, MAX);
+      smoothLine(c, cx + Math.cos(a) * inner, cy + Math.sin(a) * inner,
+        cx + Math.cos(a) * r, cy + Math.sin(a) * r, tc, false);
     }
 
     // Hands from a continuous (smoothly-swept) tick position
@@ -629,7 +620,7 @@ public class HoldClock extends ApotheneumPattern {
   /** Split-flap flip-clock face: each digit sits on a dim card with a central
    *  flap seam, and the changing (rightmost) card animates a flap fall. */
   private void drawFlip(SurfaceCanvas c, int color) {
-    final int len = writeTime(this.displayBuf, this.colonOn);
+    final int len = writeOctalTime(this.displayBuf, this.colonOn);
     final int cellW = PixelFont5.WIDTH + 1;
     final int textW = len * cellW - 1;
     final int scale = Math.max(1, Math.min(
@@ -637,7 +628,7 @@ public class HoldClock extends ApotheneumPattern {
       (c.height - 2) / PixelFont5.HEIGHT));
     final int totalW = textW * scale;
     final int x0 = (c.width - totalW) / 2 + this.jitterX;
-    final int y0 = (c.height - PixelFont5.HEIGHT * scale) / 2;
+    final int y0 = textTopY(c, scale);
 
     final int card = scaleColor(color, 0.14);
     final int seam = 0xff000000; // the split-flap hinge line
@@ -663,7 +654,7 @@ public class HoldClock extends ApotheneumPattern {
       // Glyph
       for (int gy = 0; gy < PixelFont5.HEIGHT; ++gy) {
         for (int gx = 0; gx < PixelFont5.WIDTH; ++gx) {
-          if (PixelFont5.pixel(ch, gx, gy)) {
+          if (glyphPixel(ch, gx, gy)) {
             fillBlock(c, gx0 + gx * scale, y0 + gy * scale, scale, color);
           }
         }
@@ -675,7 +666,8 @@ public class HoldClock extends ApotheneumPattern {
         }
         // The two seconds cards flap-fall on a fresh tick
         if (flip > 0 && ci >= len - 2) {
-          final int edge = cardTop + (int) Math.round((1 - flip) * cardH);
+          // Smooth eases the flap fall into a smooth drop; raw/stepped at 0.
+          final int edge = cardTop + (int) Math.round((1 - eased(flip)) * cardH);
           final int hl = scaleColor(color, 0.7);
           for (int xx = 0; xx < cardW; ++xx) {
             c.setMax(gx0 + xx, edge, hl);
@@ -742,7 +734,7 @@ public class HoldClock extends ApotheneumPattern {
       final double a = 2 * Math.PI * i / seg;
       final double x = cx + Math.cos(a) * r;
       final double y = cy + Math.sin(a) * r;
-      c.lineWu(px, py, x, y, dim, false, MAX);
+      smoothLine(c, px, py, x, y, dim, false);
       px = x;
       py = y;
     }
@@ -809,13 +801,15 @@ public class HoldClock extends ApotheneumPattern {
           continue;
         }
         final double xk = k * treadW + xOff;
-        // Proximity to the ascending highlight band brightens this tread.
+        // Proximity to the ascending highlight band brightens this tread. The
+        // falloff is eased by Smooth so the "wave of bliss" crossfades smoothly
+        // (Smooth = 1) rather than stepping (Smooth = 0).
         final double d = Math.abs(rk - hiRow) / (h * 0.5 + 1);
-        final double hi = Math.max(0, 1 - d);
+        final double hi = eased(Math.max(0, 1 - d));
         final int treadArgb = scaleColor(bright, sb * (0.5 + 0.5 * hi));
         // Tread (horizontal) then riser (vertical) — the staircase profile.
-        c.lineWu(xk, rk, xk + treadW, rk, treadArgb, true, MAX);
-        c.lineWu(xk + treadW, rk, xk + treadW, rNext, scaleColor(treadArgb, 0.8), true, MAX);
+        smoothLine(c, xk, rk, xk + treadW, rk, treadArgb, true);
+        smoothLine(c, xk + treadW, rk, xk + treadW, rNext, scaleColor(treadArgb, 0.8), true);
         // A crystalline glint at the leading corner of the tread.
         if (hi > 0.35) {
           stampDisc(c, (int) Math.round(xk + treadW), (int) Math.round(rk), 1,
@@ -823,6 +817,54 @@ public class HoldClock extends ApotheneumPattern {
         }
       }
     }
+  }
+
+  // ---- Smooth (house AA / interpolation convention) --------------------------
+
+  /**
+   * Draw a fractional line whose edge antialiasing is gated by the Smooth knob
+   * ({@link #smoothAA}). At Smooth = 1 it is a full Xiaolin-Wu antialiased line
+   * (soft sub-pixel edges); at 0 it collapses to a hard, pixel-snapped integer
+   * line (steppy edges); between, the AA fringe fades in with Smooth while a
+   * hard core keeps the form crisp. Zero-alloc: no per-call allocation, and the
+   * default (Smooth = 1) takes the single pure-Wu path with no overhead.
+   */
+  private void smoothLine(SurfaceCanvas c, double x0, double y0, double x1, double y1,
+                          int argb, boolean wrapX) {
+    final double s = this.smoothAA;
+    if (s >= 0.999) {
+      c.lineWu(x0, y0, x1, y1, argb, wrapX, MAX); // full AA (default)
+      return;
+    }
+    // Hard, pixel-snapped core so Smooth = 0 reads steppy. lineMax wraps x
+    // (floorMod); the clock forms sit centered within the canvas so no fringe
+    // wraps onto the opposite edge here. CURATE: revisit if any smoothLine
+    // caller ever draws right up to a face seam.
+    c.lineMax((int) Math.round(x0), (int) Math.round(y0),
+      (int) Math.round(x1), (int) Math.round(y1), argb);
+    if (s > 0) {
+      // Layer the AA fringe on top, its coverage scaled by Smooth so soft
+      // edges fade in continuously (MAX blend keeps the hard core intact).
+      c.lineWu(x0, y0, x1, y1, scaleColor(argb, s), wrapX, MAX);
+    }
+  }
+
+  /** Classic smoothstep ease (identity at the ends), for eased transitions. */
+  private static double smoothstep(double t) {
+    if (t <= 0) {
+      return 0;
+    }
+    if (t >= 1) {
+      return 1;
+    }
+    return t * t * (3 - 2 * t);
+  }
+
+  /** Blend a linear ramp {@code t} toward its smoothstep-eased form by the
+   *  Smooth knob: at Smooth = 0 the raw (hard/steppy) ramp, at 1 a fully eased
+   *  crossfade — so brightness / shimmer / flap transitions gate on Smooth. */
+  private double eased(double t) {
+    return LXUtils.lerp(t, smoothstep(t), this.smoothAA);
   }
 
   /** Draw one clock hand from center at a fraction (0 = 12 o'clock, clockwise),
@@ -833,14 +875,14 @@ public class HoldClock extends ApotheneumPattern {
     final double ex = cx + Math.cos(a) * len;
     final double ey = cy + Math.sin(a) * len;
     if (thick <= 1) {
-      c.lineWu(cx, cy, ex, ey, argb, false, MAX);
+      smoothLine(c, cx, cy, ex, ey, argb, false);
       return;
     }
     final double perpx = -Math.sin(a);
     final double perpy = Math.cos(a);
     final double half = (thick - 1) / 2.0;
     for (double o = -half; o <= half + 1e-6; o += 1) {
-      c.lineWu(cx + perpx * o, cy + perpy * o, ex + perpx * o, ey + perpy * o, argb, false, MAX);
+      smoothLine(c, cx + perpx * o, cy + perpy * o, ex + perpx * o, ey + perpy * o, argb, false);
     }
   }
 
@@ -856,16 +898,16 @@ public class HoldClock extends ApotheneumPattern {
           Math.max(1, (int) Math.round(size * 0.5)), argb);
         break;
       case 1: // radial dash
-        c.lineWu(mx - dxr * size, my - dyr * size, mx + dxr * size, my + dyr * size, argb, false, MAX);
+        smoothLine(c, mx - dxr * size, my - dyr * size, mx + dxr * size, my + dyr * size, argb, false);
         break;
       case 2: // cross (X)
-        c.lineWu(mx - dxr * size, my - dyr * size, mx + dxr * size, my + dyr * size, argb, false, MAX);
-        c.lineWu(mx - dxt * size, my - dyt * size, mx + dxt * size, my + dyt * size, argb, false, MAX);
+        smoothLine(c, mx - dxr * size, my - dyr * size, mx + dxr * size, my + dyr * size, argb, false);
+        smoothLine(c, mx - dxt * size, my - dyt * size, mx + dxt * size, my + dyt * size, argb, false);
         break;
       default: { // caret / open triangle facing outward
         final double bx = mx - dxr * size, by = my - dyr * size;
-        c.lineWu(bx - dxt * size, by - dyt * size, mx + dxr * size * 0.4, my + dyr * size * 0.4, argb, false, MAX);
-        c.lineWu(bx + dxt * size, by + dyt * size, mx + dxr * size * 0.4, my + dyr * size * 0.4, argb, false, MAX);
+        smoothLine(c, bx - dxt * size, by - dyt * size, mx + dxr * size * 0.4, my + dyr * size * 0.4, argb, false);
+        smoothLine(c, bx + dxt * size, by + dyt * size, mx + dxr * size * 0.4, my + dyr * size * 0.4, argb, false);
         break;
       }
     }
@@ -928,8 +970,16 @@ public class HoldClock extends ApotheneumPattern {
     final int scale = Math.max(1, Math.min(
       (c.width - 2) / Math.max(1, textW),
       (c.height - 2) / PixelFont5.HEIGHT));
-    final int y0 = (c.height - PixelFont5.HEIGHT * scale) / 2;
-    blitText(c, len, scale, y0, color);
+    blitText(c, len, scale, textTopY(c, scale), color);
+  }
+
+  /** Top-row y for a scale-high glyph row whose vertical center sits at
+   *  {@link #textCenterFrac} of the canvas height (0.5 = centered; 1/3 = the
+   *  cube's 2/3-install-height anchor). Clamped so the row stays on-canvas. */
+  private int textTopY(SurfaceCanvas c, int scale) {
+    final int glyphH = PixelFont5.HEIGHT * scale;
+    final int y0 = (int) Math.round(c.height * this.textCenterFrac - glyphH / 2.0);
+    return LXUtils.constrain(y0, 0, Math.max(0, c.height - glyphH));
   }
 
   /** Blit displayBuf[0..len) horizontally centered at the given integer scale
@@ -947,12 +997,22 @@ public class HoldClock extends ApotheneumPattern {
       final int gx0 = x0 + ci * cellW * scale;
       for (int gy = 0; gy < PixelFont5.HEIGHT; ++gy) {
         for (int gx = 0; gx < PixelFont5.WIDTH; ++gx) {
-          if (PixelFont5.pixel(ch, gx, gy)) {
+          if (glyphPixel(ch, gx, gy)) {
             fillBlock(c, gx0 + gx * scale, y0 + gy * scale, scale, color);
           }
         }
       }
     }
+  }
+
+  /** Glyph pixel lookup routing digit chars to the alien base-8 set when
+   *  {@link #alienDigits} is set (the octal / flip modes); everything else —
+   *  letters, the ':' separator, real hex digits — stays on {@link PixelFont5}. */
+  private boolean glyphPixel(char ch, int gx, int gy) {
+    if (this.alienDigits && ch >= '0' && ch <= '7') {
+      return AlienGlyph8.pixel(ch - '0', gx, gy);
+    }
+    return PixelFont5.pixel(ch, gx, gy);
   }
 
   /** Fill a scale×scale block; x is guarded to the canvas so text never wraps. */
@@ -967,43 +1027,27 @@ public class HoldClock extends ApotheneumPattern {
     }
   }
 
-  /** Write HH:MM:SS from elapsedTicks (ticks treated as seconds). */
-  private int writeTime(char[] buf, boolean colon) {
-    // CURATE: ticks display as seconds 1:1; map to real wall-clock elapsed if
-    // the song wants that instead (see HoldClock.md CURATE notes).
-    final int s = Math.floorMod(this.elapsedTicks, 360000); // wrap at 100h
-    final int hh = (s / 3600) % 100;
-    final int mm = (s / 60) % 60;
-    final int ss = s % 60;
-    int i = two(buf, 0, hh);
+  /** Write HH:MM:SS as an octal-native (base-8) count for the alien glyph set:
+   *  each field rolls at 64 so both octal digits stay in 0..7 (00..77). The
+   *  digit chars '0'..'7' are mapped to the alien glyphs at blit time; the ':'
+   *  separator blinks off (space) on alternating ticks like the decimal face. */
+  private int writeOctalTime(char[] buf, boolean colon) {
+    final int s = Math.floorMod(this.elapsedTicks, 64 * 64 * 64); // wrap at 64^3
+    final int ss = s & 63;
+    final int mm = (s >> 6) & 63;
+    final int hh = (s >> 12) & 63;
+    int i = twoOctal(buf, 0, hh);
     buf[i++] = colon ? ':' : ' ';
-    i = two(buf, i, mm);
+    i = twoOctal(buf, i, mm);
     buf[i++] = colon ? ':' : ' ';
-    i = two(buf, i, ss);
+    i = twoOctal(buf, i, ss);
     return i;
   }
 
-  private static int two(char[] buf, int i, int v) {
-    buf[i++] = (char) ('0' + (v / 10) % 10);
-    buf[i++] = (char) ('0' + v % 10);
-    return i;
-  }
-
-  /** Write the ever-growing "estimated wait" (MM:SS), optionally labelled. */
-  private int writeEstWait(char[] buf, boolean labelled) {
-    final int total = (int) (this.estWaitMs / 1000);
-    final int mm = (total / 60) % 100;
-    final int ss = total % 60;
-    int i = 0;
-    if (labelled) {
-      for (int k = 0; k < 8; ++k) {
-        buf[i++] = "EST WAIT".charAt(k);
-      }
-      buf[i++] = ' ';
-    }
-    i = two(buf, i, mm);
-    buf[i++] = ':';
-    i = two(buf, i, ss);
+  /** Two octal digits (each 0..7) for a 0..63 field. */
+  private static int twoOctal(char[] buf, int i, int v) {
+    buf[i++] = (char) ('0' + ((v >> 3) & 7));
+    buf[i++] = (char) ('0' + (v & 7));
     return i;
   }
 
@@ -1013,21 +1057,13 @@ public class HoldClock extends ApotheneumPattern {
     return this.elapsedTicks + interTickFraction();
   }
 
-  /** Progress in [0, 1) from the last tick toward the next, from the tempo grid
-   *  (Sync) or the free-running BPM accumulator (Sync off). */
+  /** Progress in [0, 1) from the last tick toward the next, from the
+   *  free-running BPM accumulator. */
   private double interTickFraction() {
     if (this.freeze.isOn()) {
       return 0;
     }
-    if (this.sync.isOn()) {
-      final Tempo.Division d = this.tempoDiv.getEnum();
-      final double div = this.tempoLock.divisionMs(d);
-      if (!(div > 0)) {
-        return 0;
-      }
-      return LXUtils.constrain(1 - this.tempoLock.msUntilNext(d) / div, 0, 1);
-    }
-    final double period = Math.max(1, this.tempoLock.beatPeriodMs());
+    final double period = tickPeriodMs();
     return LXUtils.constrain(this.freeRunMs / period, 0, 1);
   }
 

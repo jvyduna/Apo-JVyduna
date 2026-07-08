@@ -71,6 +71,15 @@ explicit approval. Never open PRs unless asked.**
 
 ### Local Mac sessions (Jeff's machine)
 
+- **Always merge finished work back into `pattern-dev`.** This is the rule, not
+  a preference: once a turn of pattern/effect work is complete and approved, end
+  the turn by committing it and merging it into `pattern-dev` — never leave
+  finished work sitting as uncommitted edits or stranded on a worktree branch.
+  Every subsequent turn then begins by rebasing on the current `pattern-dev` head
+  before making new edits. So the loop is always: rebase on `pattern-dev` → work
+  → merge into `pattern-dev` → (next turn) rebase again. The bullets below are
+  the mechanics of that loop. (Merging to `main` still requires Jeff's explicit
+  approval — only `pattern-dev` is automatic.)
 - Sessions develop in worktrees under `.claude/worktrees/` on
   `worktree-bridge-*` branches; the repo root stays on `main`.
 - **Minimal remote activity.** When a turn of improvements is done, merge it
@@ -167,6 +176,20 @@ something a commit --amend or rebase fixes, and not worth chasing:
 - Build/deploy with `mvn -Pinstall install` (not just `mvn compile` — patterns
   load from the deployed jar).
 - No `new` allocations in render loops; reuse collections.
+- **Every pattern exposes a `Smooth` knob** (`CompoundParameter("Smooth", 1.0)`,
+  key `smooth`): motion blending between moving pixels + antialiasing of forms
+  (0 = steppy/pixel-snapped/hard, 1 = smooth). Standardized name is **Smooth**;
+  "Blend" now means compositing mode only. A static bench may omit it but must
+  document the exemption in its `.md`. Register after pattern params, before
+  `audio`. Full spec in `docs/TEMPLATE.md`.
+- **`energy` → `speed`**: name the motion-rate knob `speed`/"Speed" when it only
+  scales motion; keep `energy`/"Energy" only when it also drives non-motion
+  (brightness/density/regime). Rename key + label + field together.
+- **Grid-less songs (Distance, Chrome, Temper) use continuous, beat-relative
+  speeds** ("tempoDiv units"): units-per-beat × live `lx.engine.tempo.period`,
+  clamped to the >=5 s cap — continuous, tempo-following, never a Sync/TempoDiv
+  grid snap. **Chrome is an outlier** (part grid-driven): decide each Chrome
+  speed param with Jeff. See `docs/TEMPLATE.md` Tempo section.
 
 ## Debugging against the `arrange` LXStudio build
 

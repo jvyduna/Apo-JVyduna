@@ -7,15 +7,11 @@ import apotheneum.Apotheneum;
 import apotheneum.ApotheneumPattern;
 import apotheneum.jvyduna.util.Ranges;
 import apotheneum.jvyduna.util.SurfaceCanvas;
-import apotheneum.jvyduna.util.TempoLock;
-import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
-import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
 import heronarts.lx.color.LXDynamicColor;
-import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundParameter;
 import heronarts.lx.parameter.EnumParameter;
 import heronarts.lx.parameter.TriggerParameter;
@@ -141,23 +137,21 @@ public class Outrun extends ApotheneumPattern {
 
   // ---- Parameters -------------------------------------------------------------
 
-  private final TriggerBag bag = new TriggerBag("Outrun");
-
-  public final TriggerParameter boost = bag.register(
+  public final TriggerParameter boost =
     new TriggerParameter("Boost", this::boost)
-    .setDescription("Afterburner: flight speed surges ~2.5x and decays back over ~3 s"));
+    .setDescription("Afterburner: flight speed surges ~2.5x and decays back over ~3 s");
 
-  public final TriggerParameter bank = bag.register(
+  public final TriggerParameter bank =
     new TriggerParameter("Bank", this::bank)
-    .setDescription("Banked 90-degree turn over ~5 s: heading swings and the horizon tilts, then settles"));
+    .setDescription("Banked 90-degree turn over ~5 s: heading swings and the horizon tilts, then settles");
 
-  public final TriggerParameter regen = bag.register(
+  public final TriggerParameter regen =
     new TriggerParameter("Regen", this::regen)
-    .setDescription("Reseed the terrain: the landscape morphs to fresh topography over ~5 s"));
+    .setDescription("Reseed the terrain: the landscape morphs to fresh topography over ~5 s");
 
-  public final TriggerParameter pulse = bag.register(
+  public final TriggerParameter pulse =
     new TriggerParameter("Pulse", this::pulse)
-    .setDescription("One bright bolt races across the grid from underfoot to the horizon"));
+    .setDescription("One bright bolt races across the grid from underfoot to the horizon");
 
   public final CompoundParameter energy = new CompoundParameter("Energy", 0.35)
     .setDescription("Master energy: 0-0.4 soothing ambient, 0.6-1.0 high-energy 160 BPM regime");
@@ -198,18 +192,8 @@ public class Outrun extends ApotheneumPattern {
   public final CompoundParameter audioDepth = new CompoundParameter("Audio", 0)
     .setDescription("Audio reactivity depth: reserved, no audio wiring in this version");
 
-  public final BooleanParameter sync = new BooleanParameter("Sync", true)
-    .setDescription("Lock motion events to the tempo grid; off restores free-running timing");
-
-  public final EnumParameter<Tempo.Division> tempoDiv = new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.QUARTER)
-    .setDescription("Tempo division that motion events land on when Sync is enabled");
-
-  public final TriggerParameter meta = new TriggerParameter("Meta", bag::fire)
-    .setDescription("Randomly fire a trigger or jump a parameter");
-
   // ---- State (all preallocated; zero allocation in the render path) -----------
 
-  private final TempoLock tempoLock;
   private final Random random = new Random();
 
   private final SurfaceCanvas canvas = new SurfaceCanvas(RING, ROWS);
@@ -234,7 +218,6 @@ public class Outrun extends ApotheneumPattern {
 
   // Bank envelope: progress in [0,1], >= 1 when idle
   private double bankT = 1;
-  private double bankRate = 1 / BANK_SEC;
   private int bankDir = 1;
 
   /** Boost speed envelope, decays exponentially from 1 */
@@ -242,7 +225,6 @@ public class Outrun extends ApotheneumPattern {
 
   // Pulse bolt: progress in [0,1], >= 1 when idle
   private double pulseT = 1;
-  private double pulseRate = 1 / PULSE_SEC;
 
   // Terrain seeds: world-space noise offsets, crossfaded old -> new on Regen
   private double ox0, oz0, ox1, oz1;
@@ -256,7 +238,6 @@ public class Outrun extends ApotheneumPattern {
 
   public Outrun(LX lx) {
     super(lx);
-    this.tempoLock = new TempoLock(lx);
 
     addParameter("boost", this.boost);
     addParameter("bank", this.bank);
@@ -275,16 +256,6 @@ public class Outrun extends ApotheneumPattern {
     addParameter("fill", this.fill);
     addParameter("hue", this.hue);
     addParameter("audio", this.audioDepth);
-    addParameter("sync", this.sync);
-    addParameter("tempoDiv", this.tempoDiv);
-    addParameter("meta", this.meta);
-
-    // Jump candidates — mirrored 1:1 in Outrun.md "Jump candidates"
-    this.bag.jumpable(this.altitude);
-    this.bag.jumpable(this.gridSize, 0.15, 0.85);
-    this.bag.jumpable(this.relief);
-    this.bag.jumpable(this.fov);
-    this.bag.jumpable(this.heading);
 
     // Shuffled lattice permutation for the value noise
     for (int i = 0; i < 256; ++i) {
@@ -327,13 +298,6 @@ public class Outrun extends ApotheneumPattern {
     this.bankDir = this.random.nextBoolean() ? 1 : -1;
     LX.log("Outrun: bank " + ((this.bankDir > 0) ? "right" : "left"));
     this.bankT = 0;
-    this.bankRate = 1 / BANK_SEC;
-    if (this.sync.isOn()) {
-      // Land the end of the turn on a grid boundary. Slow-down only (max
-      // scale 1): BANK_SEC is the 90-degree pace that keeps a full pan at
-      // 20 s/rev, so the turn may stretch but never quicken.
-      this.bankRate *= this.tempoLock.retime(BANK_SEC * 1000, this.tempoDiv.getEnum(), TempoLock.DEFAULT_MIN_SCALE, 1);
-    }
   }
 
   private void regen() {
@@ -350,12 +314,6 @@ public class Outrun extends ApotheneumPattern {
   private void pulse() {
     LX.log("Outrun: pulse");
     this.pulseT = 0;
-    this.pulseRate = 1 / PULSE_SEC;
-    if (this.sync.isOn()) {
-      // Arrival at the horizon lands on the grid. The default clamp keeps
-      // the bolt's life in 1.57..3.14 s, at or above the 1.5 s event floor
-      this.pulseRate *= this.tempoLock.retime(PULSE_SEC * 1000, this.tempoDiv.getEnum());
-    }
   }
 
   // ---- Render ------------------------------------------------------------------
@@ -365,16 +323,12 @@ public class Outrun extends ApotheneumPattern {
     final double dt = deltaMs / 1000.0;
     final double e = this.energy.getValue();
 
-    // Poll the gate every frame so it never goes stale (see TempoLock docs);
-    // no per-frame events consume it in v1, but retime() calls share the lock
-    this.tempoLock.crossed(this.tempoDiv.getEnum());
-
     updateLut();
 
     // -- Envelopes
     this.boostEnv *= Math.exp(-dt / BOOST_TAU_SEC);
     if (this.pulseT < 1) {
-      this.pulseT = Math.min(1, this.pulseT + this.pulseRate * dt);
+      this.pulseT = Math.min(1, this.pulseT + dt / PULSE_SEC);
     }
     if (this.morphT < 1) {
       this.morphT = Math.min(1, this.morphT + dt / REGEN_SEC);
@@ -383,7 +337,7 @@ public class Outrun extends ApotheneumPattern {
     // -- Bank: smooth-step yaw, sinusoidal roll that peaks mid-turn
     double bankYaw = 0, tiltRows = 0;
     if (this.bankT < 1) {
-      this.bankT += this.bankRate * dt;
+      this.bankT += dt / BANK_SEC;
       if (this.bankT >= 1) {
         this.bankT = 1;
         this.bankBase += this.bankDir * (Math.PI / 2);

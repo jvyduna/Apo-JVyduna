@@ -1,6 +1,8 @@
 # Aumakua
 
-Generative ochre cave-painting human figures rising in family trees up the exterior, dripping new figures below, blooming with the trombone; womb-dark interior.
+Generative ochre Kolo-style cave-painting figures rising in family trees up the
+exterior, dripping new figures below with genealogy-chart connectors; dark
+interior echo.
 
 > Sidecar design doc convention: this file lives beside `Aumakua.java` and is
 > the source of truth for design decisions and curation history. Mark any constant
@@ -10,24 +12,25 @@ Generative ochre cave-painting human figures rising in family trees up the exter
 ## Original / inspiration
 
 The hero centerpiece of **"Temper The Wound"** (Kalia Vandever), the opener of
-"Communicating" — the genesis. Per the arc critique this, not the exterior words,
-is *the* song: Vandever's stated meaning is her parents' separation and *how you
-move through that pain*, threaded through her Hawaiian ancestry and **ʻaumākua**
-(ancestral guardian spirits that appear in dreams). The visual is Jeff's Idea 2:
-a generator that draws **Lascaux/Chauvet-style cave-painting human figures** —
-stick/body forms with a head, torso, two arms and two legs — that slowly **rise**
-up the walls. As a figure ascends, its limbs **drip** downward and seed a new
-figure below it, so lineage strands branch upward into continuous **family trees
-of humanity** climbing the surface (childbirth + ancestry).
+"Communicating" — the genesis. Vandever's stated meaning is her parents'
+separation and *how you move through that pain*, threaded through her Hawaiian
+ancestry and **ʻaumākua** (ancestral guardian spirits that appear in dreams).
+The visual is Jeff's Idea 2: a generator that draws cave-painting human figures
+that slowly **rise** up the walls; as a figure ascends it **drips** children
+below it, so lineage strands branch upward into continuous **family trees of
+humanity** climbing the surface (childbirth + ancestry).
 
-This is an interpretation, not a recreation of any existing screensaver. The
-"cave painting" signature we preserve: **bold ochre forms, no fine texture,**
-hand-drawn stick anatomy, and the upward-climbing lineage as the central motion.
-The critique's demand is honored directly: **something physically rises and
-blooms at 2:32** (the G5 melodic peak, energy ~0.78) — the `Bloom` trigger (and
-the trombone envelope automatically) raises every figure's arms into the
-"orant" (raised-arm) pose and births a burst of new raised-arm ancestors,
-brightest and fullest at that moment.
+**Figure style (2026-07-08 restyle): Kolo/Kondoa rock art** (Tanzania), from
+reference photos Jeff supplied. The signatures we draw: elongated proportions
+with legs dominating (high hips), short forward-leaning torsos, LARGE oval
+heads, bent two-segment limbs in a scissored walking stride, slight per-figure
+forward pitch, a torso slightly thicker than the limbs. Bold ochre strokes, no
+fine texture. This replaced the original symmetric stick-figure anatomy, which
+read too much like a glyph and not enough like a painting.
+
+The 2:32 G5 melodic-peak climax is honored by the `Bloom` trigger: every
+figure's arms rise into the "orant" (raised-arm) pose and a burst of raised-arm
+ancestors is born.
 
 **Companion reuse (NOT built here):** the existing `Text` pattern spelling
 **HEAL / BIRTH / HOPE** on the exterior is the accent layer that runs alongside
@@ -36,208 +39,238 @@ Aumakua per the plan; it is a separate pattern and out of scope for this class.
 ## Rendering approach
 
 - **Base class**: `ApotheneumPattern` — the piece needs the cube ring, the
-  cylinder ring, and independent exterior/interior handling (womb split), none
-  of which `ApotheneumRasterPattern` (cube-face-only) can reach.
+  cylinder ring, and independent exterior/interior handling, none of which
+  `ApotheneumRasterPattern` (cube-face-only) can reach.
 - **Surfaces**: two independent generative systems (`Field`), one per surface,
   each with its own `Random` seed so the cube and cylinder grow different
   lineages from the same parameters:
   - cube ring — `SurfaceCanvas(200, 45)` copied to `Apotheneum.cube.exterior`.
-  - cylinder — `SurfaceCanvas(120, 43)` copied to `Apotheneum.cylinder.exterior`.
-- **Interior = womb echo**: the SAME canvas is copied to `cube.interior` /
+  - cylinder — `SurfaceCanvas(120, 43)` copied to `Apotheneum.cylinder.exterior`,
+    scaled by the **Cyl** knob (whole-field cylinder brightness).
+- **Interior echo**: the SAME canvas is copied to `cube.interior` /
   `cylinder.interior` through `copyTo(surface, colors, mult, false)` with
-  `mult = Womb` (default 0.25) — a dimmer, softer echo of the exterior. Womb=0
-  makes the interior pure black (a fully held, protected dark); the exterior
-  always renders at full brightness. This is the thematic exterior/interior
-  birth split.
+  `mult = Inner` (default 0.25; cylinder interior additionally × Cyl) — a
+  dimmer, softer echo of the exterior. Inner=0 makes the interior pure black (a
+  fully held, protected dark); the exterior always renders at full brightness.
+  This is the thematic exterior/interior birth split.
 - **Geometry mapping**: figures live in canvas pixel space. `y = 0` is the TOP
   row, so a figure **rising** means its feet-row `y` **decreases** over time.
   X wraps (both surfaces are continuous rings). Figure anatomy is drawn as
-  fractions of the figure's pixel height (hip 0.38, shoulder 0.72, head at the
-  top), with `lineMax` limbs (union brightness, never erase) and a small
-  `setMax` disc head.
+  fractions of the figure's pixel height (see the Kolo geometry constants),
+  with antialiased `lineWu` strokes (MAX blend — union brightness, never
+  erase) and a filled-ellipse head.
+- **Family-tree attachment**: an attached child's `y` is not integrated — it is
+  **derived every frame** from its living parent
+  (`y = parent.y + gapBase(parent) + height + sibJitter`), resolved generation
+  by generation so parents are always positioned before children. That is what
+  lets the **GenY** knob re-space every living tree instantly. When a parent
+  retires off the top, its children detach in place (their last derived y is
+  continuous) and self-integrate from then on. A `birthId` stamp guards
+  against pool-slot reuse masquerading as a still-living parent.
+- **Genealogy connectors**: right-angle chart connectors drawn EVERY frame
+  between living parent-child pairs — vertical stub down from the parent's
+  feet to a shared sibling rail (`railY = parent.y + gapBase/2`, deterministic
+  per parent so siblings share one rank line), horizontal rail the short way
+  around the ring, vertical drop to the child's head. Brightness is the
+  **Lines** knob (0 = off, 1 = full, × the child's glow envelope, so
+  connectors fade in with each birth and out near the top). Endpoints are
+  fractional and ride the same Smooth sub-pixel interpolation as the figures,
+  so the lines glide upward instead of stepping row to row. On detach they
+  stop being drawn and the trail decay fades the residue.
 - **Buffers / zero-alloc**: each `Field` preallocates a fixed pool of
   `MAX_FIGURES = 64` `Figure` objects in its constructor. Births (root or drip)
   reuse an inactive pool slot via `freeSlot()`; nothing is allocated in the
   render loop. The palette color cache (`genColor[]`, `cachedSwatch[]`) is
-  preallocated. `Random.nextInt/nextDouble` do not allocate.
-- **Trails / smear**: instead of clearing, each `Field` calls
-  `canvas.decay(decayMult)` per frame. A rising figure redrawn at full glow each
-  frame therefore leaves a fading "comet" smear below it (the gauzy gossamer
-  trombone-loop quality) and lineage strands persist as fading family-tree
-  branches. `Smear` sets the trail half-life.
-- **Door columns**: handled automatically by `SurfaceCanvas.copyTo`, which
-  guards each column by `column.points.length` — figures over a door are
-  clipped, no special-casing.
+  preallocated.
+- **Smooth (one knob for AA + sub-pixel motion + trails)**: `Smooth` drives
+  three couplings at once. (a) Stroke antialiasing: all figure and connector
+  lines use the `SurfaceCanvas.lineWu(..., smoothness)` variant, whose coverage
+  remaps around 0.5 by `1/smoothness` — identity Wu at 1, a hard on/off
+  threshold (Bresenham-like high-contrast pixels) at 0; the head ellipse rim
+  blends the same way. (b) Sub-pixel motion: drawn coordinates lerp between
+  integer-snapped (0) and true fractional (1) via `snap()` — figures AND
+  genealogy connectors glide at 1, step pixel-by-pixel at 0. (c) Trails:
+  instead of clearing, each `Field` calls `canvas.decay(decayMult)` per frame
+  with half-life `exp(Smooth, 2 ms, 6 s)` — at 0 the canvas effectively clears
+  every frame (no ghosts), at 1 rising figures leave gauzy gossamer smears.
+- **Doors**: door openings do NOT shorten columns — every column carries the
+  full point array; `Orientation.available(col)` is the only door signal
+  (returns the count of non-occluded rows; the door occupies the BOTTOM 11
+  rows of a 10-column opening). Figures crossing a door region mid-wall are
+  simply invisible over the opening, which is acceptable. The **Genesis**
+  entrance uses `available()` to pick a door-free column (see Triggers).
 
-## Audio mapping
+## No audio; beat-relative rise (Temper convention)
 
-`AudioReactive`, ticked as the FIRST line of `render()`, gated by the standard
-**Audio depth knob** (`audio.setDepth(audioDepth)`). The trombone is the only
-instrument, so its envelope is read as `trom = 0.6·level + 0.4·mid` (the horn's
-voice sits mostly in the mid bands):
+This pattern is deliberately **silent**: no `AudioReactive`. There is **no
+Sync/TempoDiv gate and no Meta trigger** (all retired). The rise speed is now
+**beat-relative**: a continuous rate expressed in rows-per-beat and multiplied
+by the live host beat period (`lx.engine.tempo.period`), so motion tracks the
+(rubato) arrange tempo lane. It **never snaps to a division** and never jumps —
+so the "super chill, no sudden jumps" Temper rule still holds; the rate just
+breathes with the tempo automation instead of an absolute rows/sec. Births
+happen only at init/Genesis (Density) and via Fertl drips — there is no birth
+timer at all; choreography (Bloom at 2:32 etc.) comes from the arrange
+timeline. See `docs/composition/temper-brief.md`.
 
-- **`trom` → birth cadence**: shortens the root-spawn interval
-  (`rootIntervalMs /= 1 + AUDIO_SPAWN·trom`, `AUDIO_SPAWN = 2.5` CURATE) — the
-  horn swells birth new ancestors.
-- **`trom` → glow**: lifts every figure's brightness above its resting value
-  (`glowMult = 1 + AUDIO_GLOW·trom`, `AUDIO_GLOW = 0.6` CURATE) — the ochre
-  "warms" with the horn.
-- **`trom` → pose**: biases newborns toward the raised-arm (orant) bloom pose
-  (`raiseBias = clamp(0.15 + trom)`), so the 2:32 climax swell auto-blooms the
-  field without a manual trigger.
+## Speed mapping
 
-**Depth knob / silence behavior**: `Audio` defaults to 0 = pure screensaver. At
-depth 0 (or true silence) `level`/`mid` read 0, so `trom = 0`: births run on the
-Energy-driven idle timer alone, figures sit at their resting ochre glow, and
-newborns use the 15% baseline raise probability. The full rise/drip/family-tree
-lifecycle runs identically without audio — the default look is complete on its
-own. Raising the knob toward 1 continuously restores the three couplings above;
-at 1 a trombone swell visibly quickens births, brightens the ochre, and throws
-arms up. No hit taps are used (rubato song, no drums — see the brief).
+Rise speed = `Speed × 4.0` **rows-per-beat** × `1000/beatMs`, clamped to
+`MAX_RISE_ROWS_PER_SEC = 8.0` (rows/s) so the full traversal stays ≥ 5 s at
+any tempo. The mapping is linear **from zero**: **Speed=0 is a true freeze** —
+no rise, no sway, no births, no aging/glow change, no drips; only the trail
+decay keeps settling, and GenY/pose knobs still re-shape the frozen tableau.
+Triggers fired while frozen take visible effect on unfreeze (newborns need
+time to fade in). Peak is unchanged from the prior round:
 
-## Tempo mapping
+| Quantity | Speed=0 | Default (Speed=0.3) @ 96.8 BPM | Peak (Speed=1) @ 96.8 BPM | Curve |
+|---|---|---|---|---|
+| Rise speed | frozen | ~1.9 rows/s (45-row cube ≈ 23 s) | ~6.4 rows/s (≈ 7.0 s) | lin (rows/beat) |
 
-The music is **rubato / near-beatless** — the brief is explicit that TempoLock
-must never produce a foot-tappable click. So tempo locking here only **nudges
-each due birth onto a slow, breathing grid line**, it does not drive motion:
-
-- `Sync` on (default): a birth that has come due (idle timer elapsed, or a
-  rising figure ready to drip) is held until the next `TempoDiv` boundary
-  (`TempoLock.crossed`, polled once per frame and shared by both fields). With
-  the default `TempoDiv = WHOLE` (one bar) births land on bar lines — a gentle
-  breath, not a pulse. `Genesis`/`Bloom`/`Seed` triggers fire immediately
-  (never gated).
-- `Sync` off: `birthGateOpen` is always true, so births free-run on the idle
-  timer — fully functional rubato timing, arguably the most on-theme mode.
-
-No `retime()` is used — nothing about the continuous rise is quantized, only the
-discrete birth events are grid-nudged. `crossed()` is called unconditionally
-every frame (even with Sync off) so it never fires a stale boundary when Sync is
-re-enabled.
-
-## Energy mapping
-
-| Quantity | Ambient (e=0.3) | Peak (e=1) | Curve |
-|---|---|---|---|
-| Rise speed | ~2.98 rows/s (45-row cube ≈ 15.1 s) | 6.43 rows/s (≈ 7.0 s) | lin |
-| Root-spawn interval | ~11 s base (× Density, ÷ trom) | ~2.2 s base | exp |
-
-`Energy` defaults to **0.3** (CURATE — below the series' usual 0.35, because
-this is the calmest, most patient song in the piece). Density and the trombone
-envelope further scale the spawn rate; figure `Scale`, `Drip` branching and
-`Sway` are independent of Energy. Sustained rise respects the ≥5 s full-traversal
-cap even at e=1 (7.0 s cube / 6.7 s cylinder — see compliance).
+`Speed` drives **rise speed only** and defaults to **0.3** (CURATE — the
+calmest, most patient song in the piece). There is NO ongoing birth cadence:
+the first generation is Density's job (below) and everything after comes from
+Fertl drips. At faster host tempos the rate rises but the 8.0 rows/s clamp
+keeps the cube traversal ≥ 5.6 s (see compliance).
 
 ## Parameters
 
-UI/registration order (do not deviate; keys/labels are referenced by saved
-`.lxp` files): non-meta triggers, Energy, pattern params, Audio, Sync, TempoDiv,
-Meta (last).
+UI/registration order (do not deviate; keys are referenced by saved `.lxp`
+files). Labels are the ≤7-char UI names; code field names are longer and
+descriptive (e.g. `genSpacing`, `interiorLevel`, `cylinderLevel`).
 
-| Param | Label | Type | Default | Range | Meaning |
+| Param key | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
 | `seed` | Seed | TriggerParameter | — | — | birth one root ancestor at the base of both surfaces |
 | `bloom` | Bloom | TriggerParameter | — | — | raise all arms + burst of raised-arm ancestors (the 2:32 climax) |
-| `drift` | Drift | TriggerParameter | — | — | re-randomize every figure's sway phase/direction |
-| `genesis` | Genesis | TriggerParameter | — | — | fade both fields to black, begin a fresh lineage |
-| `energy` | Energy | CompoundParameter | 0.3 | 0..1 | rise speed + birth cadence (within the traversal cap) |
-| `density` | Density | CompoundParameter | 0.5 | 0..1 | concurrent figure cap + ancestor birth rate |
-| `figScale` | Scale | CompoundParameter | 0.5 | 0..1 | figure height (7..15 rows) |
-| `warmth` | Warmth | CompoundParameter | 0.6 | 0..1 | ochre pull (hue → amber/sienna) + glow lift |
-| `dripChance` | Drip | CompoundParameter | 0.6 | 0..1 | lineage branching probability per rising figure |
-| `sway` | Sway | CompoundParameter | 0.4 | 0..1 | gentle organic horizontal sway amplitude |
-| `smear` | Smear | CompoundParameter | 0.5 | 0..1 | feedback-smear trail length (0.2..6 s half-life) |
-| `womb` | Womb | CompoundParameter | 0.25 | 0..1 | interior brightness (0 = black womb) |
-| `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth (0 = pure screensaver) |
-| `sync` | Sync | BooleanParameter | true | — | nudge due births onto the tempo grid |
-| `tempoDiv` | TempoDiv | EnumParameter | WHOLE | Tempo.Division | division births land on when Sync is on |
-| `meta` | Meta | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
+| `genesis` | Genesis | TriggerParameter | — | — | fade to black, then a new figure's head immediately emerges from the bottom edge at a door-free column |
+| `speed` | Speed | CompoundParameter | 0.3 | 0..1 | rise speed only; **0 = animation fully frozen** (within the traversal cap at 1) |
+| `density` | Density | CompoundParameter | 0.5 | 0..1 | how many first-generation ancestors at pattern init / Genesis (~1 per 25 cols, min 1; also scales the Bloom burst) |
+| `figScale` | Scale | CompoundParameter | 0.5 | 0..1 | figure height (10..26 rows) |
+| `ochre` | Ochre | CompoundParameter | 0.6 | 0..1 | 0 = palette colors per generation; 1 = ALL figures converge to one deep red-brown |
+| `fertility` | Fertl | CompoundParameter | 0.6 | 0..1 | lineage branching probability per rising figure — the ONLY ongoing population source |
+| `genY` | GenY | CompoundParameter | 0.4 | 0..1 | generational Y spacing; re-spaces ALL living figures live |
+| `sway` | Sway | CompoundParameter | 0.4 | 0..1 | per-figure independent horizontal sway amplitude |
+| `smooth` | Smooth | CompoundParameter | 0.7 | 0..1 | ONE knob for antialiasing + sub-pixel motion + smear trails: 0 = hard on/off pixels, snapped motion, no trails; 1 = AA strokes, gliding rise, gossamer trails (2 ms..6 s half-life, exp) |
+| `lines` | Lines | CompoundParameter | 0.3 | 0..1 | family-tree connector brightness: 0 = no genealogy lines, 1 = full |
+| `interior` | Inner | CompoundParameter | 0.25 | 0..1 | interior brightness (0 = black interior) |
+| `cylinder` | Cyl | CompoundParameter | 1.0 | 0..1 | brightness of all cylinder figures (whole cylinder field) |
+
+Removed in the 2026-07-08 rounds (breaking for any earlier `.lxp`): `drift`
+trigger, `energy` (→ `speed`), `warmth` (→ `ochre`), `dripChance` (→
+`fertility`), `womb` (→ `interior`), `audio`, `sync`, `tempoDiv`, `meta`,
+and `smear` (merged into `smooth`).
 
 ## Triggers
 
-Four non-meta triggers, small → large:
-
 - `seed` (small) — one new root ancestor appears at the base of each surface; a
-  single new stick figure begins climbing. Reads within a second or two as one
-  new life at the bottom.
-- `drift` (small–medium) — re-randomizes every living figure's sway phase and
-  rate; the whole field's gentle organic wobble reshuffles. No births, no
-  brightness change — a subtle breathing shift.
+  single new figure begins climbing. Reads within a second or two as one new
+  life at the bottom.
 - `bloom` (large) — the birth bloom: every living figure throws its arms up
-  (orant pose) and a burst of `3 + 3·Density` raised-arm ancestors is born
-  brightest. This is the 2:32 climax as a manual cue; reads instantly, resolves
-  over the ~2.2 s birth-in of the new figures.
+  (orant pose) and a burst of `3 + 3·Density` raised-arm ancestors is born.
+  This is the 2:32 climax as a manual cue; reads instantly, resolves over the
+  ~2.2 s birth-in of the new figures.
 - `genesis` (large) — both fields fade to black (canvas cleared, all figures
-  retired) and a fresh lineage begins from empty. A full reset; reads
-  immediately, repopulates over the next several seconds.
+  retired) and the new first generation begins IMMEDIATELY: **Density-many
+  ancestors** per surface whose **heads emerge from the bottom edge** (feet
+  start below the wall, `y = H−1+height`, so only the head shows and the body
+  reveals as it rises). The first head crests instantly; the rest start up to
+  `FIG_HEIGHT_MAX` rows deeper so heads surface staggered, not in lockstep.
+  Columns are chosen clear of door openings (`available()` check, ±0.25·height
+  margin, ≤16 bounded rng tries with fallback).
 
-## Jump candidates
+## GenY / family-tree geometry
 
-Rows mirror the `bag.jumpable(...)` lines in the constructor 1:1. All four
-triggers are also registered in the bag.
+- Gap from parent's feet to child's head:
+  `gapBase = GAP_MIN(2) + GenY·GAP_RANGE(12) + GAP_H_FRAC(0.25)·parentHeight`
+  rows (all CURATE). Deterministic per parent → siblings share a rank line;
+  each child adds only a ±0.75-row `sibJitter` (was: full-height scatter).
+- Generation pitch ≈ childHeight + gap ≈ 29 rows at defaults → the 45-row cube
+  wall shows a parent + child with the grandchild's head entering from the
+  bottom; deeper generations unroll as the tree rises (a drip blocked by the
+  bottom edge retries on later frames instead of being consumed).
+- CURATE: at figScale ≥ 0.9 with GenY ≥ ~0.6 barely one generation fits the
+  wall at a time — keep Scale ≤ ~0.9 / GenY ≤ ~0.6 when a chart-like read
+  matters.
+- `MAX_GEN = 5` is a color-depth cap only (colors clamp at it). Lineage
+  branching is UNCAPPED (`children < 2` per figure still holds): with no
+  root-respawn timer, Fertl drips are the only ongoing population source, so
+  lineages must be able to continue indefinitely. Attachment resolution is a
+  stamp-memoized recursion up the parent chain (`resolveY`), replacing the old
+  generation-indexed loop that assumed gen ≤ 5.
 
-| Param | Jump range | Status | Notes |
-|---|---|---|---|
-| `density` | [0.25, 0.9] | candidate | extremes excluded: 0 too sparse, 1 crowds the pool |
-| `figScale` | [0.2, 0.9] | candidate | keep figures legible, avoid the full-height max |
-| `warmth` | [0.3, 1.0] | candidate | never fully un-warm (0 could read cold vs the palette) |
-| `dripChance` | [0.3, 1.0] | candidate | guarantee some branching on a jump |
-| `sway` | [0.0, 0.8] | candidate | full-still to lively, reserve the top for manual use |
-| `smear` | [0.2, 0.9] | candidate | avoid 0 (crisp, no gossamer) and 1 (near-permanent) |
+## Kolo figure geometry (fractions of height)
 
-Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [a,b]`.
+Hip 0.55 (elongated legs), shoulder 0.82 (short torso), head = filled ellipse
+rx 0.10 / ry 0.08 (large, wider than tall), knee 0.26. Whole-figure forward
+lean ∈ [−0.05, 0.14] of height (biased forward of the facing direction),
+scissored two-segment legs (front knee/foot +0.10/+0.20, back −0.06/−0.22 of
+the per-figure stride spread), two-segment arms lerped between down-forward
+and orant by `armRaise`, ±0.03h arm asymmetry. Torso double-stroked (+0.7px)
+at height ≥ 14 for painted body mass. Below height 12 limbs degrade to single
+segments (the silhouette survives on proportions). All strokes are `lineWu`
+antialiased; fractional joints let lean/stride/sway read sub-pixel.
+CURATE: all fractions above are first-pass — tune the silhouette on hardware
+against the Kolo reference photos, especially at small Scale.
 
 ## Simulation-principles compliance
 
 - **Rise (sustained motion)** — the only continuous motion. Cube: 45 rows per
-  full traversal. Ambient (e=0.3): 2.98 rows/s → **15.1 s**. Peak (e=1):
-  6.43 rows/s → **7.0 s**, inside the ≥5 s cap by design (`RISE_ROWS_PER_SEC_PEAK`
-  is the named constant fixing this). Cylinder: 43 rows / 6.43 = **6.7 s** at
-  e=1. Nothing rescales the rise but Energy; no grid retiming touches it.
-- **Sway (bounded oscillation, not a traversal)** — horizontal wobble of a few
-  rows, period ~6–16 s (`swayRate` 0.0004–0.001 rad/ms). Peak lateral speed at
-  Sway=0.8, height 15 ≈ 4.2 rows/s over a small arc — not a full-width
-  traversal, and slow. CURATE: confirm it reads as breathing, not jitter.
+  full traversal. Default (Speed=0.3 @ 96.8 BPM): ~1.9 rows/s → **~23 s**.
+  Peak (Speed=1): ~6.4 rows/s → **7.0 s**, and the `MAX_RISE_ROWS_PER_SEC = 8`
+  clamp holds ≥ 5.6 s at any host tempo. Speed=0 freezes everything (a static
+  tableau is trivially compliant). Nothing rescales the rise but Speed.
+- **Sway (bounded oscillation, not a traversal)** — horizontal wobble, period
+  ~6–16 s (`swayRate` 0.0004–0.001 rad/ms), fully independent per figure
+  (per-figure phase AND rate). CURATE: confirm it reads as breathing, not
+  jitter, at the new larger figure sizes.
 - **Births (event-like)** — each newborn fades IN over `BIRTH_IN_MS = 2.2 s`
   (≥ 1.5 s event minimum) and then lives many seconds as it climbs, so no birth
   reads as a strobe flash even at peak cadence. Drips inherit the same birth-in.
 - **Bloom / Genesis (event-like)** — instant state changes (arms up / clear);
   the resulting figures birth-in over 2.2 s and persist. ≥ 1.5 s of visual life.
-- **Bold forms / contrast** — hand-drawn stick anatomy in solid ochre with
-  `lineMax` limbs and a filled disc head; no gradients, no fine texture. Depth
-  haze is a single brightness step per lineage generation, not a gradient.
-  CURATE: verify a gen-5 figure at silence (72% depth × resting palette
-  brightness, further dimmed by the birth-in tail) still reads on hardware;
-  raise the depth-haze floor in `warmColor`/`ochreFallback` if it vanishes.
+- **Bold forms / contrast** — Kolo anatomy in solid ochre `lineWu` strokes and
+  a filled ellipse head; no gradients, no fine texture. Depth haze is a single
+  brightness step per lineage generation, not a gradient. CURATE: verify a
+  gen-5 figure (72% depth × palette brightness) still reads on hardware at
+  Ochre mid-values; at Ochre=1 all generations share one brightness by design.
 
 ## CURATE notes
 
 Every value below is a first-pass guess for hardware curation (grep `CURATE:`
 in the `.java` too):
 
-- `RISE_ROWS_PER_SEC_PEAK = 6.43` — sets the 7.0 s cube traversal at e=1; pull
-  down for an even more patient peak (never below 5 s cap).
-- `ROOT_INTERVAL_MS_AMBIENT/PEAK = 11000 / 2200` — ancestor cadence; roots are
-  meant to be rare (most figures are drips).
-- `AUDIO_SPAWN = 2.5`, `AUDIO_GLOW = 0.6` — trombone coupling strengths.
-- `DRIP_RISE_BODIES = 1.1` — how far a figure climbs before dripping a child;
-  tune for family-tree density vs legibility.
-- `STRAND_LEVEL = 0.35` — lineage-strand brightness; verify the branches read
-  as connective tissue, not clutter.
+- `RISE_ROWS_PER_BEAT_PEAK = 4.0`, `MAX_RISE_ROWS_PER_SEC = 8.0` — the
+  beat-relative peak (~6.4 rows/s @ 96.8 BPM) and the ≥5 s traversal clamp.
+- `INITIAL_ANCESTOR_COLS = 25` — Density→first-generation mapping (density=1
+  → 8 ancestors on the cube, 5 on the cylinder; min 1). With the root timer
+  gone, verify Fertl ≥ ~0.4 keeps the wall populated indefinitely.
+- `GAP_MIN/GAP_RANGE/GAP_H_FRAC = 2 / 12 / 0.25` — the GenY spacing formula.
+- `Lines` default 0.3 — genealogy connector brightness; verify the chart
+  lines read as connective tissue, not clutter.
+- `Smooth` default 0.7, `TRAIL_HALF_LIFE_MIN/MAX = 2 ms / 6 s` — the combined
+  AA + sub-pixel + smear knob; check the hard-pixel look at 0 and that the
+  default trail (~550 ms half-life) isn't too gauzy.
+- `OCHRE_TARGET = hsb(22, 72, 45)` — the deep red-brown every figure converges
+  to at Ochre=1; tune hue/depth on hardware ("pure ochre — deeper, less
+  bright").
 - `OCHRE_HUE = 32`, `OCHRE_HUE_DEEP = 20`, empty-swatch sat 62 / bright ramp
   88→52 — the ochre fallback (only used with an empty project swatch); the real
-  show should drive color from the Pastels swatch (Try Radish / Gareth), warmed
-  toward ochre by `Warmth`.
-- `Energy` default 0.3, `Womb` default 0.25 — the patient/dark defaults for the
-  opener; confirm the womb interior reads as present-but-protected, not dead.
-- `MAX_FIGURES = 64`, `MAX_GEN = 5`, figure geometry fractions (hip/shoulder/
-  spreads/head radius) — the cave-painting anatomy; tune the silhouette on
-  hardware (arm/leg spread especially at small `Scale`).
-- `f.children < 2` drip cap and `raiseBias` 0.15 baseline — lineage branching
-  factor and resting orant fraction.
+  show should drive color from the Pastels swatch (Try Radish / Gareth).
+- `Speed` default 0.3, `Inner` default 0.25 — the patient/dark defaults for the
+  opener; confirm the interior reads as present-but-protected, not dead.
+- Kolo geometry fractions (hip/shoulder/knee/head/lean/stride/spreads) and the
+  degrade thresholds (12 / 14 rows) — tune the silhouette on hardware.
+- `DRIP_RISE_BODIES = 1.1`, `f.children < 2`, `RAISE_BIAS = 0.15` — branching
+  cadence and resting orant fraction.
+- `FIG_HEIGHT_MIN/MAX = 10 / 26` — bigger than round 1 per the Kolo restyle;
+  check legibility at both ends on the 43-row cylinder.
 
 ## Curation log
 
 | Date | Change | Why |
 |---|---|---|
 | 2026-07-07 | Initial first-pass, Claude autonomous session | Aumakua hero for `temper`: generative ochre cave-painting family tree rising up the exterior, dripping new figures; trombone-warmed glow + births; 2:32 bloom (raised-arm burst); womb-dark interior echo. Compiles against lx 1.2.2-SNAPSHOT + apotheneum 2.0.0. All tuning values marked CURATE for hardware. |
+| 2026-07-08 | Jeff feedback round 2 | Kolo/Kondoa figure restyle (elongated legs, big oval heads, bent limbs, forward lean; height 10→26); GenY generational spacing (derived child y, live re-spacing, sibling rank lines) + genealogy-chart connectors replacing the one-shot strand; Warmth→Ochre with full convergence to deep red-brown at 1; Energy→Speed (rise only; cadence → Density); Drip→Fertl; Womb→Inner (key `interior`); new Cyl cylinder-brightness knob; Genesis now immediately emerges a head from the bottom at a door-free column; REMOVED: Drift trigger, all audio reactivity, Sync/TempoDiv/Meta (Temper is rubato — no tempo grid, no sudden jumps). |
+| 2026-07-08 | Convention pass (non-bliss) | Rise speed made **beat-relative**: rows-per-beat × live `lx.engine.tempo.period`, clamped to 8.0 rows/s (≥5 s traversal at any tempo) — continuous, tempo-following, never a grid snap. Added house **Smooth** knob (default 1.0): motion-blending (coords lerp toward integer-snapped as Smooth→0, sub-pixel glide at 1) + antialiased head-ellipse rims. Endpoints (0.93/4.0 rows/beat) reproduce the prior 1.5/6.4 rows/s at nominal 96.8 BPM. |
+| 2026-07-08 | Jeff feedback round 3 | **Smear merged into Smooth** (key `smooth`, default 0.7): one knob for stroke AA (new `lineWu` smoothness variant — hard on/off pixels at 0), sub-pixel motion snap, and trail half-life (2 ms..6 s exp; 0 = clear every frame). **Speed 0 = true freeze** (rise/aging/sway/births all hold; Speed now linear from 0 to the same 4.0 rows/beat peak). New **Lines** knob (default 0.3) for connector brightness; connectors now draw with fractional Wu endpoints so they glide with Smooth. **Density = first-generation count** at init/Genesis (~1 ancestor per 25 cols; Genesis staggers the emerging heads); root-respawn timer REMOVED; drip generation cap REMOVED (Fertl alone sustains the population; `resolveY` stamp-recursion replaces the gen-indexed resolve). |

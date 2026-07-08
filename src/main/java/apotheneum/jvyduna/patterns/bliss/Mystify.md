@@ -42,8 +42,9 @@ decay buffer at tempo intervals (TrailDiv) with a continuous-XOR blend
   `scratch.copyFrom(trail)`, then the live shape is drawn on top, then scratch
   blits to the LEDs. The live shape itself never persists — it is stamped into
   the trail only on crossings of the **TrailDiv** tempo division
-  (`TempoLock.crossed`, polled exactly once per frame — it consumes the
-  crossing, so the Faces4 per-face loop reuses one boolean).
+  (the in-pattern `trailCrossed()` cycle-count gate, polled exactly once per
+  frame — it consumes the crossing, so the Faces4 per-face loop reuses one
+  boolean).
 - **TrailBlend** governs how stamps composite against existing trail pixels
   (per-channel on [0,255]):
   - **Xor** (default): `a + c − 2ac/255` — bright over bright goes BLACK.
@@ -156,8 +157,10 @@ attached via `AudioReactive.setDepth(...)`. Audio does **not** affect speed.
 
 ## Tempo mapping
 
-Bounce timing is **hard-locked** to the transport beat grid; trail stamping
-has its own independent division:
+No Sync/TempoDiv/Meta convention controls (retired 2026-07-08 — `TempoLock`
+usage inlined; TrailDiv/BncDiv are core pattern features, not convention
+gating, and are unchanged). Bounce timing is **hard-locked** to the transport
+beat grid; trail stamping has its own independent division:
 
 - **TrailDiv** (`EnumParameter<Tempo.Division>`, default QUARTER) — on each
   crossing the live shape is stamped into the trail canvas as a leftover
@@ -215,7 +218,7 @@ long BounceDiv locked vertices into periodic corner-to-corner paths):
 
 ## Parameters
 
-UI/registration order: triggers, pattern parameters, Audio, Meta last.
+UI/registration order: triggers, pattern parameters, Audio last.
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
@@ -237,7 +240,9 @@ UI labels are truncation-tuned (Vrtices, BncDiv, GeoMode); the `addParameter`
 keys keep their full names (`vertices`, `bounceDiv`, `geometry`), so saved
 LXP parameter paths are unaffected.
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth: 0 = pure screensaver, 1 = full reactivity |
-| `meta` | Meta | TriggerParameter | — | — | randomly fire one trigger or jump one parameter |
+
+Removed 2026-07-08: `meta` (label Meta — the Sync/TempoDiv/Meta convention
+retired; saved `.lxp` references to the old path are dropped on load).
 
 The former **Energy** knob is removed; its 0 (default) behavior is baked in:
 nominal traversal `TRAVERSE_SEC = 12 s`, flash brightness factor 0.6.
@@ -260,24 +265,6 @@ supplies the musical alignment; triggers are performance gestures).
 - `hueJump` — the edge color assignment rotates by one swatch slot (hueOffset
   is a growing int; the swatch-size modulus applies at lookup, so it works
   with any palette size). (Smallest.)
-
-## Jump candidates
-
-Rows mirror the `bag.jumpable(...)` lines in the constructor 1:1. Status is
-updated during curation.
-
-| Param | Jump range | Status | Notes |
-|---|---|---|---|
-| `trails` | [0.25, 0.85] | candidate | CURATE: full range excluded — 0 looks bare, 1 can smear; verify subrange with the new 5000 ms max |
-| `vertices` | 2..5 (full) | candidate | count changes are seamless (all always simulated); 2 is the open-line mode |
-| `geometry` | all 4 values | candidate | hard visual cut (canvases cleared); most dramatic jump; now includes Faces4 |
-| `speed` | [0.4, 1.5] | candidate | CURATE: re-ranged when the knob grew to 0..5 — full-range jumps to 5× would jar; below 0.4 may read as stalled |
-| `shapes` | 1..2 (full) | candidate | second-polyline on/off, exposed as a DiscreteParameter per series convention (TriggerBag has no boolean jump) |
-
-`trailBlend` is deliberately NOT jumpable — a blend flip mid-set is jarring
-(CURATE: revisit if Xor↔Max reads as a good hit).
-
-Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [a,b]`.
 
 ## Simulation-principles compliance
 
@@ -321,6 +308,7 @@ better default (`wu` currently ships false = crisp Bresenham).
 | 2026-07-06 | Added `Vertices = 2` open-line mode; added `Mirror` toggle (axis verified against the fixture geometry: local centerline on faces, X=Z world diagonal on CubeRing/Cylinder) | Round out the shape vocabulary; kaleidoscope-style symmetry |
 | 2026-07-06 | Batch 3: split TimeGap into `TrailDiv` + `BounceDiv` (renamed from BounceOnBeats, added 3/4); **random bounce planner** (next arrival = 1..8/Speed random BounceDiv steps, per vertex per axis — kills periodic corner-to-corner locking; dart guard at 2.4 s/span); `TrailBlend` (default **Xor** — stamps erase trail crossings, the true interference moiré; live line stays Max; half-open closed-polygon edges prevent vertex self-erase); Trails max half-life 2500→5000 ms; new `Faces4` geometry (4 independent sims, state ×4 = 40 vertices); per-edge palette cycling (3-color palette + 5 vertices now uses all 3, was 2); removed `Energy` (baked at its 0 value: 12 s nominal, 0.6 flash); flash pops are now palette-colored pulsing balls (radius ≤3, was a white 1-px cross) | Live-viewing feedback: periodic paths, weak moiré, unused palette colors, dead Energy knob, clashing white flashes |
 | 2026-07-06 | Iteration 4: TrailDiv default 1/8; Trails max half-life 5→20 s, default 0.25; UI labels Vrtices/BncDiv/GeoMode (keys unchanged); GeoMode knob non-wrapping; planner kMax uses floor(8/Speed) so Speed max plans exactly one BounceDiv per bounce, with the dart guard fading linearly to zero at max (full strength ≤ 1 — low-speed look preserved verbatim); replaced the hand-rolled copyToFace with the widened `SurfaceCanvas.copyTo(Surface)` from main | Live-viewing feedback: tighter stamps, longer layers, label truncation, beat-exact frenzy at max Speed |
+| 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path): `meta` param deleted with the TriggerBag + jump-candidate table; `TempoLock` helpers inlined (`trailCrossed()` stamp gate, `beatPosition()`/`msUntilBeat()` for the bounce planner) — TrailDiv stamping and the BncDiv beat planner are core features and behave identically | Jeff 2026-07-08: Sync/TempoDiv + Meta pattern-control convention retired project-wide |
 
 CURATE (unverified constants, gathered for the walk-through):
 - `TRAIL_HALF_LIFE_MIN_MS/MAX_MS = 50/20000`, exp-mapped from Trails knob —
@@ -335,7 +323,6 @@ CURATE (unverified constants, gathered for the walk-through):
   Wu+Xor vertex pinholes (endpoint double-plot accepted in code).
 - Planner constants `SLEW_MS/ARRIVAL_EPS_MS/MIN_HEADROOM_MS/RATE_CHANGE_FRAC/
   STALE_TARGET_MS/RAND_WINDOW_MAX` — see Tempo mapping CURATE note.
-- Speed jump range upper bound 1.5 — see Jump candidates.
 - `TREBLE_TRAIL_SHORTEN = 0.15` (≤ ~30% faster decay) — "subtle" is untested.
 - `FLASH_DECAY_MS = 500`, `FLASH_LEVEL = 0.6`, `FLASH_MAX_RADIUS = 3` — the
   palette ball must read at 40 ft without whiting out the line.

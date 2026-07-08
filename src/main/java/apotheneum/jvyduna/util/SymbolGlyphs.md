@@ -7,88 +7,111 @@ re-implemented per song. Every pattern that shows a spiritual symbol pulls from
 this file; that is what makes the recurrence read as one motif transmuting rather
 than nine unrelated pattern ideas.
 
-Modeled on `PixelFont5`: glyphs are ASCII-art bitmaps (`#` = lit) parsed into row
-bit-masks, no LX dependency beyond `SurfaceCanvas`, with a `main()` ASCII preview.
+## Vector, not bitmap (2026-07-08 rewrite)
+
+Glyphs are now **true vector geometry** (`java.awt.Shape` — bars, discs,
+ellipses, arcs, stroked paths, boolean `Area` ops) rasterized on demand to an
+**antialiased coverage grid**, instead of the old fixed 11px `#`-ASCII masks.
+Why: the caller (GlassRain's liquid-symbol sim) needs a glyph mask at an
+arbitrary cell size that renders diagonals and curves cleanly, and the house
+`Smooth` knob should control the antialiasing. Vector → raster gives both — a
+glyph scales to any size and its edges are as soft or hard as `Smooth` asks.
+
+Rasterization reuses the **headless-AWT technique proven in `OtfTypeface`**
+(`BufferedImage` + `Graphics2D`, `java.awt.headless=true` is set by Chromatik).
+`coverage(sym, cols, rows, smooth)` supersamples the shape (4×), box-averages
+down to `cols×rows`, and **caches** the result keyed by
+`(symbol, cols, rows, smooth-quantized-to-0.1)` — so it rasters once per distinct
+request and is a map lookup thereafter (never per frame). No LX dependency.
+
+`smooth ∈ [0,1]` dials edge antialiasing by remapping coverage around 0.5 (the
+same `sharpen()` idea as `SurfaceCanvas.lineWu`): `1` = soft AA edges, `0` = a
+hard on/off mask.
 
 ## Glyphs
 
 Nine abstracted, deliberately **non-denominational** spiritual glyphs (enum
-`Symbol`, stable ordinal order):
+`Symbol`, stable ordinal order — a continuous selector floors to an index):
 
-| Symbol     | Motif                          | Notes |
-|------------|--------------------------------|-------|
-| `CROSS`    | Latin cross                    | clean, the anchor shape |
-| `EYE`      | Eye of providence (almond+pupil) | enclosing triangle dropped — doesn't read at 11px (CURATE) |
-| `SUN`      | Sun / halo, 8 rays             | doubles as halo behind other glyphs |
-| `FISH`     | Ichthys, vesica + crossed tail | tail muddies at distance (CURATE) |
-| `CRESCENT` | Waxing moon                    | |
-| `OM`       | ॐ — crescent+bindu over a curl | weakest at 11px; top CURATE candidate |
-| `ANKH`     | Loop + crossbar + stem         | |
-| `STAR`     | Six-point hexagram (outline)   | |
-| `TREE`     | Tree of life (canopy/trunk/roots) | |
+| Symbol     | Motif                              | Notes |
+|------------|------------------------------------|-------|
+| `CROSS`    | Latin **cross pommée** (bulbed arm ends) | bars + a disc at each of the 4 ends |
+| `EYE`      | Eye of providence (almond ring + pupil) | vesica outline via circle intersection |
+| `SUN`      | Sun / halo, disc + 8 tapered rays  | doubles as a halo behind other glyphs |
+| `FISH`     | Ichthys, two crossing stroked arcs | body left, open crossed tail right |
+| `CRESCENT` | Waxing moon, **rotated +45°**      | outer disc minus an offset disc |
+| `OM`       | ॐ — open curl + hook + crescent/bindu, **rotated −90°** | most abstract; top CURATE candidate |
+| `ANKH`     | Loop (ring) + crossbar + stem      | |
+| `STAR`     | Star of David / hexagram **outline**, **rotated −90°** | two stroked interlocking triangles |
+| `TREE`     | Tree of life (canopy / trunk / roots) | |
 
-## Size — CURATE
+Rotations are baked in via an `AffineTransform` about the glyph center before
+rasterization, so they stay crisp at any size. Per Jeff's 2026-07-08 feedback:
+Star −90°, Om −90°, Crescent +45°, and Cross switched from a plain Latin cross to
+the pommée form.
 
-`SIZE = 11` (square). Chosen because 11 is the smallest **odd** square with a true
-center row/column, which the symmetric glyphs (cross, star, sun, ankh) need to
-sit straight; and 11px still reads as a *symbol* rather than a blob at the
-Apotheneum LED pitch. On a 50-column cube face an unscaled glyph is ~1/5 of the
-face; use the integer `scale` arg to grow it for hero moments. CURATE flags: OM
-and FISH are the least legible and are the first candidates for a hand-tuned
-redraw (or, for OM, rendering the real Unicode char through `Text`/`PixelFont5`
-instead). The enclosing triangle of the providence eye was intentionally omitted.
+## Size
 
-## Morph model — CURATE
+No fixed size any more — the caller asks for a `cols×rows` cell box (GlassRain
+uses `GLYPH_PX = 24`, ~half the cube/cylinder height). Geometry is authored in a
+normalized unit box `[0,1]²` (y down) with a small `PAD` margin so bulbs and
+outline strokes don't clip at the raster edge.
 
-`morph(from, to, t)` is a **bitmap cross-dissolve**: per cell, coverage =
-`(fromLit ? 1-t : 0) + (toLit ? t : 0)`, clamped, used as an alpha on the render
-color. At `t=0` only `from` shows, at `t=1` only `to`; between, one shape fades
-out through the other. Zero-allocation; composites with `SurfaceCanvas.Blend`
-(default `MAX`/lighten so glyphs layer without darkening).
+CURATE: `OM` is still the least legible and the first candidate for a hand-tuned
+redraw (or rendering the real Unicode char through `Text`). The providence eye's
+enclosing triangle is still intentionally omitted (doesn't read at pitch).
 
-This first pass reads as a symbol **condensing / transmuting** into another —
-exactly the rafters→chrome intent. CURATE: a true **vector / distance-field
-morph** that slides strokes continuously between shapes is a later upgrade; the
-dissolve is the placeholder until then.
+## Reverse-normal (how callers make glyphs read from inside)
+
+`SymbolGlyphs` produces an upright coverage grid; it does **not** itself handle
+interior/exterior legibility. A caller drawing on a two-layer Apotheneum surface
+places glyph instances **symmetric about the surface's horizontal center** and
+copies the interior layer with `SurfaceCanvas.copyToMirrored` — the whole-canvas
+mirror then maps each glyph onto its identical mirror partner, so it reads
+un-reversed from inside. See GlassRain for the reference wiring.
 
 ## How each movement reuses the SAME asset differently
 
 The point of the shared table: one call site changes per movement, the glyph data
 does not.
 
-- **Rafters — "wet condensing symbols."** Draw glyphs faintly and let them
-  *accrete*: render with a low-`scale`, dim color, into a canvas that is
-  `decay()`-ed each frame so symbols bloom and drip like condensation on the
-  rafters. Use `morph(prevSymbol, nextSymbol, t)` with `t` creeping slowly so one
-  symbol is always half-forming out of the last — the "wet" precondensation look.
+- **Rafters — "liquid condensing symbols."** GlassRain builds a per-cell glyph
+  `mask` from `coverage(...)` and lets rain **pool into** it: drops are absorbed
+  into masked cells, gravity + surface-tension settle the liquid, it tints to the
+  warm swatch, fills, and overflows out the bottom lips. The glyph literally forms
+  out of water.
 - **Chrome — "occult codex glyphs."** Same glyphs, now hard and metallic: full
-  `scale`, bright/specular color, `Blend.XOR` or `DIFF` for engraved
-  interference, arranged as a grid/codex across the chrome. Step `morph` `t` **on
-  the beat** (snap 0→1) so glyphs flip like pages of a codex rather than dissolve.
-- **Distance — "a settled AMEN / HOME."** The transmutation resolves: pick one or
-  two glyphs (e.g. `CROSS`, `STAR`) at `t=0` or `t=1` (no ongoing morph), large
-  `scale`, steady color, centered and still — paired with `PixelFont5` text
-  ("AMEN" / "HOME"). The recurring symbol finally *lands*.
+  size, bright/specular color, `Blend.XOR`/`DIFF` for engraved interference,
+  arranged as a grid/codex. Flip glyph selection on the beat like codex pages.
+- **Distance — "a settled AMEN / HOME."** The transmutation resolves: one or two
+  glyphs (e.g. `CROSS`, `STAR`) large, steady, centered and still — paired with
+  `PixelFont5` text. The recurring symbol finally *lands*.
 
 ## API
 
 ```java
-public static final int SIZE = 11;
 public enum Symbol { CROSS, EYE, SUN, FISH, CRESCENT, OM, ANKH, STAR, TREE }
 
+public static int      count();               // number of glyphs (1..count selector)
 public static Symbol[] all();                 // shared, read-only
-public static int[]    rows(Symbol s);        // row bit-masks, shared, read-only
-public static boolean  pixel(Symbol s, int gx, int gy);
+public static Symbol   byIndex(int i);        // clamped ordinal lookup
 
-public static void render(SurfaceCanvas c, Symbol s, int cx, int cy, int argb, int scale);
-public static void render(SurfaceCanvas c, Symbol s, int cx, int cy, int argb, int scale,
-                          SurfaceCanvas.Blend blend);
-public static void morph(SurfaceCanvas c, Symbol from, Symbol to, double t,
-                         int cx, int cy, int argb, int scale);
-public static void morph(SurfaceCanvas c, Symbol from, Symbol to, double t,
-                         int cx, int cy, int argb, int scale, SurfaceCanvas.Blend blend);
+// Antialiased coverage grid, row-major cov[y*cols + x] in [0,1], y down.
+// Cached per (symbol, cols, rows, smooth); returned array is SHARED / READ-ONLY.
+public static float[]  coverage(Symbol s, int cols, int rows, double smooth);
+
+public static void main(String[] args);       // ASCII preview (arg[0] = smooth)
 ```
 
-`(cx, cy)` is the glyph **center** in canvas coords (x wraps per `SurfaceCanvas`).
-`scale` is integer nearest-neighbor block upscale (clamped ≥ 1). `argb` RGB is
-used, alpha ignored. Everything after construction is allocation-free.
+Run `main` (optionally with a smooth value) to eyeball every glyph as ASCII —
+the cross pommée bulbs and the Star/Om/Crescent rotations are visible there.
+`rasterize` allocates a `BufferedImage` on a **cache miss only** (a glyph/size/
+smooth first seen), never on a hit, so render loops that reuse sizes stay
+allocation-free after warmup.
+
+## History
+
+- Original: 11px `#`-ASCII bitmap masks + a bitmap cross-dissolve `morph()`.
+- 2026-07-08: rewritten to vector→coverage rasterization (this doc). The bitmap
+  `MASKS`/`rows`/`pixel`/`render`/`morph` API was **removed** — GlassRain's liquid
+  model replaces the cross-dissolve, and no other pattern used `SymbolGlyphs` yet.

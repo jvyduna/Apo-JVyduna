@@ -9,12 +9,9 @@ import apotheneum.ApotheneumPattern;
 import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.Ranges;
 import apotheneum.jvyduna.util.SurfaceCanvas;
-import apotheneum.jvyduna.util.TempoLock;
-import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
-import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
 import heronarts.lx.color.LXDynamicColor;
 import heronarts.lx.parameter.CompoundParameter;
@@ -82,14 +79,6 @@ public class Mountains extends ApotheneumPattern {
    * baseline lift. Event-like, no spatial motion; 2 s >= 1.5 s event minimum.
    */
   private static final double GLINT_SECONDS = 2;
-
-  /**
-   * Retime clamp for the reveal wipe: [0.7, 1.0]. The upper bound is 1
-   * (never faster than nominal) because REVEAL_SECONDS_PEAK sits exactly at
-   * the >= 5 s full-traversal cap — any speed-up at Energy = 1 would break it.
-   * Slowing by up to 30% stretches a reveal to at most 1.43x nominal.
-   */
-  private static final double REVEAL_RETIME_MAX = 1.0;
 
   // ---- Geography constants ---------------------------------------------------
 
@@ -254,23 +243,21 @@ public class Mountains extends ApotheneumPattern {
 
   // ---- Parameters -------------------------------------------------------------
 
-  private final TriggerBag bag = new TriggerBag("Mountains");
-
-  public final TriggerParameter wipe = bag.register(
+  public final TriggerParameter wipe =
     new TriggerParameter("Wipe", this::wipeNow)
-    .setDescription("Fade the whole field to black over 2s and restart the sequence"));
+    .setDescription("Fade the whole field to black over 2s and restart the sequence");
 
-  public final TriggerParameter newRidge = bag.register(
+  public final TriggerParameter newRidge =
     new TriggerParameter("NewRidge", this::forceRidge)
-    .setDescription("Reveal the next range now (ignored while one is revealing or fading)"));
+    .setDescription("Reveal the next range now (ignored while one is revealing or fading)");
 
-  public final TriggerParameter invert = bag.register(
+  public final TriggerParameter invert =
     new TriggerParameter("Invert", this::toggleInvert)
-    .setDescription("Toggle cave mode: flip the whole render so ranges hang from the top"));
+    .setDescription("Toggle cave mode: flip the whole render so ranges hang from the top");
 
-  public final TriggerParameter glint = bag.register(
+  public final TriggerParameter glint =
     new TriggerParameter("Glint", this::glintNow)
-    .setDescription("Brightness swell: the whole field glows to full and settles back over 2s"));
+    .setDescription("Brightness swell: the whole field glows to full and settles back over 2s");
 
   public final CompoundParameter energy =
     new CompoundParameter("Energy", 0.35)
@@ -328,18 +315,9 @@ public class Mountains extends ApotheneumPattern {
     new CompoundParameter("Audio", 0)
     .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
 
-  public final EnumParameter<Tempo.Division> tempoDiv =
-    new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.QUARTER)
-    .setDescription("Tempo division that range spawns and reveal completions land on");
-
-  public final TriggerParameter rndTrig =
-    new TriggerParameter("RndTrig", bag::fire)
-    .setDescription("Randomly fire a trigger or jump a parameter");
-
   // ---- State ------------------------------------------------------------------
 
   private final AudioReactive audio;
-  private final TempoLock tempoLock;
 
   /** Cave mode: mirror the render vertically so ranges hang from the top */
   private boolean inverted = false;
@@ -348,13 +326,11 @@ public class Mountains extends ApotheneumPattern {
   private double glintLevel = 0;
 
   // Per-frame shared values computed once in render(), always before the
-  // fields' advance() reads them. Initialized to their e=0 values because one
-  // reader can run pre-render: retime() inside a trigger-fired spawn() (e.g.
-  // MIDI NewRidge), which should see a real duration rather than 0 (retime
-  // guards 0 by returning 1, which would silently leave that reveal unsynced).
+  // fields' advance() reads them. Initialized to their e=0 values so a
+  // trigger-fired spawn() (e.g. MIDI NewRidge) landing pre-render still sees
+  // real durations.
   private double frameRevealMs = 1000 * REVEAL_SECONDS_AMBIENT;
   private double frameSpawnIdleMs = 1000 * SPAWN_IDLE_SECONDS_AMBIENT;
-  private boolean frameGridCross;
 
   // Per-frame camera values (render() computes; repaint() reads)
   private double frameSinX;
@@ -377,13 +353,11 @@ public class Mountains extends ApotheneumPattern {
   public Mountains(LX lx) {
     super(lx);
     this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
-    this.tempoLock = new TempoLock(lx);
 
     addParameter("wipe", this.wipe);
     addParameter("newRidge", this.newRidge);
     addParameter("invert", this.invert);
     addParameter("glint", this.glint);
-    addParameter("rndTrig", this.rndTrig);
     addParameter("energy", this.energy);
     addParameter("roughness", this.roughness);
     addParameter("relief", this.relief);
@@ -398,16 +372,6 @@ public class Mountains extends ApotheneumPattern {
     addParameter("planet", this.planet);
     addParameter("style", this.style);
     addParameter("audio", this.audioDepth);
-    addParameter("tempoDiv", this.tempoDiv);
-
-    // Jump candidates — mirrored 1:1 in the Mountains.md table
-    bag.jumpable(this.roughness, 0.2, 0.9);
-    bag.jumpable(this.bandOffset, -0.75, 1.0);
-    bag.jumpable(this.hueShift);
-    bag.jumpable(this.spawnRate, 0.5, 2);
-    bag.jumpable(this.rotY);
-    bag.jumpable(this.zoom, 0.8, 1.6);
-    bag.jumpable(this.planet);
   }
 
   // ---- Palette-driven band colors ----------------------------------------------
@@ -542,13 +506,6 @@ public class Mountains extends ApotheneumPattern {
     private int painted = 0;    // terrain columns revealed so far
     private int wipeStart = 0;  // terrain column where this range's wipe began
 
-    /**
-     * Reveal duration fixed at spawn, retimed so the wipe completes on a
-     * tempo-grid boundary; 0 = not yet retimed (follow the live per-frame
-     * energy value).
-     */
-    private double syncedRevealMs = 0;
-
     private Field(String name, int width, int height) {
       this.name = name;
       this.width = width;
@@ -579,16 +536,12 @@ public class Mountains extends ApotheneumPattern {
           this.revealedRows = 0;
           this.fadeMult = 1;
           this.state = IDLE;
-          this.idleMs = 1e12; // restart immediately (still subject to grid gating)
+          this.idleMs = 1e12; // restart immediately
         }
         break;
 
       case REVEALING:
-        // Per-range duration fixed at spawn (retimed onto the grid);
-        // pre-retime spawns (trigger-fired) fall back to the live duration
-        final double revealMs = (this.syncedRevealMs > 0)
-          ? this.syncedRevealMs : frameRevealMs;
-        this.front += this.width * deltaMs / revealMs;
+        this.front += this.width * deltaMs / frameRevealMs;
         this.painted = (int) Math.min(this.front, this.width);
         if (this.painted >= this.width) {
           this.revealedRows++;
@@ -599,9 +552,7 @@ public class Mountains extends ApotheneumPattern {
 
       default: // IDLE
         this.idleMs = Math.min(this.idleMs + deltaMs, 1e12);
-        // Grid-locked: once due, spawn (or start the restart fade) exactly on
-        // the next TempoDiv boundary — the grid is the beat anchor.
-        if ((this.idleMs >= frameSpawnIdleMs) && frameGridCross) {
+        if (this.idleMs >= frameSpawnIdleMs) {
           if (isFull()) {
             startFade("field full");
           } else {
@@ -649,13 +600,6 @@ public class Mountains extends ApotheneumPattern {
       this.wipeStart = this.random.nextInt(this.width);
       this.front = 0;
       this.painted = 0;
-      // Fix this range's reveal duration now, stretched (never compressed —
-      // see REVEAL_RETIME_MAX) so the wipe closes the loop on a TempoDiv
-      // boundary. Spawns themselves land on a boundary when gated through
-      // advance(), so the whole reveal is grid-aligned end to end.
-      final double s = tempoLock.retime(frameRevealMs, tempoDiv.getEnum(),
-        TempoLock.DEFAULT_MIN_SCALE, REVEAL_RETIME_MAX);
-      this.syncedRevealMs = frameRevealMs / s;
       this.state = REVEALING;
       LX.log("Mountains[" + this.name + "]: range " + row + "/" + DEPTH_ROWS
         + " planet=" + this.scheme + " roughness=" + String.format("%.2f", effRoughness));
@@ -920,9 +864,6 @@ public class Mountains extends ApotheneumPattern {
     this.frameSpawnIdleMs =
       1000 * Ranges.exp(e, SPAWN_IDLE_SECONDS_AMBIENT, SPAWN_IDLE_SECONDS_PEAK)
       / this.spawnRate.getValue();
-    // crossed() must tick every frame so the gate never misreads a stale
-    // cycle count as an instant off-grid crossing
-    this.frameGridCross = this.tempoLock.crossed(this.tempoDiv.getEnum());
 
     this.frameSinX = Math.sin(Math.toRadians(this.rotX.getValue()));
     this.frameSinZ = Math.sin(Math.toRadians(this.rotZ.getValue()));

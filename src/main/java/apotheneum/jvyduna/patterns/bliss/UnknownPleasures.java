@@ -26,20 +26,26 @@ import heronarts.lx.utils.LXUtils;
  * A stack of horizontal ridgelines scrolls vertically, phase-locked to the
  * tempo: one line emerges from the entry edge on every TempoDiv division, and
  * the scroll rate is Spacing rows per division (Spacing is a pure zoom about
- * the entry edge). Each line is a 50-sample height profile; profiles come from
- * synthesized CP 1919-style pulse shapes (sums of 2-3 random Gaussians), or in
- * Simplex mode from an underlying 3D noise field sampled around the building's
- * perimeter. The Audio knob live-mixes a bass-centered, mirrored FFT profile
+ * the entry edge). Each line's height profile is a normalized signal in [0,1];
+ * Amp then scales it in units of Spacing, so Amp = 0 is flat lines and Amp = 2
+ * lets a full peak rise two rows-of-spacing tall — overlapping the two lines
+ * behind it. The Audio knob live-mixes a bass-centered, mirrored FFT profile
  * into every displayed line each frame.
  *
- * Rendering uses the painter's algorithm per column, back to front: each
- * line's black fill (contour down to its own baseline) erases the lines behind
- * it, producing the classic ridgeline occlusion. Peaks are unclamped and
- * freely overlap the lines behind them; the fill handles the layering. The
- * contour is a white anti-aliased two-row stroke (colorize externally).
+ * Everything is functional/live: line profiles are recomputed every frame from
+ * a deterministic per-line seed and the current parameters (never baked into a
+ * buffer), so changing Simplex scale, Jag, Amp, mode, etc. re-shapes every
+ * already-visible line immediately. Reseed changes a salt, giving fresh shapes.
+ *
+ * Rendering is a true curve rasterizer: the contour is drawn as a connected
+ * polyline through the per-column samples (each column fills the vertical span
+ * between its neighbor-midpoints), so the ridge never breaks apart even when
+ * jagged or at high amplitude. Below each contour the interior is black, and
+ * that black fill occludes the lines behind it — the classic ridgeline
+ * layering. Strokes are always white (colorize externally).
  *
  * WavMode makes the four cube walls distinct (Dup / Shift / Simplex / Helix),
- * each wall blitted from its own 50x45 slot raster; CylWavs wraps 1-4 distinct
+ * each wall painted into its own 50x45 slot raster; CylWavs wraps 1-4 distinct
  * waveforms around the cylinder, rotated 45 degrees so a flat inter-waveform
  * interface faces a corner.
  *
@@ -59,20 +65,6 @@ public class UnknownPleasures extends ApotheneumPattern {
 
   /** Amplitude multiplier of a Pulse-trigger line (oversized, always synthesized) */
   private static final double PULSE_GAIN = 1.8;
-
-  /**
-   * Sanity ceiling on a normalized shape sample. Not an aesthetic clamp: peaks
-   * routinely exceed 1.0 and overlap the lines behind them (the cover's look);
-   * this only bounds pathological Gaussian pile-ups so RIDGE_MARGIN stays finite.
-   */
-  private static final double SHAPE_MAX = 2.0;
-
-  /**
-   * Tallest possible ridge in rows: SHAPE_MAX (2) x amplitude max (12) x pulse
-   * gain (1.8) = 43.2, rounded up. Used only for the line existence window so
-   * ridges never pop in or out at the field edges.
-   */
-  private static final int RIDGE_MARGIN = 44;
 
   // ---- Shape synthesis ------------------------------------------------------
 
@@ -109,9 +101,9 @@ public class UnknownPleasures extends ApotheneumPattern {
   private static final int NUM_SLOTS = 4;
 
   /**
-   * Ring buffer of line entries keyed by birth index. Must exceed the widest
-   * existence window: (45 visible + 44 ridge margin) / min spacing 2 + helix
-   * and shift slack ~ 52.
+   * Ring buffer of line records (pulse metadata only, keyed by birth index).
+   * Must exceed the widest existence window: (45 visible + ridge margin) / min
+   * spacing 2 + slack.
    */
   private static final int RING = 64;
 
@@ -162,12 +154,12 @@ public class UnknownPleasures extends ApotheneumPattern {
     .setDescription("Rows between adjacent baselines; also the scroll distance per division (zoom about the entry edge)");
 
   public final CompoundParameter amplitude =
-    new CompoundParameter("Amp", 7, 2, 12)
-    .setDescription("Peak ridge height in rows at the center of a line");
+    new CompoundParameter("Amp", 1, 0, 2)
+    .setDescription("Peak height in units of Spacing: 0 = flat lines, 2 = a full peak rises two rows-of-spacing tall");
 
   public final CompoundParameter jaggedness =
     new CompoundParameter("Jag", 0.15, 0, 1)
-    .setDescription("Noise baked into newborn profiles; at full Audio, how little the FFT bins are smoothed");
+    .setDescription("Roughness of synthesized profiles; at full Audio, how little the FFT bins are smoothed");
 
   public final EnumParameter<WavMode> wavMode =
     new EnumParameter<WavMode>("WavMode", WavMode.DUPLICATE)
@@ -203,12 +195,14 @@ public class UnknownPleasures extends ApotheneumPattern {
     new TriggerParameter("RndTrig", bag::fire)
     .setDescription("Randomly fire one trigger or jump one parameter");
 
-  // ---- Line store (ring buffer keyed by integer birth index) ----------------
+  // ---- Line records (pulse metadata only; shapes are computed live) ---------
 
   private final long[] ringKey = new long[RING];    // birth index; Long.MIN_VALUE = empty
   private final double[] ringGain = new double[RING];
-  private final float[] ringMax = new float[RING];  // max shape sample, for paint early-outs
-  private final float[][][] ringShape = new float[RING][NUM_SLOTS][WIDTH]; // plane 0 only, except SIMPLEX
+  private final boolean[] ringSynth = new boolean[RING]; // forced-synth (pulse) line
+
+  /** Bumped on Reseed; salts the per-line seed so a reseed yields fresh shapes. */
+  private long reseedSalt = 0;
 
   // ---- Preallocated render state (no allocation in the render path) ---------
 
@@ -217,7 +211,8 @@ public class UnknownPleasures extends ApotheneumPattern {
   private final int[][] cylRasterRef = new int[NUM_SLOTS][]; // per-frame references into the above
 
   private final double[] window = new double[WIDTH];   // center-heavy Hann^p weighting
-  private final double[] synthScratch = new double[WIDTH]; // synthesized pulse shape
+  private final float[] shapeScratch = new float[WIDTH]; // one line's normalized profile, rebuilt per line
+  private final double[] curveY = new double[WIDTH];   // one line's per-column contour rows (fractional)
   private final int[] fftBand = new int[WIDTH];        // mirrored column -> band map (bass at center)
   private final float[] fftA = new float[WIDTH];       // FFT smoothing ping-pong buffers
   private final float[] fftB = new float[WIDTH];
@@ -225,12 +220,12 @@ public class UnknownPleasures extends ApotheneumPattern {
   private float fftMax = 0;
 
   private final GraphicMeter meter;
-  private final Random random = new Random();
+  private final Random random = new Random(); // reseeded per line via setSeed (no allocation)
 
   /** True = lines scroll downward (born at top); flipped by the Flip trigger */
   private boolean scrollDown = true;
 
-  /** Pulse trigger armed; consumed by the next entry-edge line generation (on-division) */
+  /** Pulse trigger armed; consumed by the next entry-edge line (on-division) */
   private boolean pulsePending = false;
 
   // Division-time tracking (see render): E = U - kBase is the continuous line phase
@@ -238,7 +233,8 @@ public class UnknownPleasures extends ApotheneumPattern {
   private long kBase = 0;
 
   // Per-frame globals shared by the slot-raster painters
-  private double frameE, frameSp, frameAmpRows, frameDepth;
+  private WavMode frameMode = WavMode.DUPLICATE;
+  private double frameE, frameSp, frameHeightUnit, frameDepth;
   private long frameKLo, frameKHi;
 
   public UnknownPleasures(LX lx) {
@@ -264,7 +260,7 @@ public class UnknownPleasures extends ApotheneumPattern {
     addParameter("tempoDiv", this.tempoDiv);
 
     bag.jumpable(this.spacing, 2, 8);
-    bag.jumpable(this.amplitude, 4, 12);
+    bag.jumpable(this.amplitude, 0.5, 2);
     bag.jumpable(this.jaggedness, 0, 0.5);
     bag.jumpable(this.wavMode);
     bag.jumpable(this.cylWavs);
@@ -291,12 +287,12 @@ public class UnknownPleasures extends ApotheneumPattern {
 
   // ---- Triggers -------------------------------------------------------------
 
-  /** Empty the ring; the next frame's reconcile refills every grid-locked position with fresh shapes. */
   private void clearRing() {
     Arrays.fill(this.ringKey, Long.MIN_VALUE);
   }
 
   private void reseed() {
+    ++this.reseedSalt; // fresh per-line seeds
     clearRing();
     LX.log("UnknownPleasures: reseed");
   }
@@ -309,115 +305,127 @@ public class UnknownPleasures extends ApotheneumPattern {
 
   /**
    * Arm one oversized synthesized pulse line. It is consumed by the next
-   * entry-edge line generation, which happens exactly on a tempo division —
-   * quantization is structural, no separate grid logic.
+   * entry-edge line, which appears exactly on a tempo division — quantization
+   * is structural, no separate grid logic.
    */
   private void injectPulse() {
     this.pulsePending = true;
     LX.log("UnknownPleasures: pulse armed for next division");
   }
 
-  @Override
-  public void onParameterChanged(LXParameter parameter) {
-    super.onParameterChanged(parameter);
-    if (parameter == this.wavMode) {
-      // SIMPLEX needs planes 1-3 populated and SHIFT needs lookahead entries;
-      // cheapest correct invalidation is a full regenerate (reseed semantics)
-      clearRing();
-    }
-  }
-
-  // ---- Shape generation (event-rate, uses preallocated scratch only) --------
+  // ---- Line records ---------------------------------------------------------
 
   private static int ringIndex(long k) {
     return (int) Math.floorMod(k, RING);
   }
 
   /**
-   * Generate the ring entry for birth index k. Entry-edge births (k at the top
-   * of the window) consume a pending Pulse; backfills (reseed, spacing zoom-out,
-   * flip) never do.
+   * Register the line record for birth index k if not already present. Entry-
+   * edge births (the newest line each division) consume a pending Pulse.
    */
-  private void generateEntry(int idx, long k, boolean entryEdge) {
+  private void registerLine(long k, boolean entryEdge) {
+    final int idx = ringIndex(k);
+    if (this.ringKey[idx] == k) {
+      return;
+    }
     double gain = 1;
-    boolean forceSynth = false;
+    boolean synth = false;
     if (this.pulsePending && entryEdge) {
       this.pulsePending = false;
       gain = PULSE_GAIN;
-      forceSynth = true;
+      synth = true;
       LX.log("UnknownPleasures: pulse injected");
-    }
-    final float[][] planes = this.ringShape[idx];
-    float max;
-    if ((this.wavMode.getEnum() == WavMode.SIMPLEX) && !forceSynth) {
-      max = 0;
-      for (int s = 0; s < NUM_SLOTS; ++s) {
-        max = Math.max(max, fillSimplexShape(planes[s], s, k));
-      }
-    } else {
-      max = fillSynthShape(planes[0], forceSynth);
-      if (this.wavMode.getEnum() == WavMode.SIMPLEX) {
-        // A pulse in Simplex mode appears on all walls at once
-        for (int s = 1; s < NUM_SLOTS; ++s) {
-          System.arraycopy(planes[0], 0, planes[s], 0, WIDTH);
-        }
-      }
     }
     this.ringKey[idx] = k;
     this.ringGain[idx] = gain;
-    this.ringMax[idx] = max;
+    this.ringSynth[idx] = synth;
+  }
+
+  private double gainOf(long k) {
+    final int idx = ringIndex(k);
+    return (this.ringKey[idx] == k) ? this.ringGain[idx] : 1;
+  }
+
+  private boolean synthOf(long k) {
+    final int idx = ringIndex(k);
+    return (this.ringKey[idx] == k) && this.ringSynth[idx];
+  }
+
+  // ---- Live shape computation (functional; no baked buffers) ----------------
+
+  /** Deterministic per-line seed; salted so Reseed yields fresh shapes. */
+  private long lineSeed(long k) {
+    long h = k * 0x9E3779B97F4A7C15L + this.reseedSalt * 0xC2B2AE3D27D4EB4FL;
+    h ^= (h >>> 29);
+    h *= 0xBF58476D1CE4E5B9L;
+    h ^= (h >>> 32);
+    return h;
   }
 
   /**
-   * Synthesized CP 1919 profile plus smoothed jaggedness noise, pinned to the
-   * baseline at the edges by the center-heavy window. Returns the max sample.
+   * Compute a line's normalized [0,1] profile live from the current parameters.
+   * Non-pulse lines in Simplex mode sample the noise field for the given slot;
+   * everything else synthesizes a CP 1919-style pulse from the line's seed.
    */
-  private float fillSynthShape(float[] out, boolean isPulse) {
-    synthesizePulse(this.synthScratch);
+  private void computeShape(float[] out, long index, int slot, boolean forceSynth) {
+    if ((this.frameMode == WavMode.SIMPLEX) && !forceSynth) {
+      computeSimplex(out, index, slot);
+    } else {
+      computeSynth(out, index, forceSynth);
+    }
+  }
+
+  /**
+   * Synthesized CP 1919 profile (sum of 2-3 Gaussians) plus smoothed jaggedness
+   * noise, windowed to pin the edges flat, then normalized so its tallest point
+   * is at most 1 (down-scaled only — short lines stay short, so peaks are "up
+   * to" the full height rather than all identical). Pulse lines omit the jag.
+   */
+  private void computeSynth(float[] out, long index, boolean isPulse) {
+    this.random.setSeed(lineSeed(index));
+    Arrays.fill(out, 0f);
+    final int count = 2 + this.random.nextInt(2);
+    for (int g = 0; g < count; ++g) {
+      final double c = WIDTH * (0.34 + 0.32 * this.random.nextDouble()); // CURATE: pulse center spread
+      final double sigma = 2.5 + 4.5 * this.random.nextDouble();         // CURATE: pulse width range
+      final double height = 0.35 + 0.65 * this.random.nextDouble();
+      for (int x = 0; x < WIDTH; ++x) {
+        final double d = (x - c) / sigma;
+        out[x] += (float) (height * Math.exp(-0.5 * d * d));
+      }
+    }
     final double jag = isPulse ? 0 : this.jaggedness.getValue() * JAG_SCALE;
     double noise = 0;
     float max = 0;
     for (int x = 0; x < WIDTH; ++x) {
       noise = NOISE_SMOOTH * noise + (1 - NOISE_SMOOTH) * (this.random.nextDouble() * 2 - 1);
-      final double v = this.synthScratch[x] + jag * noise;
-      final float s = (float) LXUtils.constrain(v * this.window[x], 0, SHAPE_MAX);
-      out[x] = s;
-      if (s > max) {
-        max = s;
+      final float v = (float) ((out[x] + jag * noise) * this.window[x]);
+      out[x] = v;
+      if (v > max) {
+        max = v;
       }
     }
-    return max;
-  }
-
-  /** CP 1919-style pulse: sum of 2-3 Gaussians with random center/width/height near the middle. */
-  private void synthesizePulse(double[] out) {
-    Arrays.fill(out, 0);
-    final int count = 2 + this.random.nextInt(2);
-    for (int g = 0; g < count; ++g) {
-      final double center = WIDTH * (0.34 + 0.32 * this.random.nextDouble()); // CURATE: pulse center spread
-      final double sigma = 2.5 + 4.5 * this.random.nextDouble();              // CURATE: pulse width range
-      final double height = 0.35 + 0.65 * this.random.nextDouble();
+    if (max > 1) {
+      final float inv = 1f / max;
       for (int x = 0; x < WIDTH; ++x) {
-        final double d = (x - center) / sigma;
-        out[x] += height * Math.exp(-0.5 * d * d);
+        out[x] *= inv;
       }
     }
   }
 
   /**
    * Simplex mode: sample the underlying 3D noise field along one wall of the
-   * building. The four slots trace the four sides of a square in the field's
-   * X-Z plane (adjacent walls share corners, so the field reads as one volume
-   * wrapped by the architecture); the field advances in Y per line index.
-   * Returns the max sample.
+   * building, live from NzScl/NzTurb. The four slots trace the four sides of a
+   * square in the field's X-Z plane (adjacent walls share corners, so the
+   * field reads as one volume wrapped by the architecture); the field advances
+   * in Y per line index. Windowed to pin the edges flat; naturally in [0,1].
    */
-  private float fillSimplexShape(float[] out, int slot, long k) {
+  private void computeSimplex(float[] out, long index, int slot) {
     final double scale = this.nzScale.getValue();
     final float sx = (float) (scale * NZ_X_STEP);
-    final float py = (float) (k * scale * NZ_LINE_STEP);
+    final float py = (float) (index * scale * NZ_LINE_STEP);
     final float c = 25 * sx; // wall offset from field center
     final int octaves = 1 + (int) Math.round(3 * this.nzTurb.getValue()); // 1..4
-    float max = 0;
     for (int x = 0; x < WIDTH; ++x) {
       final float u = (float) ((x - (WIDTH - 1) * 0.5) * sx);
       final float px, pz;
@@ -430,13 +438,8 @@ public class UnknownPleasures extends ApotheneumPattern {
       final float v = (octaves == 1)
         ? LXUtils.noise(px, py, pz)
         : LXUtils.noiseFBM(px, py, pz, NZ_LACUNARITY, NZ_GAIN, octaves);
-      final float s = (float) LXUtils.constrain((0.5 + 0.5 * v) * this.window[x], 0, SHAPE_MAX);
-      out[x] = s;
-      if (s > max) {
-        max = s;
-      }
+      out[x] = (float) LXUtils.constrain((0.5 + 0.5 * v) * this.window[x], 0, 1);
     }
-    return max;
   }
 
   // ---- Live FFT profile -----------------------------------------------------
@@ -501,30 +504,28 @@ public class UnknownPleasures extends ApotheneumPattern {
     final double E = U - this.kBase;
 
     final double sp = this.spacing.getValue();
-    final WavMode mode = this.wavMode.getEnum();
+    final double amp = this.amplitude.getValue();
+    this.frameMode = this.wavMode.getEnum();
 
-    // Existence window of integer birth indices. Down-scroll: the entry edge
-    // is the top (kHi includes one not-yet-emerged line for AA fade-in); the
-    // exit allows RIDGE_MARGIN of contour to trail below the field. Up-scroll
-    // mirrors: pre-birth below the bottom by the ridge margin so tall contours
-    // never pop in, exit at the top. The trailing -1 covers helix phase lag.
+    // Existence window of integer birth indices. marginRows is the tallest a
+    // ridge can reach above its baseline (peak = amp x spacing x pulse gain);
+    // lines persist while any part of that span is on-field. Down-scroll: entry
+    // edge is the top (kHi includes one not-yet-emerged line for AA fade-in).
+    // Up-scroll mirrors: pre-birth below the bottom by the ridge margin so tall
+    // contours never pop in. The trailing -1 covers helix phase lag.
+    final double marginRows = amp * sp * PULSE_GAIN;
     final long kHi, kLo;
     if (this.scrollDown) {
       kHi = (long) Math.floor(E) + 1;
-      kLo = (long) Math.ceil(E - (HEIGHT + RIDGE_MARGIN) / sp) - 1;
+      kLo = (long) Math.ceil(E - (HEIGHT + marginRows) / sp) - 1;
     } else {
-      kHi = (long) Math.floor(E + RIDGE_MARGIN / sp) + 1;
-      kLo = (long) Math.ceil(E - (HEIGHT + 1) / sp) - 1;
+      kHi = (long) Math.floor(E + marginRows / sp) + 1;
+      kLo = (long) Math.ceil(E - (HEIGHT + 2) / sp) - 1;
     }
-    // SHIFT walls display the series up to 3 lines ahead
-    final long shapeHi = kHi + ((mode == WavMode.SHIFT) ? (NUM_SLOTS - 1) : 0);
 
-    // Reconcile: generate any missing entries (event-rate work)
-    for (long k = kLo; k <= shapeHi; ++k) {
-      final int idx = ringIndex(k);
-      if (this.ringKey[idx] != k) {
-        generateEntry(idx, k, k >= kHi);
-      }
+    // Register line records (pulse tracking) for the window
+    for (long k = kLo; k <= kHi; ++k) {
+      registerLine(k, k == kHi);
     }
 
     buildFftShape();
@@ -533,24 +534,21 @@ public class UnknownPleasures extends ApotheneumPattern {
     this.frameSp = sp;
     this.frameKLo = kLo;
     this.frameKHi = kHi;
-    this.frameAmpRows = this.amplitude.getValue();
+    this.frameHeightUnit = amp * sp; // rows per unit-normalized peak
     this.frameDepth = this.audioDepth.getValue();
 
     // Paint the slot rasters
-    final int active = (mode == WavMode.DUPLICATE) ? 1 : NUM_SLOTS;
+    final int active = (this.frameMode == WavMode.DUPLICATE) ? 1 : NUM_SLOTS;
     for (int s = 0; s < active; ++s) {
-      final int plane = (mode == WavMode.SIMPLEX) ? s : 0;
-      final int shift = (mode == WavMode.SHIFT) ? s : 0;
-      final double lag = (mode == WavMode.HELIX) ? s / (double) NUM_SLOTS : 0;
-      paintSlotRaster(this.cubeRaster[s], plane, shift, lag);
+      paintSlotRaster(this.cubeRaster[s], s, NUM_SLOTS);
     }
 
     // Cylinder rasters: reuse the cube's, except HELIX with a segment count
     // other than 4, whose phase lags depend on the segment count
     final int nSeg = this.cylWavs.getValuei();
-    if ((mode == WavMode.HELIX) && (nSeg != NUM_SLOTS)) {
+    if ((this.frameMode == WavMode.HELIX) && (nSeg != NUM_SLOTS)) {
       for (int s = 0; s < nSeg; ++s) {
-        paintSlotRaster(this.cylHelixRaster[s], 0, 0, s / (double) nSeg);
+        paintSlotRaster(this.cylHelixRaster[s], s, nSeg);
         this.cylRasterRef[s] = this.cylHelixRaster[s];
       }
     } else {
@@ -571,72 +569,104 @@ public class UnknownPleasures extends ApotheneumPattern {
   /**
    * Paint one slot's 50x45 field: back-to-front painter's order (ascending
    * baseline) so each nearer line's black fill erases the contours behind it.
+   * numSlots divides the helix phase lag (4 walls on the cube, CylWavs segments
+   * around the cylinder).
    */
-  private void paintSlotRaster(int[] raster, int plane, int shift, double lag) {
+  private void paintSlotRaster(int[] raster, int slot, int numSlots) {
     Arrays.fill(raster, LXColor.BLACK);
     if (this.scrollDown) {
       // Larger k = newer = higher on screen = farther; paint first
       for (long k = this.frameKHi; k >= this.frameKLo; --k) {
-        paintLineAt(raster, k, plane, shift, lag);
+        paintLineAt(raster, k, slot, numSlots);
       }
     } else {
       // Larger k = newer = lower on screen = nearer; paint last
       for (long k = this.frameKLo; k <= this.frameKHi; ++k) {
-        paintLineAt(raster, k, plane, shift, lag);
+        paintLineAt(raster, k, slot, numSlots);
       }
     }
   }
 
-  private void paintLineAt(int[] raster, long k, int plane, int shift, double lag) {
-    final int idx = ringIndex(k + shift);
-    if (this.ringKey[idx] != k + shift) {
-      return; // not generated (transiently possible across a mode change)
-    }
+  private void paintLineAt(int[] raster, long k, int slot, int numSlots) {
+    // Which line's signal this wall shows, and its position offset
+    final long index = (this.frameMode == WavMode.SHIFT) ? (k + slot) : k;
+    final double lag = (this.frameMode == WavMode.HELIX) ? (slot / (double) numSlots) : 0;
+    final boolean synth = synthOf(index);
+    computeShape(this.shapeScratch, index, slot, synth);
+
     final double progress = (this.frameE - k - lag) * this.frameSp;
-    final double b = this.scrollDown ? progress : HEIGHT - progress;
-    paintLine(raster, this.ringShape[idx][plane], this.ringMax[idx], b, this.ringGain[idx]);
+    final double baseline = this.scrollDown ? progress : HEIGHT - progress;
+    drawCurve(raster, this.shapeScratch, baseline, gainOf(index));
   }
 
   /**
-   * Paint one line into a raster: per column, black-fill from just under the
-   * contour down to the baseline (occluding whatever was behind — peaks are
-   * unclamped and freely overlap the lines above), then draw the contour as a
-   * white brightness-weighted two-row stroke at its fractional height, so
-   * sub-pixel scrolling stays smooth. The displayed profile is the per-frame
-   * live mix of the line's baked shape and the mirrored FFT profile.
+   * Rasterize one line as a connected antialiased curve. The displayed profile
+   * is the live mix of the baked-free signal and the mirrored FFT profile. Per
+   * column the contour is drawn across the vertical span between its neighbor-
+   * midpoints, so consecutive columns share an endpoint and the ridge stays
+   * connected even where it is steep or tall; below the contour the interior is
+   * filled black to occlude the lines behind it.
    */
-  private void paintLine(int[] raster, float[] shape, float shapeMax, double b, double gain) {
-    if (b < -1) {
-      return; // fully above the field
-    }
+  private void drawCurve(int[] raster, float[] shape, double baseline, double gain) {
+    final double heightUnit = this.frameHeightUnit * gain;
     final double depth = this.frameDepth;
-    final double lineAmp = this.frameAmpRows * gain;
-    // Upper bound on this line's mixed height, for the fully-below early-out
-    final double hBound = LXUtils.lerp(shapeMax, this.fftMax, depth) * lineAmp;
-    if (b - hBound > HEIGHT) {
-      return; // fully below the field
-    }
-    final int baseRow = (int) Math.floor(b);
-    for (int x = 0; x < WIDTH; ++x) {
-      final double s = shape[x] + depth * (this.fftShape[x] - shape[x]);
-      final double yc = b - s * lineAmp; // contour row (fractional)
-      final int contourRow = (int) Math.floor(yc);
 
-      // Fill (silhouette interior): rows strictly below the contour, down to the baseline
-      final int fillStart = Math.max(0, contourRow + 1);
+    // Cheap whole-line culls
+    final double peakBound = heightUnit * Math.max(1.0, this.fftMax);
+    if (baseline - peakBound > HEIGHT + 1 || baseline < -1) {
+      return;
+    }
+
+    for (int x = 0; x < WIDTH; ++x) {
+      final double disp = shape[x] + depth * (this.fftShape[x] - shape[x]);
+      this.curveY[x] = baseline - disp * heightUnit;
+    }
+
+    final int baseRow = (int) Math.floor(baseline);
+    for (int x = 0; x < WIDTH; ++x) {
+      // Contour endpoints at the column's left/right edges = midpoints with
+      // neighbors, so column x's right edge == column x+1's left edge (no gap)
+      final double yL = (x > 0) ? 0.5 * (this.curveY[x - 1] + this.curveY[x]) : this.curveY[x];
+      final double yR = (x < WIDTH - 1) ? 0.5 * (this.curveY[x] + this.curveY[x + 1]) : this.curveY[x];
+      // Include the sample itself so local peaks/valleys (outside the midpoint
+      // span) still get their tip drawn
+      final double yTop = Math.min(this.curveY[x], Math.min(yL, yR));
+      final double yBot = Math.max(this.curveY[x], Math.max(yL, yR));
+
+      // Interior fill: everything strictly below the contour, down to baseline
+      final int fillStart = Math.max(0, (int) Math.floor(yBot) + 1);
       final int fillEnd = Math.min(HEIGHT - 1, baseRow);
       for (int y = fillStart; y <= fillEnd; ++y) {
         raster[y * WIDTH + x] = LXColor.BLACK;
       }
 
-      // Contour stroke, anti-aliased across two rows by the fractional part
-      final double f = yc - contourRow;
-      if (contourRow >= 0 && contourRow < HEIGHT && f < 0.98) {
-        raster[contourRow * WIDTH + x] = LXColor.gray(100 * (1 - f));
-      }
-      final int below = contourRow + 1;
-      if (below >= 0 && below < HEIGHT && f > 0.02) {
-        raster[below * WIDTH + x] = LXColor.gray(100 * f);
+      // Contour stroke
+      if (yBot - yTop < 1e-3) {
+        // Nearly flat: classic two-row antialiased stroke at the sample
+        final double yc = this.curveY[x];
+        final int r = (int) Math.floor(yc);
+        final double f = yc - r;
+        if (r >= 0 && r < HEIGHT && f < 0.98) {
+          raster[r * WIDTH + x] = LXColor.gray(100 * (1 - f));
+        }
+        final int below = r + 1;
+        if (below >= 0 && below < HEIGHT && f > 0.02) {
+          raster[below * WIDTH + x] = LXColor.gray(100 * f);
+        }
+      } else {
+        // Sloped: light every row the contour passes through in this column,
+        // antialiasing the two endpoints by their fractional coverage
+        final int y0 = (int) Math.floor(yTop);
+        final int y1 = (int) Math.floor(yBot);
+        for (int y = y0; y <= y1; ++y) {
+          if (y < 0 || y >= HEIGHT) {
+            continue;
+          }
+          final double cov = Math.min(y + 1, yBot) - Math.max(y, yTop);
+          if (cov > 0) {
+            raster[y * WIDTH + x] = LXColor.gray(100 * Math.min(1.0, cov));
+          }
+        }
       }
     }
   }

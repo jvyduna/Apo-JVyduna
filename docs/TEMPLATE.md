@@ -37,35 +37,70 @@ the reactivity described here (magnitude taps scale linearly with depth;
 hits fire normally once depth > 0.01). Document what the knob at 1 adds
 visually over the knob at 0.
 
-## Tempo mapping
+## Tempo
 
-Which motion points lock to the tempo grid when `Sync` is on (via
-`TempoLock.retime(...)` at event-scheduling moments and/or
-`TempoLock.crossed(...)` per-frame gates), and against which `TempoDiv`
-default. State what turning Sync off restores — the pattern's free-running
-timing must remain fully functional and good-looking with Sync off. Note any
-clamp overrides passed to `retime()` and why.
+No tempo **gating**: patterns free-run. The old Sync/TempoDiv (`TempoLock`) and
+Meta (`TriggerBag`) conventions were RETIRED 2026-07-08 — do not add them to
+new patterns. Choreography (event timing, section changes) comes from the
+arrange timeline, not from tempo-grid analysis or random meta jumps.
 
-## Energy mapping
+**Beat-relative speed for the grid-less songs (adopted 2026-07-08).** For the
+grid-less songs — **Distance, Chrome, Temper** — prefer expressing motion
+*speed* as a **continuous, beat-relative rate ("tempoDiv units")** rather than
+absolute seconds: pick endpoints in units-per-beat (rows/beat, beats/cycle,
+period-in-beats, …) and multiply by the live beat period
+`lx.engine.tempo.period.getValue()` (ms/beat — the read Satori uses), so motion
+follows the (often rubato) arrange tempo lane. This is **not** the retired
+Sync/TempoDiv gate: the rate stays continuous, never snaps to a division, and
+never jumps. Always clamp the resulting rate/period so the >=5 s full-traversal
+cap holds at any tempo. Reference implementations: `Aumakua` (rows/beat rise),
+`PulseOrb` (breathe/drift period in beats). **Chrome is a per-song outlier** —
+parts are legitimately tempo-grid-driven (e.g. Cathedral's `TempoDiv` TearDown),
+parts want continuous speeds; decide each Chrome speed param with Jeff and record
+it in a "Speed units — DECISION NEEDED" section of that pattern's `.md`.
 
-| Quantity | Ambient (e=0) | Peak (e=1) | Curve (lin/exp) |
+## Energy / Speed mapping
+
+Name the motion-rate knob **`speed`** (label "Speed") when it *only* scales
+motion; keep **`energy`** (label "Energy") only when the one knob also drives
+non-motion quantities (brightness, density, a whole behavioral regime). Rename
+key + label + field together (never rename a key a saved `.lxp` references).
+
+| Quantity | Ambient (0) | Peak (1) | Curve (lin/exp) |
 |---|---|---|---|
 | ... | ... | ... | ... |
 
-Sustained motion must respect the >=5s full-traversal cap even at e=1.
+Sustained motion must respect the >=5 s full-traversal cap even at 1.
 
 ## Parameters
 
-UI/registration order convention (do not deviate; existing keys/labels must
-never be renamed — saved .lxp files reference them):
+UI/registration order convention (do not deviate; existing keys must never be
+renamed once a saved .lxp references them):
 
-1. Triggers (>= 3 non-meta; see Triggers section)
-2. `energy` — Energy
+1. Triggers (>= 3; see Triggers section)
+2. `speed` — Speed (or `energy` — Energy if it also drives non-motion; see above)
 3. Pattern-specific parameters
-4. `audio` — Audio depth knob (`CompoundParameter("Audio", 0)`)
-5. `sync` — `BooleanParameter("Sync", true)`
-6. `tempoDiv` — `EnumParameter<Tempo.Division>("TempoDiv", <per-pattern default>)`
-7. `meta` — Meta, always last
+4. `smooth` — Smooth (motion-blending + antialiasing knob; see Smooth section)
+5. `audio` — Audio depth knob (`CompoundParameter("Audio", 0)`)
+
+Naming: UI labels are max 7 characters (Chromatik knob width); the code field
+name can and should be longer and descriptive (e.g. field `genSpacing`, key
+`genY`, label `GenY`; field `interiorLevel`, key `interior`, label `Inner`).
+
+## Smooth (motion-blending + antialiasing knob)
+
+Every pattern exposes a `CompoundParameter("Smooth", 1.0)` (key `smooth`,
+default 1.0) that controls **motion blending between moving pixels** (sub-pixel /
+fractional-row crossfades vs. pixel-snapped stepping) and **antialiasing of drawn
+forms** (edge coverage `clamp01(dist+0.5)` softened by `smooth`): 0 =
+steppy/pixel-snapped/hard edges, 1 = smooth. Reuse the shared primitives —
+`SurfaceCanvas.lineWu`/`plotWu` (Wu AA), `LXColor.lerp`, coverage-scaled color,
+`SurfaceCanvas.line`/`lineMax` (hard) crossfaded against `lineWu` by `smooth`.
+The name is standardized on **Smooth**; **"Blend" now means compositing mode
+only** (`SurfaceCanvas.Blend` MAX/XOR/…). Register `smooth` after the
+pattern-specific params, before `audio`. A pattern with genuinely nothing to
+smooth (a static bench like `Lattice`) may omit it, but must document the
+exemption in its `.md`.
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
@@ -73,7 +108,7 @@ never be renamed — saved .lxp files reference them):
 
 ## Triggers
 
-Requirement: at least 3 non-meta triggers, spanning small -> large state
+Requirement: at least 3 triggers, spanning small -> large state
 permutations (e.g. a subtle hue rotation, a mid-size behavior flip, and a
 full scatter/reset). Trigger handlers run at event rate and may allocate
 minimally.
@@ -81,22 +116,13 @@ minimally.
 - `name` — what suddenly changes, and how long the change takes to read on the
   sculpture
 
-## Jump candidates
-
-Rows mirror the `bag.jumpable(...)` lines in the constructor 1:1. Status is
-updated during curation.
-
-| Param | Jump range | Status | Notes |
-|---|---|---|---|
-| ... | ... | candidate | ... |
-
-Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [a,b]`.
-
 ## Simulation-principles compliance
 
-Show the math: fastest sustained motion at default energy AND at energy=1, in
+Show the math: fastest sustained motion at default Speed/Energy AND at 1, in
 seconds per full sculpture traversal (>=5s required; event-like motion such as
-a lightning stroke may be faster but must have >=1.5s total visual life).
+a lightning stroke may be faster but must have >=1.5s total visual life). For
+beat-relative speeds, show the seconds at the song's nominal BPM and confirm the
+rate clamp holds the >=5s floor at fast tempo.
 Contrast/brightness choices (bold forms, no fine texture, posterization etc.).
 
 ## Curation log

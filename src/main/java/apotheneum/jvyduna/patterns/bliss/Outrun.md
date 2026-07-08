@@ -89,17 +89,8 @@ level → horizon glow, treble → gridline sparkle, bassHit → Pulse.
 
 ## Tempo mapping
 
-- **Pulse** (event): at trigger, when Sync is on, the bolt's travel rate is
-  scaled by `TempoLock.retime(2200 ms, TempoDiv)` with the default clamp
-  (0.7..1.4), so the bolt reaches the horizon on a grid boundary. Life stays
-  in 1.57..3.14 s — at or above the 1.5 s event floor.
-- **Bank** (event): at trigger, when Sync is on, the turn duration is retimed
-  with clamp (0.7..**1**) — slow-down only, so the 90-degree turn never beats
-  the 5 s pace that keeps a full pan at 20 s/rev.
-- `TempoLock.crossed()` is polled every frame (unconditionally, per its
-  contract) though no per-frame event consumes it in v1.
-- Sync off: both triggers run at their free base durations; nothing else
-  changes.
+No tempo gating — all timing free-runs (Sync/TempoDiv/Meta convention retired
+2026-07-08): Pulse and Bank run at their base durations (2.2 s / 5 s).
 
 ## Energy mapping
 
@@ -136,40 +127,28 @@ never be renamed — saved .lxp files reference them):
 | `fill` | Fill | EnumParameter\<FillMode\> | WIRE | WIRE/FILLED/GLOW | topography fill mode |
 | `hue` | Hue | CompoundParameter | 0 | 0..360 | hue offset (degrees) on the depth gradient |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | **reserved — unwired in v1** (see Audio mapping) |
-| `sync` | Sync | BooleanParameter | true | — | lock Pulse/Bank event timing to the tempo grid |
-| `tempoDiv` | TempoDiv | EnumParameter\<Tempo.Division\> | QUARTER | — | grid division for Sync |
-| `meta` | Meta | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
+
+Removed 2026-07-08: `sync`, `tempoDiv`, `meta` (Sync/TempoDiv/Meta convention
+retired; `.lxp` values on those paths are dropped on load).
 
 ## Triggers
 
 - `boost` — small: the world visibly accelerates ~2.6× for a breath and eases
   back over ~3 s; nothing else changes.
 - `pulse` — mid: a single bright bolt sweeps every face from underfoot to the
-  horizon in ~2.2 s (grid-timed with Sync).
+  horizon in ~2.2 s.
 - `bank` — mid/large: heading swings 90° (random direction) over ~5 s while
   the horizon rolls up to 4 rows and settles; the whole panorama slews a
   quarter turn.
 - `regen` — large: the entire landscape morphs into fresh topography over 5 s
   (no cut; heights crossfade). CURATE: retriggering mid-morph snaps the old
   field to the previous target before starting the new morph — verify the pop
-  is acceptable when Meta spams it.
-
-## Jump candidates
-
-Rows mirror the `bag.jumpable(...)` lines in the constructor 1:1.
-
-| Param | Jump range | Status | Notes |
-|---|---|---|---|
-| `altitude` | full (0..1) | candidate | deck-skim ↔ map view is a strong scene change |
-| `gridSize` | 0.15..0.85 | candidate | extremes avoided: near-solid lines / near-empty ground |
-| `relief` | full (0..1) | candidate | flat laser grid ↔ mountains |
-| `fov` | full (0..1) | candidate | perspective drama |
-| `heading` | full (0..1) | candidate | instant yaw cut — CURATE: may read as a jarring hard cut; consider dropping or easing |
+  is acceptable under rapid retriggering.
 
 ## Simulation-principles compliance
 
-- **Panning (sustained):** only Bank rotates the view: 90° in ≥ 5 s (Sync can
-  only stretch it) ⇒ ≥ 20 s per full 360° traversal of the ring. ✓
+- **Panning (sustained):** only Bank rotates the view: 90° in 5 s ⇒ 20 s per
+  full 360° traversal of the ring. ✓
 - **Forward flight (sustained):** speed = exp(knob, 0.15, 2.5) × lin(e, 0.7,
   1.3). Defaults (knob 0.4, e 0.35): 0.46 × 0.91 ≈ 0.42 units/s against the
   default 1.04-unit cell ⇒ ~2.5 s per cell at the screen bottom — well inside
@@ -178,8 +157,7 @@ Rows mirror the `bag.jumpable(...)` lines in the constructor 1:1.
   brief chase moments; verify it doesn't strobe on the sculpture and re-range
   SPEED_MAX down if it does. Boost adds ×2.6 but is an event envelope (τ 1.1 s,
   spent in ~3 s).
-- **Pulse (event):** 2.2 s base, Sync clamp keeps 1.57..3.14 s ≥ the 1.5 s
-  event floor. ✓
+- **Pulse (event):** 2.2 s, above the 1.5 s event floor. ✓
 - **Bold posterized forms:** hard horizon line, quadratic depth fade to black
   (no shimmer at the far clip), gridline half-width 0.082 cells at default
   Glow *and* widened ×(1+1.5·d/FAR) with depth so far lines merge instead of
@@ -193,3 +171,4 @@ Rows mirror the `bag.jumpable(...)` lines in the constructor 1:1.
 | Date | Change | Why |
 |---|---|---|
 | 2026-07-06 | Initial design & implementation | Plan: 80s aircraft-tee grid + TE outrun_grid.fs port, 360° panoram<br/>audio v1 |
+| 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path): dropped `sync`/`tempoDiv`/`meta` params, the Pulse/Bank retime calls and the per-frame `crossed()` poll, and the TriggerBag jump machinery — both triggers now always run their free base durations (2.2 s / 5 s), exactly the old Sync-off path | Jeff retired the project-wide Sync/TempoDiv + Meta pattern-control convention |
