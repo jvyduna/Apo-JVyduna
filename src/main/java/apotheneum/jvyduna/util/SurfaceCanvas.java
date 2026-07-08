@@ -247,6 +247,20 @@ public class SurfaceCanvas {
    *              opposite face edge
    */
   public void lineWu(double x0, double y0, double x1, double y1, int argb, boolean wrapX, Blend blend) {
+    lineWu(x0, y0, x1, y1, argb, wrapX, blend, 1);
+  }
+
+  /**
+   * {@link #lineWu} with a smoothness dial on the antialiasing itself.
+   * Coverage is remapped around 0.5 by 1/smoothness: at smoothness=1 this is
+   * exactly the standard Wu line; as smoothness approaches 0 the coverage
+   * hardens to an on/off threshold and the result converges to an aliased
+   * (Bresenham-like) line of high-contrast full-brightness pixels. Lets one
+   * knob sweep continuously from hard pixel art to antialiased strokes.
+   *
+   * @param smoothness 1 = full Wu antialiasing, 0 = hard on/off pixels
+   */
+  public void lineWu(double x0, double y0, double x1, double y1, int argb, boolean wrapX, Blend blend, double smoothness) {
     final boolean steep = Math.abs(y1 - y0) > Math.abs(x1 - x0);
     if (steep) {
       double t = x0; x0 = y0; y0 = t;
@@ -265,8 +279,8 @@ public class SurfaceCanvas {
     double xgap = 1 - fpart(x0 + 0.5);
     final int xpxl1 = (int) xend;
     final int ypxl1 = ipart(yend);
-    plotWu(xpxl1, ypxl1, argb, (1 - fpart(yend)) * xgap, steep, wrapX, blend);
-    plotWu(xpxl1, ypxl1 + 1, argb, fpart(yend) * xgap, steep, wrapX, blend);
+    plotWu(xpxl1, ypxl1, argb, sharpen((1 - fpart(yend)) * xgap, smoothness), steep, wrapX, blend);
+    plotWu(xpxl1, ypxl1 + 1, argb, sharpen(fpart(yend) * xgap, smoothness), steep, wrapX, blend);
     double intery = yend + gradient;
 
     // Second endpoint
@@ -275,19 +289,35 @@ public class SurfaceCanvas {
     xgap = fpart(x1 + 0.5);
     final int xpxl2 = (int) xend;
     final int ypxl2 = ipart(yend);
-    plotWu(xpxl2, ypxl2, argb, (1 - fpart(yend)) * xgap, steep, wrapX, blend);
-    plotWu(xpxl2, ypxl2 + 1, argb, fpart(yend) * xgap, steep, wrapX, blend);
+    plotWu(xpxl2, ypxl2, argb, sharpen((1 - fpart(yend)) * xgap, smoothness), steep, wrapX, blend);
+    plotWu(xpxl2, ypxl2 + 1, argb, sharpen(fpart(yend) * xgap, smoothness), steep, wrapX, blend);
 
     for (int x = xpxl1 + 1; x < xpxl2; ++x) {
-      plotWu(x, ipart(intery), argb, 1 - fpart(intery), steep, wrapX, blend);
-      plotWu(x, ipart(intery) + 1, argb, fpart(intery), steep, wrapX, blend);
+      plotWu(x, ipart(intery), argb, sharpen(1 - fpart(intery), smoothness), steep, wrapX, blend);
+      plotWu(x, ipart(intery) + 1, argb, sharpen(fpart(intery), smoothness), steep, wrapX, blend);
       intery += gradient;
     }
+  }
+
+  /** Remap Wu coverage around 0.5 by 1/smoothness: identity at smoothness=1,
+   *  hard 0/1 threshold as smoothness approaches 0. */
+  private static double sharpen(double coverage, double smoothness) {
+    if (smoothness >= 1) {
+      return coverage;
+    }
+    final double c = 0.5 + (coverage - 0.5) / Math.max(smoothness, 1e-3);
+    return (c < 0) ? 0 : (c > 1) ? 1 : c;
   }
 
   /** lineWu with max (lighten) blending */
   public void lineWu(double x0, double y0, double x1, double y1, int argb, boolean wrapX) {
     lineWu(x0, y0, x1, y1, argb, wrapX, Blend.MAX);
+  }
+
+  /** lineWu with max (lighten) blending and a smoothness dial (1 = full
+   *  antialiasing, 0 = hard on/off pixels) */
+  public void lineWu(double x0, double y0, double x1, double y1, int argb, boolean wrapX, double smoothness) {
+    lineWu(x0, y0, x1, y1, argb, wrapX, Blend.MAX, smoothness);
   }
 
   /** Plot one Wu pixel: coverage-scaled color, blended. In steep mode the
