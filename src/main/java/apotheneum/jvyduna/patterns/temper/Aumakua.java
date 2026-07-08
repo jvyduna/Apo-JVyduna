@@ -58,18 +58,19 @@ public class Aumakua extends ApotheneumPattern {
    *  that at the nominal ~96.8 BPM Temper tempo the rates match the prior
    *  1.5 / 6.4 rows-per-sec feel. This is NOT the retired Sync/TempoDiv grid
    *  gate: the rate is continuous and never snaps to a division. */
-  private static final double RISE_ROWS_PER_BEAT_AMBIENT = 0.93; // CURATE: ~1.5 rows/s @ 96.8 BPM
-  private static final double RISE_ROWS_PER_BEAT_PEAK = 4.0;     // CURATE: ~6.4 rows/s @ 96.8 BPM
+  private static final double RISE_ROWS_PER_BEAT_PEAK = 4.0; // CURATE: ~6.4 rows/s @ 96.8 BPM
+  // Speed maps linearly from 0: Speed=0 is a TRUE FREEZE (no rise, no sway, no
+  // births, no aging — the whole tableau holds still; only smear trails settle).
   /** Rise-rate ceiling (rows/sec): 45-row cube / 8 = 5.6 s, inside the 5 s cap. */
   private static final double MAX_RISE_ROWS_PER_SEC = 8.0;       // CURATE
   /** Floor on ms/beat, guarding against a zero/absurd host tempo. */
   private static final double MIN_BEAT_MS = 50;
 
-  /** Root-spawn idle interval endpoints (ms), mapped from Density (exp). The
-   *  slow sparse cadence is the point — roots are the rare new ancestors;
-   *  most figures arrive as drips from rising parents. */
-  private static final double ROOT_INTERVAL_MS_SPARSE = 16000; // CURATE
-  private static final double ROOT_INTERVAL_MS_DENSE = 2500;   // CURATE
+  /** First-generation population: Density maps to roughly one ancestor per
+   *  this many columns at pattern init / Genesis (min 1 per surface). There is
+   *  NO ongoing root-spawn timer — after the first generation, all new figures
+   *  come from Fertl drips (or the Seed/Bloom triggers). */
+  private static final double INITIAL_ANCESTOR_COLS = 25.0; // CURATE: density=1 -> 8 cube / 5 cyl
 
   /** A newborn figure fades IN over this long (its "birth"), so every figure
    *  has >= 1.5 s of visual life before it can be judged an event-flash. */
@@ -80,9 +81,10 @@ public class Aumakua extends ApotheneumPattern {
   private static final double FADE_TOP_ROWS = 8;
 
   /** Trail (feedback smear / rising comet) half-life endpoints (ms), mapped
-   *  from the Smear knob. Low = crisp figures, high = gauzy gossamer loops. */
-  private static final double SMEAR_HALF_LIFE_MIN_MS = 200;
-  private static final double SMEAR_HALF_LIFE_MAX_MS = 6000;
+   *  from the Smooth knob (exp). The 2 ms floor means Smooth=0 clears the
+   *  canvas every frame — hard pixels, no ghosts; 1 = gauzy gossamer loops. */
+  private static final double TRAIL_HALF_LIFE_MIN_MS = 2;    // CURATE
+  private static final double TRAIL_HALF_LIFE_MAX_MS = 6000; // CURATE
 
   /** Resting fraction of newborn roots taking the raised-arm (orant) pose. */
   private static final double RAISE_BIAS = 0.15;
@@ -136,9 +138,7 @@ public class Aumakua extends ApotheneumPattern {
    *  shared rank line instead of the old full-height scatter. */
   private static final double SIB_JITTER = 0.75;
 
-  /** Genealogy-chart connector brightness (fraction of the child color),
-   *  further scaled by the child's glow envelope. */
-  private static final double CONNECTOR_LEVEL = 0.30; // CURATE
+  // Genealogy-chart connector brightness is the Lines knob (x child glow).
 
   // ---- Color -------------------------------------------------------------------
 
@@ -168,11 +168,11 @@ public class Aumakua extends ApotheneumPattern {
 
   public final CompoundParameter speed =
     new CompoundParameter("Speed", 0.3)
-    .setDescription("Rise speed of the figures (patient <-> quicker); stays within the >=5s traversal cap");
+    .setDescription("Rise speed of the figures: 0 freezes the animation completely; max stays within the >=5s traversal cap");
 
   public final CompoundParameter density =
     new CompoundParameter("Density", 0.5)
-    .setDescription("How many figures live at once and how readily new root ancestors are born");
+    .setDescription("How many first-generation ancestors populate the wall at pattern init / Genesis (and the Bloom burst size)");
 
   public final CompoundParameter figScale =
     new CompoundParameter("Scale", 0.5)
@@ -194,9 +194,13 @@ public class Aumakua extends ApotheneumPattern {
     new CompoundParameter("Sway", 0.4)
     .setDescription("Amplitude of each figure's independent gentle horizontal sway");
 
-  public final CompoundParameter smear =
-    new CompoundParameter("Smear", 0.5)
-    .setDescription("Feedback-smear trail length: 0 = crisp figures, 1 = gauzy gossamer rising loops");
+  public final CompoundParameter smooth =
+    new CompoundParameter("Smooth", 0.7)
+    .setDescription("Antialiasing + sub-pixel motion + feedback-smear trails in one: 0 = hard on/off pixels, snapped motion, no trails; 1 = antialiased strokes, gliding sub-pixel rise, gauzy gossamer trails");
+
+  public final CompoundParameter connectorLevel =
+    new CompoundParameter("Lines", 0.3)
+    .setDescription("Family-tree connector line brightness: 0 = no genealogy lines, 1 = full brightness");
 
   public final CompoundParameter interiorLevel =
     new CompoundParameter("Inner", 0.25)
@@ -205,10 +209,6 @@ public class Aumakua extends ApotheneumPattern {
   public final CompoundParameter cylinderLevel =
     new CompoundParameter("Cyl", 1.0)
     .setDescription("Brightness of all cylinder figures (scales the whole cylinder field)");
-
-  public final CompoundParameter smooth =
-    new CompoundParameter("Smooth", 1.0)
-    .setDescription("Motion blending + antialiasing: 0 = pixel-snapped rise and hard-edged heads, 1 = smooth sub-pixel rise and antialiased forms");
 
   // ---- Palette color cache (Satori-style change detection) -------------------
 
@@ -242,21 +242,21 @@ public class Aumakua extends ApotheneumPattern {
     addParameter("fertility", this.fertility);
     addParameter("genY", this.genSpacing);
     addParameter("sway", this.sway);
-    addParameter("smear", this.smear);
+    addParameter("smooth", this.smooth);
+    addParameter("lines", this.connectorLevel);
     addParameter("interior", this.interiorLevel);
     addParameter("cylinder", this.cylinderLevel);
 
-    // Seed a couple of ancestors so the field is never empty at load
-    this.cubeField.spawnRoot(false, false);
-    this.cubeField.spawnRoot(false, false);
-    this.cylinderField.spawnRoot(false, false);
+    // First generation: Density-many ancestors so the field starts populated
+    this.cubeField.seedInitialGeneration(false);
+    this.cylinderField.seedInitialGeneration(false);
   }
 
   // ---- Trigger handlers ------------------------------------------------------
 
   private void seed() {
-    this.cubeField.spawnRoot(false, false);
-    this.cylinderField.spawnRoot(false, false);
+    this.cubeField.spawnRoot(false, false, 0);
+    this.cylinderField.spawnRoot(false, false, 0);
   }
 
   /** The birth bloom: raise arms across the living lineage and add a burst of
@@ -280,22 +280,20 @@ public class Aumakua extends ApotheneumPattern {
     setColors(LXColor.BLACK);
     refreshColors();
 
-    // Beat-relative rise: rows-per-beat (Speed-mapped) scaled by the live host
-    // beat rate, clamped so the full traversal stays >= 5 s at any tempo. This
-    // is a continuous, tempo-following rate — never a Sync/TempoDiv grid snap.
+    // Beat-relative rise: rows-per-beat (Speed-mapped, linear from 0) scaled by
+    // the live host beat rate, clamped so the full traversal stays >= 5 s at
+    // any tempo. This is a continuous, tempo-following rate — never a
+    // Sync/TempoDiv grid snap. Speed=0 freezes the animation completely.
     final double beatMs = Math.max(this.lx.engine.tempo.period.getValue(), MIN_BEAT_MS);
     final double riseRowsPerSec = Math.min(
-      Ranges.lin(this.speed.getValue(), RISE_ROWS_PER_BEAT_AMBIENT, RISE_ROWS_PER_BEAT_PEAK)
-        * 1000.0 / beatMs,
+      this.speed.getValue() * RISE_ROWS_PER_BEAT_PEAK * 1000.0 / beatMs,
       MAX_RISE_ROWS_PER_SEC);
-    final double rootIntervalMs =
-      Ranges.exp(this.density.getValue(), ROOT_INTERVAL_MS_SPARSE, ROOT_INTERVAL_MS_DENSE);
 
-    final double halfLifeMs = Ranges.exp(this.smear.getValue(), SMEAR_HALF_LIFE_MIN_MS, SMEAR_HALF_LIFE_MAX_MS);
+    final double halfLifeMs = Ranges.exp(this.smooth.getValue(), TRAIL_HALF_LIFE_MIN_MS, TRAIL_HALF_LIFE_MAX_MS);
     final double decayMult = Math.pow(0.5, deltaMs / halfLifeMs);
 
-    this.cubeField.render(deltaMs, riseRowsPerSec, rootIntervalMs, decayMult);
-    this.cylinderField.render(deltaMs, riseRowsPerSec, rootIntervalMs, decayMult);
+    this.cubeField.render(deltaMs, riseRowsPerSec, decayMult);
+    this.cylinderField.render(deltaMs, riseRowsPerSec, decayMult);
 
     // Exterior at full brightness (cylinder scaled by Cyl); interior a
     // dimmed, softer echo via Inner.
@@ -423,6 +421,7 @@ public class Aumakua extends ApotheneumPattern {
     int parentBirthId; // parent's birthId at link time (pool-reuse guard)
     int birthId;       // monotonic per-Field stamp, set at every spawn
     double sibJitter;  // tiny y offset off the shared sibling rank line
+    int resolvedStamp; // frame memo for Field.resolveY()
     // Kolo pose
     double lean;       // forward pitch (fraction of h at head height)
     int dir;           // facing, ±1
@@ -438,8 +437,8 @@ public class Aumakua extends ApotheneumPattern {
     private final Apotheneum.Orientation orientation; // door lookup; may be null
     private final Figure[] pool = new Figure[MAX_FIGURES];
     private final Random rng;
-    private double sinceRootMs;
     private int birthCounter;
+    private int resolveStamp; // per-frame memo stamp for resolveY()
     /** Smooth knob cached per-frame: 1 = sub-pixel glide + AA, 0 = pixel-snap. */
     private double smoothV = 1.0;
 
@@ -464,20 +463,47 @@ public class Aumakua extends ApotheneumPattern {
       return -1;
     }
 
-    private int liveCount() {
-      int c = 0;
-      for (int i = 0; i < MAX_FIGURES; ++i) {
-        if (this.pool[i].active) {
-          ++c;
-        }
+    /** How many first-generation ancestors Density asks for on this surface. */
+    private int initialAncestors() {
+      return Math.max(1, (int) Math.round(density.getValue() * this.W / INITIAL_ANCESTOR_COLS));
+    }
+
+    /** Populate the first generation: Density-many gen-0 ancestors. When
+     *  emerging (Genesis), the first head crests the bottom edge immediately
+     *  and the rest start staggered a little deeper, so heads surface one
+     *  after another rather than as a lockstep row. */
+    private void seedInitialGeneration(boolean emerging) {
+      final int n = initialAncestors();
+      for (int i = 0; i < n; ++i) {
+        final double extraDepth = (emerging && i > 0) ? this.rng.nextDouble() * FIG_HEIGHT_MAX : 0;
+        spawnRoot(false, emerging, extraDepth);
       }
-      return c;
     }
 
     /** Gap from a parent's feet row down to a child's head row. Deterministic
      *  per parent — siblings share one genealogy rank line. */
     private double gapBase(Figure parent) {
       return GAP_MIN + genSpacing.getValue() * GAP_RANGE + GAP_H_FRAC * parent.height;
+    }
+
+    /** Derive an attached figure's y from its (already-resolved) parent this
+     *  frame; detach orphans whose parent slot was retired or reused. Stamp
+     *  memoization makes each figure resolve exactly once per frame. */
+    private void resolveY(Figure c) {
+      if (c.resolvedStamp == this.resolveStamp) {
+        return;
+      }
+      c.resolvedStamp = this.resolveStamp;
+      if (c.parentSlot < 0) {
+        return;
+      }
+      final Figure p = this.pool[c.parentSlot];
+      if (!p.active || (p.birthId != c.parentBirthId)) {
+        c.parentSlot = -1; // orphan-safe: detach, keep last derived y
+        return;
+      }
+      resolveY(p);
+      c.y = p.y + gapBase(p) + c.height + c.sibJitter;
     }
 
     /** The figure's drawn x this frame: base x plus its own independent sway. */
@@ -528,9 +554,10 @@ public class Aumakua extends ApotheneumPattern {
     }
 
     /** Birth a root ancestor at the base of the wall. When emerging, only the
-     *  head crests the bottom edge (at a door-free column) and the body
-     *  reveals as it rises — the Genesis entrance. */
-    private void spawnRoot(boolean raised, boolean emerging) {
+     *  head crests the bottom edge (at a door-free column, extraDepth rows
+     *  further below) and the body reveals as it rises — the Genesis
+     *  entrance. */
+    private void spawnRoot(boolean raised, boolean emerging, double extraDepth) {
       final int slot = freeSlot();
       if (slot < 0) {
         return;
@@ -541,7 +568,7 @@ public class Aumakua extends ApotheneumPattern {
       f.height = h;
       if (emerging) {
         f.x = pickDoorFreeColumn(h);
-        f.y = this.H - 1 + h; // feet below the wall; only the head shows
+        f.y = this.H - 1 + h + extraDepth; // feet below the wall; head at/under the crest
       } else {
         f.x = this.rng.nextInt(this.W);
         f.y = this.H - 1 - this.rng.nextInt(3); // feet near the bottom
@@ -612,108 +639,106 @@ public class Aumakua extends ApotheneumPattern {
       }
       final int burst = 3 + (int) Math.round(3 * density.getValue());
       for (int i = 0; i < burst; ++i) {
-        spawnRoot(true, false);
+        spawnRoot(true, false, 0);
       }
     }
 
     /** Clear everything, then immediately begin the new lineage: a fresh
-     *  ancestor's head emerges from the bottom edge at a door-free column. */
+     *  first generation (Density-many ancestors) emerges from the bottom
+     *  edge, the first head cresting immediately at a door-free column. */
     private void genesis() {
       for (int i = 0; i < MAX_FIGURES; ++i) {
         this.pool[i].active = false;
       }
       this.canvas.fill(LXColor.BLACK);
-      this.sinceRootMs = 0;
-      spawnRoot(false, true);
+      seedInitialGeneration(true);
     }
 
-    private void render(double deltaMs, double riseRowsPerSec, double rootIntervalMs,
-                        double decayMult) {
+    private void render(double deltaMs, double riseRowsPerSec, double decayMult) {
       this.smoothV = smooth.getValue();
       this.canvas.decay(decayMult);
 
-      // (1) Root births on the idle timer (Density-driven cadence).
-      this.sinceRootMs += deltaMs;
-      final int cap = 6 + (int) Math.round((MAX_FIGURES - 8) * density.getValue());
-      if ((this.sinceRootMs >= rootIntervalMs) && (liveCount() < cap)) {
-        spawnRoot(this.rng.nextDouble() < RAISE_BIAS, false);
-        this.sinceRootMs = 0;
-      }
+      // Speed=0 is a TRUE FREEZE: no rise, no aging (so sway, glow envelopes
+      // and drips all hold still). Only the trail decay above keeps settling
+      // and GenY/pose knobs keep re-shaping the frozen tableau below.
+      final boolean frozen = riseRowsPerSec <= 0;
 
       final double riseRows = riseRowsPerSec * deltaMs * 0.001;
 
-      // (2) Integrate y for roots and detached figures only.
-      for (int i = 0; i < MAX_FIGURES; ++i) {
-        final Figure f = this.pool[i];
-        if (f.active && (f.parentSlot < 0)) {
-          f.y -= riseRows;
-        }
-      }
-
-      // (3) Attachment-resolve, generation by generation: an attached child's
-      // y is DERIVED from its living parent, so GenY re-spaces living trees
-      // instantly. Parents (gen g-1) are always resolved before children (g).
-      for (int g = 1; g <= MAX_GEN; ++g) {
+      // (1) Integrate y for roots and detached figures only.
+      if (!frozen) {
         for (int i = 0; i < MAX_FIGURES; ++i) {
-          final Figure c = this.pool[i];
-          if (!c.active || (c.gen != g) || (c.parentSlot < 0)) {
-            continue;
+          final Figure f = this.pool[i];
+          if (f.active && (f.parentSlot < 0)) {
+            f.y -= riseRows;
           }
-          final Figure p = this.pool[c.parentSlot];
-          if (!p.active || (p.birthId != c.parentBirthId)) {
-            c.parentSlot = -1; // orphan-safe: detach, keep last derived y
-            continue;
-          }
-          c.y = p.y + gapBase(p) + c.height + c.sibJitter;
         }
       }
 
-      // (4) Lifecycle: envelopes, retirement, drips.
-      final double fertl = fertility.getValue();
+      // (2) Attachment-resolve: an attached child's y is DERIVED from its
+      // living parent, so GenY re-spaces living trees instantly (even while
+      // frozen). Stamp-memoized recursion resolves each figure's ancestors
+      // first; lineage depth is unbounded now that drips never stop, so this
+      // replaces the old generation-indexed loop. Parent links form a forest
+      // (gen strictly increases down a chain), so recursion cannot cycle.
+      ++this.resolveStamp;
       for (int i = 0; i < MAX_FIGURES; ++i) {
         final Figure f = this.pool[i];
-        if (!f.active) {
-          continue;
+        if (f.active) {
+          resolveY(f);
         }
-        f.ageMs += deltaMs;
+      }
 
-        // Birth-in envelope, then fade out as the figure nears the top.
-        double env = LXUtils.constrain(f.ageMs / BIRTH_IN_MS, 0, 1);
-        if (f.y < FADE_TOP_ROWS) {
-          env *= LXUtils.constrain(f.y / FADE_TOP_ROWS, 0, 1);
-        }
-        f.glow = env;
+      // (3) Lifecycle: envelopes, retirement, drips. Fully skipped while
+      // frozen — ages, glows and drip rolls all hold still.
+      if (!frozen) {
+        final double fertl = fertility.getValue();
+        for (int i = 0; i < MAX_FIGURES; ++i) {
+          final Figure f = this.pool[i];
+          if (!f.active) {
+            continue;
+          }
+          f.ageMs += deltaMs;
 
-        // Retire once fully risen off the top; detach my children in place
-        // (their last derived y is continuous; they self-integrate after).
-        if (f.y + f.height < 0) {
-          for (int j = 0; j < MAX_FIGURES; ++j) {
-            final Figure c = this.pool[j];
-            if (c.active && (c.parentSlot == i) && (c.parentBirthId == f.birthId)) {
-              c.parentSlot = -1;
+          // Birth-in envelope, then fade out as the figure nears the top.
+          double env = LXUtils.constrain(f.ageMs / BIRTH_IN_MS, 0, 1);
+          if (f.y < FADE_TOP_ROWS) {
+            env *= LXUtils.constrain(f.y / FADE_TOP_ROWS, 0, 1);
+          }
+          f.glow = env;
+
+          // Retire once fully risen off the top; detach my children in place
+          // (their last derived y is continuous; they self-integrate after).
+          if (f.y + f.height < 0) {
+            for (int j = 0; j < MAX_FIGURES; ++j) {
+              final Figure c = this.pool[j];
+              if (c.active && (c.parentSlot == i) && (c.parentBirthId == f.birthId)) {
+                c.parentSlot = -1;
+              }
+            }
+            f.active = false;
+            continue;
+          }
+
+          // Drip a child once the figure has climbed ~DRIP_RISE_BODIES of its
+          // own height since its last drip (lineage branching). A drip blocked
+          // by the bottom edge does NOT consume lastDripY — it retries as the
+          // parent rises, so deep generations unroll from the bottom. There is
+          // no generation cap (colors clamp at MAX_GEN): with no root respawn
+          // timer, Fertl alone sustains the population.
+          final double climbed = f.lastDripY - f.y;
+          if ((climbed >= DRIP_RISE_BODIES * f.height)
+              && (f.children < 2)
+              && (f.glow > 0.4)
+              && (this.rng.nextDouble() < fertl)) {
+            if (spawnChild(f, i)) {
+              f.lastDripY = f.y;
             }
           }
-          f.active = false;
-          continue;
-        }
-
-        // Drip a child once the figure has climbed ~DRIP_RISE_BODIES of its
-        // own height since its last drip (lineage branching). A drip blocked
-        // by the bottom edge does NOT consume lastDripY — it retries as the
-        // parent rises, so deep generations unroll from the bottom.
-        final double climbed = f.lastDripY - f.y;
-        if ((climbed >= DRIP_RISE_BODIES * f.height)
-            && (f.gen < MAX_GEN)
-            && (f.children < 2)
-            && (f.glow > 0.4)
-            && (this.rng.nextDouble() < fertl)) {
-          if (spawnChild(f, i)) {
-            f.lastDripY = f.y;
-          }
         }
       }
 
-      // (5) Draw: genealogy connectors first, figures over them.
+      // (4) Draw: genealogy connectors first, figures over them.
       for (int i = 0; i < MAX_FIGURES; ++i) {
         final Figure f = this.pool[i];
         if (f.active && (f.parentSlot >= 0)) {
@@ -731,26 +756,33 @@ public class Aumakua extends ApotheneumPattern {
     /** Genealogy-chart connector, drawn every frame between a living parent
      *  and an attached child: a right-angle T — vertical stub down from the
      *  parent's feet to the shared sibling rail, horizontal rail the short
-     *  way around the ring, vertical drop to the child's head. Fades with the
-     *  child's glow; when the pair detaches it simply stops being drawn and
-     *  the smear decay fades the residue. */
+     *  way around the ring, vertical drop to the child's head. Brightness is
+     *  the Lines knob, faded with the child's glow; when the pair detaches it
+     *  simply stops being drawn and the trail decay fades the residue. The
+     *  endpoints ride the same Smooth sub-pixel interpolation as the figures,
+     *  so the lines glide upward rather than stepping row to row. */
     private void drawConnector(Figure c) {
-      final Figure p = this.pool[c.parentSlot]; // validated in pass (3)
-      final double level = CONNECTOR_LEVEL * c.glow;
+      final Figure p = this.pool[c.parentSlot]; // validated in pass (2)
+      final double level = connectorLevel.getValue() * c.glow;
       if (level <= 0.01) {
         return;
       }
       final int conn = LXColor.scaleBrightness(genColor(c.gen), (float) level);
-      final int px = (int) Math.round(drawX(p));
-      final int cx = (int) Math.round(drawX(c));
-      final int railY = (int) Math.round(p.y + 0.5 * gapBase(p));
-      final int parentFeetY = (int) Math.round(p.y);
-      final int childHeadY = (int) Math.round(c.y - c.height);
+      final double px = snap(drawX(p));
+      final double cxd = snap(drawX(c));
+      final double railY = snap(p.y + 0.5 * gapBase(p));
+      final double parentFeetY = snap(p.y);
+      final double childHeadY = snap(c.y - c.height);
       // Short way around the ring; |dx| <= W/2 satisfies the wrap contract.
-      final int dx = Math.floorMod(cx - px + this.W / 2, this.W) - this.W / 2;
-      this.canvas.lineMax(px, parentFeetY, px, railY, conn);
-      this.canvas.lineMax(px, railY, px + dx, railY, conn);
-      this.canvas.lineMax(px + dx, railY, px + dx, childHeadY, conn);
+      double dx = (cxd - px) % this.W;
+      if (dx > this.W / 2.0) {
+        dx -= this.W;
+      } else if (dx < -this.W / 2.0) {
+        dx += this.W;
+      }
+      this.canvas.lineWu(px, parentFeetY, px, railY, conn, true, this.smoothV);
+      this.canvas.lineWu(px, railY, px + dx, railY, conn, true, this.smoothV);
+      this.canvas.lineWu(px + dx, railY, px + dx, childHeadY, conn, true, this.smoothV);
     }
 
     /** Draw one Kolo/Kondoa-style figure with MAX blending (strokes union,
@@ -783,12 +815,12 @@ public class Aumakua extends ApotheneumPattern {
       final boolean twoSegment = h >= TWO_SEGMENT_MIN_HEIGHT;
 
       // Torso (double-stroked when big enough: painted body, thicker than limbs)
-      this.canvas.lineWu(hipX, hipY, shoulderX, shoulderY, argb, true);
+      this.canvas.lineWu(hipX, hipY, shoulderX, shoulderY, argb, true, this.smoothV);
       if (h >= TORSO_DOUBLE_MIN_HEIGHT) {
-        this.canvas.lineWu(hipX + 0.7, hipY, shoulderX + 0.7, shoulderY, argb, true);
+        this.canvas.lineWu(hipX + 0.7, hipY, shoulderX + 0.7, shoulderY, argb, true, this.smoothV);
       }
       // Neck up to the bottom of the head, then the big oval head
-      this.canvas.lineWu(shoulderX, shoulderY, headCx, headCy + headRy, argb, true);
+      this.canvas.lineWu(shoulderX, shoulderY, headCx, headCy + headRy, argb, true, this.smoothV);
       stampEllipse(headCx, headCy, headRx, headRy, argb);
 
       // Legs — scissored walking stride from the high hip
@@ -799,13 +831,13 @@ public class Aumakua extends ApotheneumPattern {
       if (twoSegment) {
         final double frontKneeX = hipX + f.dir * FRONT_KNEE_DX * spread;
         final double backKneeX = hipX - f.dir * BACK_KNEE_DX * spread;
-        this.canvas.lineWu(hipX, hipY, frontKneeX, kneeY, argb, true);
-        this.canvas.lineWu(frontKneeX, kneeY, frontFootX, feetY, argb, true);
-        this.canvas.lineWu(hipX, hipY, backKneeX, kneeY, argb, true);
-        this.canvas.lineWu(backKneeX, kneeY, backFootX, feetY, argb, true);
+        this.canvas.lineWu(hipX, hipY, frontKneeX, kneeY, argb, true, this.smoothV);
+        this.canvas.lineWu(frontKneeX, kneeY, frontFootX, feetY, argb, true, this.smoothV);
+        this.canvas.lineWu(hipX, hipY, backKneeX, kneeY, argb, true, this.smoothV);
+        this.canvas.lineWu(backKneeX, kneeY, backFootX, feetY, argb, true, this.smoothV);
       } else {
-        this.canvas.lineWu(hipX, hipY, frontFootX, feetY, argb, true);
-        this.canvas.lineWu(hipX, hipY, backFootX, feetY, argb, true);
+        this.canvas.lineWu(hipX, hipY, frontFootX, feetY, argb, true, this.smoothV);
+        this.canvas.lineWu(hipX, hipY, backFootX, feetY, argb, true, this.smoothV);
       }
 
       // Arms — two segments lerped between down-forward and raised (orant)
@@ -818,10 +850,10 @@ public class Aumakua extends ApotheneumPattern {
           + f.dir * 0.04 * h * (1 - r) + asym;
         final double handY = shoulderY + LXUtils.lerp(0.24, -0.22, r) * h;
         if (twoSegment) {
-          this.canvas.lineWu(shoulderX, shoulderY, elbowX, elbowY, argb, true);
-          this.canvas.lineWu(elbowX, elbowY, handX, handY, argb, true);
+          this.canvas.lineWu(shoulderX, shoulderY, elbowX, elbowY, argb, true, this.smoothV);
+          this.canvas.lineWu(elbowX, elbowY, handX, handY, argb, true, this.smoothV);
         } else {
-          this.canvas.lineWu(shoulderX, shoulderY, handX, handY, argb, true);
+          this.canvas.lineWu(shoulderX, shoulderY, handX, handY, argb, true, this.smoothV);
         }
       }
     }
