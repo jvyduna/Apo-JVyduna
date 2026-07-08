@@ -12,11 +12,13 @@ the rain (rafters hero).
 > **Status: BUILT.** All subsystems are implemented: the rain layer carries real
 > droplet physics (per-drop TTL/lifetime, gentle horizontal wobble, variable head
 > brightness, variable weight/width, ADD-blended head accumulation where beads
-> merge); the symbol auto-condenses out of the rain on its own via an internal
-> formation envelope (Form knob still overrides); and the moiré is a tempo-locked
-> 2D interference shimmer with vertical structure (grating phases advanced on the
-> 1/16 grid from the engine tempo's beat position). What remains are the numeric
-> `CURATE:` values that can only be judged on the LEDs.
+> merge); the symbols are **true vector glyphs** (shared `SymbolGlyphs`,
+> rasterized) that **condense out of the rain as liquid** — a per-cell fill sim
+> with gravity, surface-tension spread and bottom-lip overflow, gated by a
+> `Symbols` boolean; and the moiré is a tempo-locked 2D interference shimmer
+> (grating phases advanced on the 1/16 grid from the engine tempo's beat
+> position). Glyphs read correctly inside and out via the reverse-normal mirror.
+> What remains are the numeric `CURATE:` values that can only be judged on the LEDs.
 
 ## Original / inspiration
 
@@ -42,9 +44,11 @@ rain and transmuting into one another.
   cylinder plus exterior→interior copies; no 2D `Graphics` (so not
   `ApotheneumRasterPattern`, which is cube-face-only anyway).
 - **Surfaces**: cube exterior ring (200×45) and cylinder exterior (120×43), each
-  its own independent `RainField` (droplet pool + `SurfaceCanvas`). Interiors are
-  an exact copy of the matching exterior via `copyCubeExterior()` /
-  `copyCylinderExterior()` — rain looks the same from inside the loft.
+  its own independent `RainField` (droplet pool + liquid grids + `SurfaceCanvas`).
+  Interiors are the **reverse-normal mirror** of the matching exterior:
+  `canvas.copyTo(exterior)` then `canvas.copyToMirrored(interior)`, so the glyphs
+  read un-reversed from inside (see *Reverse-normal legibility* below). Rain is
+  mirrored too — statistically invisible.
 - **Geometry mapping**: two `SurfaceCanvas` buffers, drawn in canvas space and
   `copyTo()`-copied column-major. Y = 0 is the TOP row, so droplets spawn at y = 0
   and fall toward increasing y — matching the physical top-down LED column order.
@@ -89,24 +93,62 @@ across the two straddled rows so the fall reads as continuous sub-pixel motion.
 Both paths are the existing `SurfaceCanvas` primitives (`lineMax`, `lineWu`,
 `setBlend`) with `scaleRGB` coverage weights, so it stays zero-alloc in `step()`.
 
-### Symbol condensation (shared module)
+### Symbol condensation — the liquid model (shared vector glyphs)
 
-The morphing symbols are **not** drawn here. `renderField()` calls
-`SymbolGlyphs.morph(canvas, prevGlyph, curGlyph, morphT, cx, cy, argb, scale)`,
-faded in by the `Form` knob and warmer than the rain (the "meaning" surfacing).
-On the cube ring the glyph is stamped once per face (`cx = 25/75/125/175`); on the
-cylinder three times around (`cx = 20/60/100`). A morph starts whenever the
-`Glyph` knob changes or the `Condense` trigger advances to the next symbol, and
-`morphT` eases 0→1 over `MORPH_SECONDS`.
+The glyph shapes are **not** drawn here — they ride the shared `SymbolGlyphs`
+module, now **true vector art rasterized to a coverage mask** (see
+`SymbolGlyphs.md`). GlassRain does not stamp the glyph as pixels; it uses the
+mask as the *container for a liquid sim* so the symbol literally **condenses out
+of the rain**.
 
-Auto-formation is built: a glyph change (from `Condense` **or** the operator
-moving `Glyph`) starts both the cross-dissolve and an internal formation
-envelope (`autoForm`) that ramps 0→1 over `MORPH_SECONDS`, holds fully-formed for
-`AUTO_FORM_HOLD_SECONDS`, then eases back to 0 — so a symbol condenses out of the
-rain and re-dissolves on its own with no operator input. The effective form is
-`max(Form knob, autoForm)`, so the `Form` knob / timeline still overrides and
-scales it. CURATE: symbol scale (2 → 22 px), repeat positions/counts,
-`MORPH_SECONDS`, and `AUTO_FORM_HOLD_SECONDS`.
+Per surface, `RainField` carries three canvas-sized grids (all preallocated):
+`mask` (glyph coverage 0..1), `fill` (liquid depth 0..1+), and `overflow` (the
+bottom-lip cells). The lifecycle, driven by the **`Symbols`** boolean and the
+continuous **`Glyph`** selector:
+
+1. **Build the mask.** When `Symbols` turns on, or `Glyph` floors to a new
+   index, or `Smooth` changes, `rebuildMask()` rasters the vector glyph via
+   `SymbolGlyphs.coverage(sym, GLYPH_PX, GLYPH_PX, smooth)` and stamps it at each
+   instance center (`CUBE_CENTERS = {25,75,125,175}`, `CYL_CENTERS = {20,60,99}`),
+   then precomputes the lip cells (a masked cell with no masked cell directly
+   below — a slope-0 / concave-up discontinuity).
+2. **Inflow.** In `RainField.step`, a rain drop whose head crosses a masked cell
+   is **absorbed** into that cell's `fill` and retired — drops "flow into" the
+   form. (Liquid drips are exempt so released water isn't re-absorbed.)
+3. **Flow (`stepLiquid`).** A gravity sweep (bottom-up) sinks liquid where it
+   can; a lateral-leveling sweep spreads what can't sink into neighboring glyph
+   cells (surface tension) — so a glyph fills from its low points up, "getting
+   stuck until saturated, then flowing to neighboring regions until full."
+4. **Overflow.** Once a bottom-lip cell passes `SPILL_LEVEL`, the excess spills
+   as a new liquid-colored **drip** just below the lip (rate-limited to
+   `MAX_SPILL_PER_FRAME`), which runs on down the glass.
+5. **Color.** The liquid color eases from the cold droplet color toward the warm
+   **3rd swatch** (`warm`) over `TINT_SECONDS` — "slowly change their liquid color
+   to the palette 3 swatch."
+6. **Release.** When `Glyph` changes or `Symbols` turns off, `releaseLiquid()`
+   converts every filled column into a downward drip and zeroes `fill` — the held
+   liquid is "instantly released to continue to flow down," and a fresh glyph
+   starts empty.
+
+`renderLiquid()` lights each glyph cell at `fill × mask` in the liquid color
+(MAX over the rain), so the symbol appears exactly as it fills. Antialiasing of
+the glyph edge is the `Smooth` knob (it dials the mask's coverage sharpness in
+`SymbolGlyphs`). CURATE: `GLYPH_PX`, instance positions/counts, `INFLOW_PER_DROP`,
+`FLOW_DOWN`/`FLOW_SIDE` (viscosity/surface-tension), `SPILL_LEVEL`, `TINT_SECONDS`.
+
+### Reverse-normal legibility
+
+Interior and exterior LED layers face opposite ways, so identical content reads
+mirror-reversed from the far side. The glyphs follow the reverse-normal rule
+worked out for the Text pattern: draw the exterior straight
+(`canvas.copyTo(exterior)`) and the interior horizontally mirrored
+(`canvas.copyToMirrored(interior)`). Because `copyToMirrored` mirrors about the
+**canvas center**, the glyph instances are placed **symmetric about the surface's
+horizontal center** (`{25,75,125,175}` sum in pairs to ~199; `{20,60,99}` pair to
+119) so each identical glyph maps onto its mirror partner and ends up individually
+un-reversed and in place (a ±0.5px even-width offset is intentional and
+invisible). Rain is mirrored too — statistically invisible; keeping rain
+identical inside/out would need a second buffer and was deliberately not built.
 
 ### Moiré + sheet-wash overlays
 
@@ -174,42 +216,48 @@ event-like and above the 1.5 s minimum even at e=1 (see compliance).
 
 ## Parameters
 
-UI/registration order (do not deviate; keys/labels are referenced by saved .lxp):
+UI/registration order (do not deviate; keys/labels are referenced by saved .lxp).
+**Breaking change (2026-07-08):** `condense` (trigger) → `symbols` (boolean),
+`glyph` (enum) → `glyph` (continuous), and `form` was **removed** — old .lxp
+projects lose those three values on load.
 
-1. Triggers (`dropBurst`, `condense`, `wash`)
+1. Triggers (`dropBurst`, `wash`)
 2. `energy`
-3. Pattern params (`density`, `streak`, `bloom`, `glyph`, `form`, `moire`, `smooth`)
+3. Pattern params (`density`, `streak`, `bloom`, `symbols`, `glyph`, `moire`, `smooth`)
 4. `audio`
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
 | `dropBurst` | DropBurst | TriggerParameter | — | — | spatter a heavy-drop cluster over both surfaces |
-| `condense` | Condense | TriggerParameter | — | — | advance to the next religious symbol, starting a morph |
 | `wash` | SheetWash | TriggerParameter | — | — | bright sheet of water washes down the glass |
 | `energy` | Energy | CompoundParameter | 0.3 | 0..1 | droplet density + fall speed |
 | `density` | Density | CompoundParameter | 0.4 | 0..1 | how many droplets are on the glass at once |
 | `streak` | Streak | CompoundParameter | 0.5 | 0..1 | streak/trail length (canvas decay half-life) |
 | `bloom` | Bloom | CompoundParameter | 0 | 0..1 | arc envelope: cold spine → warm maj7 bloom + trail smear |
-| `glyph` | Glyph | EnumParameter | CROSS | 9 symbols | which symbol is condensing; changing it morphs |
-| `form` | Form | CompoundParameter | 0 | 0..1 | how fully the symbol has condensed (0 = pure rain) |
+| `symbols` | Symbols | BooleanParameter | off | on/off | condense the glyph as liquid; off releases the held liquid |
+| `glyph` | Glyph | CompoundParameter | 1 | 1..9 | which symbol condenses (continuous, floored to a glyph) |
 | `moire` | Moire | CompoundParameter | 0 | 0..1 | 1/16-grid moiré shimmer over the rain (peaks) |
-| `smooth` | Smooth | CompoundParameter | 1.0 | 0..1 | motion blending + antialiasing (0 = steppy/pixel-snapped, 1 = smooth sub-pixel + AA) |
+| `smooth` | Smooth | CompoundParameter | 1.0 | 0..1 | motion blending + antialiasing incl. the glyph mask edge |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth (0 = pure screensaver) |
 
 Timeline usage: automate **Bloom** 0→1 at 1:22, hold across 1:56–2:20 (peak
-2:03), back to 0 by 2:44; **Moire** up only on the 1:56–2:20 plateau; **Form**
-pulsed on the symbol moments; **Energy** low in the "young" intro, up on the
-plateau, thin in the coda, near-0 in the outro.
+2:03), back to 0 by 2:44; **Moire** up only on the 1:56–2:20 plateau; toggle
+**Symbols** on for the symbol moments (and step **Glyph** across its range to
+transmute one symbol into the next — each step releases the old liquid and pools
+the new); **Energy** low in the "young" intro, up on the plateau, thin in the
+coda, near-0 in the outro.
 
-## Triggers
+## Triggers + Symbols
 
-Three triggers, small → large:
+Two triggers plus the `Symbols` gesture, small → large:
 
 - `dropBurst` (small) — a spatter of ~18 fast droplets appears at once; reads in
   a fraction of a second, resolves as they fall. Wired to kicks / bass hits.
-- `condense` (medium) — advances the `Glyph` selection to the next symbol and
-  starts a `MORPH_SECONDS` cross-dissolve from the old glyph; reads over ~3 s as
-  one symbol transmutes into another. Wired to the 2:16 vocal cluster.
+- `symbols` (medium, a **boolean** not a trigger) — turning it on begins
+  condensing the selected glyph out of the rain as liquid (fills over seconds);
+  stepping `Glyph` transmutes to the next symbol (releases the old liquid, pools
+  the new); turning it off releases the held liquid to run down. Wired to the
+  symbol section (e.g. on at the 2:16 vocal cluster, glyph steps across it).
 - `wash` (large) — a bright sheet sweeps the full height of both surfaces over
   `WASH_SECONDS`; a whole-room rinse gesture. Wired to section changes.
 
@@ -227,24 +275,30 @@ Show the math (fastest sustained motion at default energy AND at energy = 1):
   or the random spread if they blur.
 - **Sheet-wash (event-like)** — 2.5 s from top to bottom, ≥ 1.5 s minimum,
   triggered (not sustained).
-- **Symbol morph (event-like)** — 3 s cross-dissolve, ≥ 1.5 s minimum, no fast
-  spatial travel (the glyph condenses in place).
+- **Symbol condensation (event-like)** — the glyph fills with liquid over several
+  seconds and holds; no fast spatial travel (it forms in place). Release converts
+  it to drips that fall event-like (single streaks), above the 1.5 s minimum.
 - **Moiré** — a shimmer/flicker texture, low brightness, no bulk translation. Its
   phase advances on the 1/16 grid at `MOIRE_PHASE_H/V_PER_16` ≈ 0.3–0.5 rad per
   sixteenth (a full cycle over ~a bar), slow enough to read as shimmer, not
   travel. CURATE: confirm the drift rate reads as shimmer on hardware.
 - **Contrast/brightness** — cold near-monochrome field with deep near-black
-  negative space; the single warm bloom is the only saturation spend. Symbols are
-  bold 22 px forms (no fine texture). CURATE: verify the cold droplet color at
-  silence still reads on hardware, and that the warm bloom is clearly warmer.
+  negative space; the single warm bloom / warm liquid symbol is the only
+  saturation spend. Glyphs are bold ~24 px forms (no fine texture). CURATE: verify
+  the cold droplet color at silence still reads on hardware, and that the warm
+  liquid is clearly warmer.
 
 ## CURATE notes (grep `CURATE:` in the .java)
 
 - Droplet physics (`FALL_MIN/MAX`, `RAIN_*_PER_SEC`, `BURST_DROPS`)
   — all first-pass numbers, untuned on hardware.
 - Trail half-life range + `BLOOM_TRAIL_STRETCH` — the smear amount for the bloom.
-- `SYMBOL_SCALE`, `MORPH_SECONDS`, `AUTO_FORM_HOLD_SECONDS`, symbol repeat
-  positions/counts.
+- **Liquid-symbol sim**: `GLYPH_PX` (glyph size), `CUBE_CENTERS`/`CYL_CENTERS`
+  (positions/counts, kept symmetric for the reverse-normal mirror),
+  `INFLOW_PER_DROP` (fill rate), `FLOW_DOWN`/`FLOW_SIDE` (viscosity / surface
+  tension), `SPILL_LEVEL` + `MAX_SPILL_PER_FRAME` (overflow feel), `TINT_SECONDS`
+  (how fast the liquid warms to swatch-3), `MASK_MIN` (glyph membership
+  threshold). All read by eye on the LEDs — the whole sim is new this pass.
 - Moiré tuning values: `MOIRE_FREQ_A/B/V`, `MOIRE_PHASE_H/V_PER_16`,
   `MOIRE_MAX_BRIGHT` — the interference math is built and tempo-locked; these are
   the pitch/brightness/drift numbers to eyeball on the LEDs.
@@ -252,13 +306,18 @@ Show the math (fastest sustained motion at default energy AND at energy = 1):
   `LIFE_FADE_START` — the wetness/weight feel.
 - `COLD_FALLBACK` / `WARM_FALLBACK` — picked blind; only used on an empty swatch.
 - `warm = 3rd swatch color` — assumes the reserved warm accent sits at swatch
-  index 2 (per the brief's Gareth `#33CCFF/#CC99FF/#FFB38A` triad).
+  index 2 (per the brief's Gareth `#33CCFF/#CC99FF/#FFB38A` triad); this is also
+  the liquid-symbol target color.
+- Vector glyph geometry lives in `SymbolGlyphs` (proportions of the cross pommée
+  bulbs, the Star/Om/Crescent rotations, the abstract Om) — see `SymbolGlyphs.md`.
 
 ## TODO notes
 
-All round-1 build-out `TODO`s are resolved (droplet physics, auto-formation
-envelope, tempo-locked 2D moiré). No open code TODOs remain — only the numeric
-`CURATE:` values above, which need the physical LEDs to judge.
+No open code TODOs. The liquid-symbol sim, vector glyphs and reverse-normal
+mirror are all built; what remains are the numeric `CURATE:` values above, which
+need the physical LEDs to judge. Possible future refinement (not built): a
+two-buffer path so interior **rain** stays identical to exterior while only the
+glyph mirrors (current path mirrors the whole surface — invisible for rain).
 
 ## Curation log
 
@@ -268,3 +327,4 @@ envelope, tempo-locked 2D moiré). No open code TODOs remain — only the numeri
 | 2026-07-07 | Full build-out, Claude session | Replaced the three stubs: (1) droplet physics — per-drop TTL/lifetime with end-of-life head fade, small rand²-biased horizontal wobble, variable head brightness and weight/width (thin streak vs. fat 3-column bead), and ADD-blended heads so merging beads accumulate; (2) auto-formation envelope — a glyph change (Condense or knob) auto-ramps Form over `MORPH_SECONDS`, holds, then dissolves, with effective form = `max(knob, envelope)`; (3) moiré — tempo-locked 2D interference (horizontal fringe pair × vertical grating, both phases advanced on the 1/16 grid via `beatPosition()`), separable/zero-alloc via per-field scratch arrays. Also made DropBurst drops fast (energyPct 100, matching its stated intent). Params/labels unchanged. |
 | 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path) | Project-wide retirement of the Sync/TempoDiv + Meta pattern-control convention. Droplet spawning now always free-runs (the on-grid `GRID_BURST` pulse is gone); the moiré's 1/16 phase lock is kept, reading the engine tempo's beat position directly. |
 | 2026-07-08 | Added `Smooth` (house AA/interp convention); `energy` retained unchanged | Adopted the house motion-blur/antialiasing `Smooth` knob (default 1.0), registered after the pattern params and before `audio`. Wired into `paintStreak()`: `smooth` crossfades the wet trail between a pixel-snapped `lineMax` and a Wu-AA `lineWu`, and gates a fractional-row crossfade for the ADD-blended head's sub-pixel fall — 0 = steppy/pixel-snapped, 1 = smooth sub-pixel + antialiased. Reuses existing `SurfaceCanvas` primitives + `scaleRGB` coverage, zero-alloc in `step()`. `energy` deliberately kept as-is: rafters is a rigid 140 BPM song and `energy` drives BOTH droplet density AND fall speed (not speed-only), so it was not renamed or retimed. |
+| 2026-07-08 | GlassRain feedback pass (Jeff): vector glyphs + liquid condensation + reverse-normal + param changes | Rewrote `SymbolGlyphs` from 11px bitmap masks to **true vector geometry** rasterized to a cached, `Smooth`-antialiased coverage grid (headless AWT, à la `OtfTypeface`); changed Cross to a **cross pommée** and rotated Star −90°, Om −90°, Crescent +45°; dropped the bitmap `morph`/`pixel`/`rows` API (only GlassRain used it). In GlassRain: `Condense` trigger → **`Symbols`** boolean; `Glyph` enum → **continuous** `1..count` floored to an index; **removed `Form`** (+ the auto-formation envelope). Replaced the stamp-and-fade symbol with a **per-cell liquid sim** — rain absorbed into the glyph mask, gravity + lateral surface-tension leveling, bottom-lip overflow drips, color easing to the warm 3rd swatch, instant release on glyph-change / Symbols-off. Glyphs now follow the **reverse-normal rule**: `copyTo(exterior)` + `copyToMirrored(interior)` with instances placed symmetric about each surface center (interior rain mirrors too — invisible). `SurfaceCanvas` untouched; `SymbolGlyphs` is GlassRain-only so its API break is contained. |
