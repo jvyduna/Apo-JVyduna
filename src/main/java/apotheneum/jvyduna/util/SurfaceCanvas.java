@@ -381,6 +381,32 @@ public class SurfaceCanvas {
     }
   }
 
+  /**
+   * copyTo variant that reads the canvas horizontally mirrored (column x of the
+   * surface receives canvas column {@code width-1-x}), for interior Apotheneum
+   * surfaces: those LED layers face inward, so a straight index-to-index copy
+   * reads left-right reversed to a viewer on the ground inside. Pre-mirroring
+   * the pixels here cancels that, so text and forms read correct from inside.
+   * Same door-guard and mult semantics as {@link #copyTo(Apotheneum.Surface,
+   * int[], double, boolean)}; vertical order is untouched.
+   *
+   * @param surface Target interior surface (Orientation or single cube Face)
+   * @param colors Pattern color buffer (this.colors in the pattern)
+   * @param mult RGB multiplier, typically 0..1 for dimming; &lt;=0 renders black
+   */
+  public void copyToMirrored(Apotheneum.Surface surface, int[] colors, double mult) {
+    final Apotheneum.Column[] columns = surface.columns();
+    final int w = Math.min(this.width, columns.length);
+    for (int x = 0; x < w; ++x) {
+      final Apotheneum.Column column = columns[x];
+      final int h = Math.min(this.height, column.points.length);
+      final int srcX = this.width - 1 - x;
+      for (int y = 0; y < h; ++y) {
+        colors[column.points[y].index] = scale(this.pixels[y * this.width + srcX], mult);
+      }
+    }
+  }
+
   private static int scale(int argb, double mult) {
     // Negative mult would produce negative channel ints whose bits bleed
     // across channel boundaries when shifted; render black instead

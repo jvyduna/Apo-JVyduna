@@ -4,12 +4,14 @@ import java.util.List;
 
 import apotheneum.Apotheneum;
 import apotheneum.ApotheneumPattern;
+import apotheneum.jvyduna.util.AlienGlyph8;
 import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.PixelFont5;
 import apotheneum.jvyduna.util.SurfaceCanvas;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
+import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
 import heronarts.lx.color.LXDynamicColor;
 import heronarts.lx.parameter.BooleanParameter;
@@ -52,10 +54,9 @@ import heronarts.lx.utils.LXUtils;
  * See HoldClock.md (beside this file) for the full design note. All visual
  * subsystems are built: the bezel/tick/AA-hand analog face, the split-flap
  * flip face, the binary dot-grid, the base-N occult dial, the multi-strand
- * crystal-staircase shimmer cascade, the word-wrapped held message, the
- * never-resolving "estimated wait" line and the VHS button-glitch melt. The
- * remaining CURATE constants (dawn/brightness/sweep timings, mystic base) are
- * blind-picked and want a hardware pass.
+ * crystal-staircase shimmer cascade, the word-wrapped held message and the VHS
+ * button-glitch melt. The remaining CURATE constants (dawn/brightness/sweep
+ * timings, mystic base) are blind-picked and want a hardware pass.
  */
 @LXCategory("Apotheneum/jvyduna")
 @LXComponent.Name("HoldClock")
@@ -95,6 +96,13 @@ public class HoldClock extends ApotheneumPattern {
   /** Number of positions on the mystical base-N dial. */
   private static final int MYSTIC_BASE = 12; // CURATE
 
+  /** Cube digital-text vertical center as a fraction from the TOP of the
+   *  canvas: 1/3 from the top = 2/3 of install height up from the ground, so
+   *  the octal/flip/hex readout rides at a comfortable eye line on the cube.
+   *  The cylinder keeps 0.5 (already correct). Geometric faces (analog/binary/
+   *  mystic) ignore this and stay centered. */
+  private static final double CUBE_TEXT_CENTER = 1.0 / 3.0; // CURATE
+
   /** Treads per staircase flight in the shimmer cascade. One flight spans the
    *  full canvas and scrolls up exactly one full height per SHIMMER_SWEEP_MS,
    *  so the sustained rise still honors the >= 5 s traversal cap. */
@@ -128,8 +136,8 @@ public class HoldClock extends ApotheneumPattern {
   /** Clock face style; baseFlip walks this list to morph the counter. */
   public enum ClockMode {
     ANALOG("Analog"),   // institutional hands (bezel, ticks, AA hands)
-    FLIP("Flip"),       // split-flap flip-clock digits
-    DECIMAL("Decimal"), // HH:MM:SS phosphor digits
+    FLIP("Flip"),       // split-flap flip-clock digits (alien octal)
+    DECIMAL("Octal"),   // HH:MM:SS phosphor digits in the alien base-8 glyph set
     BINARY("Binary"),   // binary BCD dot-grid counter
     HEX("Hex"),         // hexadecimal counter
     MYSTIC("Mystic");   // base-N occult dial
@@ -167,7 +175,11 @@ public class HoldClock extends ApotheneumPattern {
 
   public final EnumParameter<ClockMode> clockMode =
     new EnumParameter<ClockMode>("Mode", ClockMode.DECIMAL)
-    .setDescription("Clock face style; the song morphs decimal → binary → hex → mystic across the outro");
+    .setDescription("Clock face style; the song morphs octal → binary → hex → mystic across the outro");
+
+  public final EnumParameter<Tempo.Division> speed =
+    new EnumParameter<Tempo.Division>("Speed", Tempo.Division.QUARTER)
+    .setDescription("Tempo division per clock tick: Quarter = one 'second' per beat (so 2× as fast at 120 vs 60 BPM); a whole note (1 bar) = 4× slower");
 
   public final CompoundParameter brightness =
     new CompoundParameter("Bright", BRIGHT_DEFAULT, 0, 1)
@@ -231,12 +243,13 @@ public class HoldClock extends ApotheneumPattern {
   private double shimmerPhase = 0;   // 0..1 ascending-sweep position
   private double glitchMs = 0;       // remaining button-glitch envelope
   private int jitterX = 0;           // per-frame audio kick offset
-  private double estWaitMs = 0;      // institutional "estimated wait" — only ever grows
   private double glitchPhase = 0;    // horizontal wobble phase for the melt
   private int glitchSeed = 0;        // per-frame jitter seed for the row tears
   private int lastFlipTick = 0;      // last elapsedTicks a flap was armed for
   private double flipMs = 0;         // split-flap flap-fall envelope
   private double smoothAA = 1.0;     // frame-cached Smooth: edge AA + eased transitions
+  private double textCenterFrac = 0.5; // per-surface digital-text vertical anchor (top-fraction)
+  private boolean alienDigits = false; // when set, digit glyphs render as the alien base-8 set
 
   public HoldClock(LX lx) {
     super(lx);
@@ -251,6 +264,7 @@ public class HoldClock extends ApotheneumPattern {
     // Pattern parameters
     addParameter("phase", this.phase);
     addParameter("clockMode", this.clockMode);
+    addParameter("speed", this.speed);
     addParameter("brightness", this.brightness);
     addParameter("hue", this.hue);
     addParameter("shimmer", this.shimmer);
@@ -306,12 +320,6 @@ public class HoldClock extends ApotheneumPattern {
       this.glitchSeed++;
     }
 
-    // Institutional "estimated wait" — counts UP forever while the clock runs,
-    // never resolving (the on-hold gag). Frozen while the punchline is held.
-    if (ph == Phase.RUNNING && !this.freeze.isOn()) {
-      this.estWaitMs += deltaMs;
-    }
-
     // Split-flap: arm a flap-fall whenever the counted value changes.
     if (this.elapsedTicks != this.lastFlipTick) {
       this.lastFlipTick = this.elapsedTicks;
@@ -325,15 +333,28 @@ public class HoldClock extends ApotheneumPattern {
     // Overall display multiplier (brightness lives here so drawing stays full-color)
     final double mult = displayMult(ph);
 
-    // Draw the same deadpan scene onto both surfaces (centered), then paint
-    // exterior + interior on the cube (all faces) and the cylinder ring.
+    // Cube: digital text rides at 2/3 install height. Paint each exterior face
+    // straight and each interior face horizontally mirrored, so the clock reads
+    // left-to-right correct to viewers both outside and inside (the inward LED
+    // layer already reverses what it shows; the mirror cancels it).
+    this.textCenterFrac = CUBE_TEXT_CENTER;
     drawScene(this.faceCanvas, this.faceScratch, ph);
-    this.faceCanvas.copyTo(Apotheneum.cube.exterior.front, this.colors, mult, false);
-    copyCubeFace(Apotheneum.cube.exterior.front); // replicate to all 8 faces
+    final Apotheneum.Cube.Orientation cubeExt = Apotheneum.cube.exterior;
+    final Apotheneum.Cube.Orientation cubeInt = Apotheneum.cube.interior;
+    this.faceCanvas.copyTo(cubeExt.front, this.colors, mult, false);
+    this.faceCanvas.copyTo(cubeExt.right, this.colors, mult, false);
+    this.faceCanvas.copyTo(cubeExt.back, this.colors, mult, false);
+    this.faceCanvas.copyTo(cubeExt.left, this.colors, mult, false);
+    this.faceCanvas.copyToMirrored(cubeInt.front, this.colors, mult);
+    this.faceCanvas.copyToMirrored(cubeInt.right, this.colors, mult);
+    this.faceCanvas.copyToMirrored(cubeInt.back, this.colors, mult);
+    this.faceCanvas.copyToMirrored(cubeInt.left, this.colors, mult);
 
+    // Cylinder: text stays centered (already correct); interior mirrored too.
+    this.textCenterFrac = 0.5;
     drawScene(this.cylinderCanvas, this.cylinderScratch, ph);
     this.cylinderCanvas.copyTo(Apotheneum.cylinder.exterior, this.colors, mult, false);
-    copyCylinderExterior();
+    this.cylinderCanvas.copyToMirrored(Apotheneum.cylinder.interior, this.colors, mult);
   }
 
   /** Advance the counted clock and colon blink on a free-running BPM-period
@@ -343,12 +364,20 @@ public class HoldClock extends ApotheneumPattern {
       return; // held button frame: the clock is frozen mid-tick
     }
     this.freeRunMs += deltaMs;
-    final double period = Math.max(1, this.lx.engine.tempo.period.getValue());
+    final double period = tickPeriodMs();
     while (this.freeRunMs >= period) {
       this.freeRunMs -= period;
       this.elapsedTicks++;
       this.colonOn = !this.colonOn;
     }
+  }
+
+  /** Duration of one clock tick in ms: the quarter-note beat period scaled by
+   *  the Speed division. Quarter → one tick per beat; a whole note (1 bar) →
+   *  four beats per tick (4× slower). Clamped to a sane floor. */
+  private double tickPeriodMs() {
+    final double beat = Math.max(1, this.lx.engine.tempo.period.getValue());
+    return beat / this.speed.getEnum().multiplier;
   }
 
   /** Overall brightness multiplier for the current phase / committed beats. */
@@ -382,6 +411,7 @@ public class HoldClock extends ApotheneumPattern {
    *  Brightness is applied later at copy time via {@link #displayMult}. */
   private void drawScene(SurfaceCanvas c, SurfaceCanvas scratch, Phase ph) {
     c.fill(LXColor.BLACK);
+    this.alienDigits = false; // messages / cold-open colon keep the real font
 
     // The held punchline frame overrides everything (hard cut).
     if (this.freeze.isOn()) {
@@ -434,10 +464,12 @@ public class HoldClock extends ApotheneumPattern {
         drawAnalog(c, color);
         break;
       case FLIP:
+        this.alienDigits = true; // base-8 alien glyphs on the split-flap cards
         drawFlip(c, color);
         break;
       case DECIMAL:
-        blitCentered(c, writeTime(this.displayBuf, this.colonOn), color);
+        this.alienDigits = true; // base-8 alien glyphs
+        blitCentered(c, writeOctalTime(this.displayBuf, this.colonOn), color);
         break;
       case BINARY:
         drawBinary(c, color);
@@ -450,22 +482,6 @@ public class HoldClock extends ApotheneumPattern {
         drawMystic(c, color);
         break;
     }
-    // The never-resolving "estimated wait", counting UP under the clock.
-    drawEstimatedWait(c, color);
-  }
-
-  /** The institutional-hold gag: an "EST WAIT MM:SS" status line under the
-   *  clock whose time only ever grows, never resolving. Falls back to a bare
-   *  MM:SS when the labelled form will not fit the surface width. */
-  private void drawEstimatedWait(SurfaceCanvas c, int color) {
-    final int cellW = PixelFont5.WIDTH + 1;
-    final int labelLen = writeEstWait(this.displayBuf, true);
-    final int fitLen = ((labelLen * cellW - 1) <= (c.width - 2))
-      ? labelLen
-      : writeEstWait(this.displayBuf, false);
-    final int dim = scaleColor(color, 0.55); // a quieter, secondary read
-    final int y0 = c.height - PixelFont5.HEIGHT - 1; // pinned to the bottom
-    blitText(c, fitLen, 1, y0, dim);
   }
 
   /**
@@ -604,7 +620,7 @@ public class HoldClock extends ApotheneumPattern {
   /** Split-flap flip-clock face: each digit sits on a dim card with a central
    *  flap seam, and the changing (rightmost) card animates a flap fall. */
   private void drawFlip(SurfaceCanvas c, int color) {
-    final int len = writeTime(this.displayBuf, this.colonOn);
+    final int len = writeOctalTime(this.displayBuf, this.colonOn);
     final int cellW = PixelFont5.WIDTH + 1;
     final int textW = len * cellW - 1;
     final int scale = Math.max(1, Math.min(
@@ -612,7 +628,7 @@ public class HoldClock extends ApotheneumPattern {
       (c.height - 2) / PixelFont5.HEIGHT));
     final int totalW = textW * scale;
     final int x0 = (c.width - totalW) / 2 + this.jitterX;
-    final int y0 = (c.height - PixelFont5.HEIGHT * scale) / 2;
+    final int y0 = textTopY(c, scale);
 
     final int card = scaleColor(color, 0.14);
     final int seam = 0xff000000; // the split-flap hinge line
@@ -638,7 +654,7 @@ public class HoldClock extends ApotheneumPattern {
       // Glyph
       for (int gy = 0; gy < PixelFont5.HEIGHT; ++gy) {
         for (int gx = 0; gx < PixelFont5.WIDTH; ++gx) {
-          if (PixelFont5.pixel(ch, gx, gy)) {
+          if (glyphPixel(ch, gx, gy)) {
             fillBlock(c, gx0 + gx * scale, y0 + gy * scale, scale, color);
           }
         }
@@ -954,8 +970,16 @@ public class HoldClock extends ApotheneumPattern {
     final int scale = Math.max(1, Math.min(
       (c.width - 2) / Math.max(1, textW),
       (c.height - 2) / PixelFont5.HEIGHT));
-    final int y0 = (c.height - PixelFont5.HEIGHT * scale) / 2;
-    blitText(c, len, scale, y0, color);
+    blitText(c, len, scale, textTopY(c, scale), color);
+  }
+
+  /** Top-row y for a scale-high glyph row whose vertical center sits at
+   *  {@link #textCenterFrac} of the canvas height (0.5 = centered; 1/3 = the
+   *  cube's 2/3-install-height anchor). Clamped so the row stays on-canvas. */
+  private int textTopY(SurfaceCanvas c, int scale) {
+    final int glyphH = PixelFont5.HEIGHT * scale;
+    final int y0 = (int) Math.round(c.height * this.textCenterFrac - glyphH / 2.0);
+    return LXUtils.constrain(y0, 0, Math.max(0, c.height - glyphH));
   }
 
   /** Blit displayBuf[0..len) horizontally centered at the given integer scale
@@ -973,12 +997,22 @@ public class HoldClock extends ApotheneumPattern {
       final int gx0 = x0 + ci * cellW * scale;
       for (int gy = 0; gy < PixelFont5.HEIGHT; ++gy) {
         for (int gx = 0; gx < PixelFont5.WIDTH; ++gx) {
-          if (PixelFont5.pixel(ch, gx, gy)) {
+          if (glyphPixel(ch, gx, gy)) {
             fillBlock(c, gx0 + gx * scale, y0 + gy * scale, scale, color);
           }
         }
       }
     }
+  }
+
+  /** Glyph pixel lookup routing digit chars to the alien base-8 set when
+   *  {@link #alienDigits} is set (the octal / flip modes); everything else —
+   *  letters, the ':' separator, real hex digits — stays on {@link PixelFont5}. */
+  private boolean glyphPixel(char ch, int gx, int gy) {
+    if (this.alienDigits && ch >= '0' && ch <= '7') {
+      return AlienGlyph8.pixel(ch - '0', gx, gy);
+    }
+    return PixelFont5.pixel(ch, gx, gy);
   }
 
   /** Fill a scale×scale block; x is guarded to the canvas so text never wraps. */
@@ -993,43 +1027,27 @@ public class HoldClock extends ApotheneumPattern {
     }
   }
 
-  /** Write HH:MM:SS from elapsedTicks (ticks treated as seconds). */
-  private int writeTime(char[] buf, boolean colon) {
-    // CURATE: ticks display as seconds 1:1; map to real wall-clock elapsed if
-    // the song wants that instead (see HoldClock.md CURATE notes).
-    final int s = Math.floorMod(this.elapsedTicks, 360000); // wrap at 100h
-    final int hh = (s / 3600) % 100;
-    final int mm = (s / 60) % 60;
-    final int ss = s % 60;
-    int i = two(buf, 0, hh);
+  /** Write HH:MM:SS as an octal-native (base-8) count for the alien glyph set:
+   *  each field rolls at 64 so both octal digits stay in 0..7 (00..77). The
+   *  digit chars '0'..'7' are mapped to the alien glyphs at blit time; the ':'
+   *  separator blinks off (space) on alternating ticks like the decimal face. */
+  private int writeOctalTime(char[] buf, boolean colon) {
+    final int s = Math.floorMod(this.elapsedTicks, 64 * 64 * 64); // wrap at 64^3
+    final int ss = s & 63;
+    final int mm = (s >> 6) & 63;
+    final int hh = (s >> 12) & 63;
+    int i = twoOctal(buf, 0, hh);
     buf[i++] = colon ? ':' : ' ';
-    i = two(buf, i, mm);
+    i = twoOctal(buf, i, mm);
     buf[i++] = colon ? ':' : ' ';
-    i = two(buf, i, ss);
+    i = twoOctal(buf, i, ss);
     return i;
   }
 
-  private static int two(char[] buf, int i, int v) {
-    buf[i++] = (char) ('0' + (v / 10) % 10);
-    buf[i++] = (char) ('0' + v % 10);
-    return i;
-  }
-
-  /** Write the ever-growing "estimated wait" (MM:SS), optionally labelled. */
-  private int writeEstWait(char[] buf, boolean labelled) {
-    final int total = (int) (this.estWaitMs / 1000);
-    final int mm = (total / 60) % 100;
-    final int ss = total % 60;
-    int i = 0;
-    if (labelled) {
-      for (int k = 0; k < 8; ++k) {
-        buf[i++] = "EST WAIT".charAt(k);
-      }
-      buf[i++] = ' ';
-    }
-    i = two(buf, i, mm);
-    buf[i++] = ':';
-    i = two(buf, i, ss);
+  /** Two octal digits (each 0..7) for a 0..63 field. */
+  private static int twoOctal(char[] buf, int i, int v) {
+    buf[i++] = (char) ('0' + ((v >> 3) & 7));
+    buf[i++] = (char) ('0' + (v & 7));
     return i;
   }
 
@@ -1045,7 +1063,7 @@ public class HoldClock extends ApotheneumPattern {
     if (this.freeze.isOn()) {
       return 0;
     }
-    final double period = Math.max(1, this.lx.engine.tempo.period.getValue());
+    final double period = tickPeriodMs();
     return LXUtils.constrain(this.freeRunMs / period, 0, 1);
   }
 
