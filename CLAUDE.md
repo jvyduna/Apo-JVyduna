@@ -49,30 +49,55 @@ the wrong mode's rules has already lost work once (see remote mode below).
 **Unconditional in both modes: pushing `main` to GitHub requires Jeff's
 explicit approval. Never open PRs unless asked.**
 
+### Branch conventions (adopted 2026-07-08)
+
+- **`main`** — stable, deployable. What `mvn -Pinstall install` should
+  normally build from. Receives only merges Jeff has approved.
+- **`pattern-dev`** — integration branch for pattern/effect development.
+  Session worktrees branch from and merge into `pattern-dev`, not `main`.
+  Jeff periodically merges `pattern-dev` → `main` when a batch is stable
+  and tested.
+- **`composition-ui`** — long-lived branch for the Arrange Tools plugin:
+  editor helpers (cross-lane range shift, event-range copy/paste) for the
+  arrange-branch host. Scope: `src/main/java/apotheneum/jvyduna/arrange/**`
+  only. Merged to `main` by Jeff once verified.
+- **Hard contract for arrange/editor work** (`composition-ui`): package-side
+  only — never edit the LXStudio/LX/GLX repos. Narrow **read-only** reflection
+  into host UI internals is allowed, but every access must be try/catch
+  guarded so a host refactor degrades to a logged no-op. Features are
+  editor-only: they must never change how compositions play back or parse,
+  and any `.lxp` they touch must be verified to load cleanly on stock
+  Chromatik 1.2.2.
+
 ### Local Mac sessions (Jeff's machine)
 
 - Sessions develop in worktrees under `.claude/worktrees/` on
   `worktree-bridge-*` branches; the repo root stays on `main`.
 - **Minimal remote activity.** When a turn of improvements is done, merge it
-  back into the **local** `main` branch. Do not push worktree branches or
-  create remote branches.
-- **Rebase on main at the start of every turn.** Before making new edits, run
-  `git rebase main` in the worktree so the session builds on the latest merged
-  state and current CLAUDE.md. Only rebase a clean tree — commit (or stash)
-  first, never mid-edit. Worktree branches are single-session and local-only,
-  so rebasing is always safe here.
+  back into the **local** `pattern-dev` branch (or `composition-ui` for
+  Arrange Tools work). Do not push worktree branches or create remote
+  branches.
+- **Rebase on the integration branch at the start of every turn.** Before
+  making new edits, run `git rebase pattern-dev` (or `composition-ui`) in the
+  worktree so the session builds on the latest merged state and current
+  CLAUDE.md. Only rebase a clean tree — commit (or stash) first, never
+  mid-edit. Worktree branches are single-session and local-only, so rebasing
+  is always safe here.
 - Keep each session scoped to its own pattern's files. Shared utils
   (`SurfaceCanvas`, `AudioReactive`, `TempoLock`) are the conflict hotspot:
   keep util edits small and additive, call them out in the merge commit body,
   and merge finished turns promptly so other sessions pick them up on their
   next rebase.
 - When a session's work is approved: commit it on the worktree branch with a
-  descriptive message summarizing the curation pass, then merge into main
-  from the repo root with a merge commit —
-  `git -C ~/Code/jvyduna/Apo-JVyduna merge --no-ff <branch> -m "Merge <what> into main"` —
+  descriptive message summarizing the curation pass, then merge into the
+  integration branch with a merge commit —
+  `git -C ~/Code/jvyduna/Apo-JVyduna merge --no-ff <branch> -m "Merge <what> into pattern-dev"`
+  (run from a checkout of the integration branch; the repo root stays on
+  `main`, so use a worktree or `git worktree` checkout of `pattern-dev`) —
   noting in the body any file overlap with other recent sessions.
-- After merging, rebuild on main (`mvn -Pinstall clean install`) so the
-  deployed jar in `~/Chromatik/Packages` matches main.
+- After Jeff merges an approved batch to `main`, rebuild on main
+  (`mvn -Pinstall clean install`) so the deployed jar in
+  `~/Chromatik/Packages` matches main.
 
 ### Remote/cloud sessions (Claude Code web, server mode, worktree isolation)
 
