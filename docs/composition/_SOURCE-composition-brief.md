@@ -115,11 +115,13 @@ MIR chrome duration = 305 s.)
   Text (5px bitmap font), MirPitchGrid.
 - **Effects:** `effects/bliss/Rip` (FFT/trigger negative-space rips),
   `effects/BlitFeedback` (frame-buffer feedback — glitch/K-hole/melt).
-- **Utils** (`util/`): AudioReactive, SurfaceCanvas, TempoLock, TriggerBag,
-  PixelFont5, PerceptualHue, Ranges.
+- **Utils** (`util/`): AudioReactive, SurfaceCanvas, PixelFont5, PerceptualHue,
+  Ranges. (TempoLock and TriggerBag are legacy — the Sync/TempoDiv/Meta
+  convention was retired 2026-07-08; do not use them in new patterns.)
 - **Conventions:** `docs/TEMPLATE.md` (design-doc template) and
   `patterns/bliss/Mountains.md` (exemplar). Palette-driven color; `Audio` depth
-  knob (default 0 = screensaver); `TempoLock` grid sync; ≥3 non-meta triggers;
-  zero-alloc render; ≥5 s full-traversal sustained-motion cap; `CURATE:` inline
-  notes on unverifiable values; curation log. The `te-patterns` skill is the
-  authoring reference.
+  knob (default 0 = screensaver); ≥3 triggers; zero-alloc render; ≥5 s
+  full-traversal sustained-motion cap; `CURATE:` inline notes on unverifiable
+  values; curation log. No tempo-grid gating and no Meta/random-jump triggers —
+  timing free-runs and choreography comes from the arrange timeline. The
+  `te-patterns` skill is the authoring reference.

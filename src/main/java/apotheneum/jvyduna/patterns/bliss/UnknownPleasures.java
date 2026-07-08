@@ -5,7 +5,6 @@ import java.util.Random;
 
 import apotheneum.Apotheneum;
 import apotheneum.ApotheneumPattern;
-import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
@@ -143,19 +142,17 @@ public class UnknownPleasures extends ApotheneumPattern {
 
   // ---- Parameters -----------------------------------------------------------
 
-  private final TriggerBag bag = new TriggerBag("UnknownPleasures");
-
-  public final TriggerParameter reseed = bag.register(
+  public final TriggerParameter reseed =
     new TriggerParameter("Reseed", this::reseed)
-    .setDescription("Clear all ridgelines and refill the full stack from scratch"));
+    .setDescription("Clear all ridgelines and refill the full stack from scratch");
 
-  public final TriggerParameter flip = bag.register(
+  public final TriggerParameter flip =
     new TriggerParameter("Flip", this::flip)
-    .setDescription("Reverse the scroll direction; lines then enter from the opposite edge"));
+    .setDescription("Reverse the scroll direction; lines then enter from the opposite edge");
 
-  public final TriggerParameter pulse = bag.register(
+  public final TriggerParameter pulse =
     new TriggerParameter("Pulse", this::injectPulse)
-    .setDescription("Inject one oversized synthesized pulsar pulse line at the next division's birth"));
+    .setDescription("Inject one oversized synthesized pulsar pulse line at the next division's birth");
 
   public final CompoundParameter spacing =
     new CompoundParameter("Spacing", 2, 2, 16)
@@ -198,10 +195,6 @@ public class UnknownPleasures extends ApotheneumPattern {
   public final EnumParameter<Tempo.Division> tempoDiv =
     new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.QUARTER)
     .setDescription("Tempo division on which lines emerge from the entry edge; with Spacing, sets the scroll speed");
-
-  public final TriggerParameter rndTrig =
-    new TriggerParameter("RndTrig", bag::fire)
-    .setDescription("Randomly fire one trigger or jump one parameter");
 
   // ---- Line store (ring buffer keyed by integer birth index) ----------------
 
@@ -251,7 +244,6 @@ public class UnknownPleasures extends ApotheneumPattern {
     addParameter("reseed", this.reseed);
     addParameter("flip", this.flip);
     addParameter("pulse", this.pulse);
-    addParameter("rndTrig", this.rndTrig);
     addParameter("spacing", this.spacing);
     addParameter("amplitude", this.amplitude);
     addParameter("jaggedness", this.jaggedness);
@@ -262,12 +254,6 @@ public class UnknownPleasures extends ApotheneumPattern {
     addParameter("audio", this.audioDepth);
     addParameter("decay", this.decay);
     addParameter("tempoDiv", this.tempoDiv);
-
-    bag.jumpable(this.spacing, 2, 8);
-    bag.jumpable(this.amplitude, 4, 12);
-    bag.jumpable(this.jaggedness, 0, 0.5);
-    bag.jumpable(this.wavMode);
-    bag.jumpable(this.cylWavs);
 
     for (int x = 0; x < WIDTH; ++x) {
       // Hann window raised to WINDOW_POWER: 1 at center, 0 at the edges

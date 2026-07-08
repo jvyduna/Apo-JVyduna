@@ -8,17 +8,13 @@ import apotheneum.ApotheneumPattern;
 import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.Ranges;
 import apotheneum.jvyduna.util.SurfaceCanvas;
-import apotheneum.jvyduna.util.TempoLock;
-import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
-import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
 import heronarts.lx.color.LXDynamicColor;
 import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundParameter;
-import heronarts.lx.parameter.EnumParameter;
 import heronarts.lx.parameter.TriggerParameter;
 
 /**
@@ -43,9 +39,8 @@ import heronarts.lx.parameter.TriggerParameter;
  * mirror their exteriors (copyCylinderExterior / copyCubeExterior) so the audience
  * standing inside is enclosed by the ascension.
  *
- * This is a beatless song (see chrome-brief.md): the Sync/TempoDiv pair is present
- * per series convention but is intended OFF here — the pattern is envelope- and
- * Audio-driven, and free-running is its native mode.
+ * This is a beatless song (see chrome-brief.md): the pattern is envelope- and
+ * Audio-driven, and all timing free-runs.
  *
  * See Helix.md (beside this file) for the full design note.
  */
@@ -115,22 +110,20 @@ public class Helix extends ApotheneumPattern {
 
   // ---- Parameters -------------------------------------------------------------
 
-  private final TriggerBag bag = new TriggerBag("Helix");
   private final AudioReactive audio;
-  private final TempoLock tempoLock;
   private final Random random = new Random();
 
-  public final TriggerParameter pulse = bag.register(
+  public final TriggerParameter pulse =
     new TriggerParameter("Pulse", this::firePulse)
-    .setDescription("Inject one bright pulse riding up each strand from the base"));
+    .setDescription("Inject one bright pulse riding up each strand from the base");
 
-  public final TriggerParameter reverse = bag.register(
+  public final TriggerParameter reverse =
     new TriggerParameter("Reverse", this::reverse)
-    .setDescription("Reverse the ascension twist direction of the helix"));
+    .setDescription("Reverse the ascension twist direction of the helix");
 
-  public final TriggerParameter strike = bag.register(
+  public final TriggerParameter strike =
     new TriggerParameter("Strike", this::strike)
-    .setDescription("Fire a white lightning bolt to earth — the finale-ignition event"));
+    .setDescription("Fire a white lightning bolt to earth — the finale-ignition event");
 
   public final CompoundParameter energy =
     new CompoundParameter("Energy", 0.35)
@@ -158,7 +151,7 @@ public class Helix extends ApotheneumPattern {
 
   public final CompoundParameter pulses =
     new CompoundParameter("Pulses", 0.5)
-    .setDescription("Auto-emitted pulse density riding the strands (free-running) or intensity on the grid (Sync)");
+    .setDescription("Auto-emitted pulse density riding the strands");
 
   public final CompoundParameter thick =
     new CompoundParameter("Thick", 1.5, 1, 3)
@@ -175,18 +168,6 @@ public class Helix extends ApotheneumPattern {
   public final CompoundParameter audioDepth =
     new CompoundParameter("Audio", 0)
     .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
-
-  public final BooleanParameter sync =
-    new BooleanParameter("Sync", true)
-    .setDescription("Lock pulse emission to the tempo grid; off restores free-running timing (this song is beatless — leave off)");
-
-  public final EnumParameter<Tempo.Division> tempoDiv =
-    new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.HALF)
-    .setDescription("Tempo division pulses emit on when Sync is enabled");
-
-  public final TriggerParameter meta =
-    new TriggerParameter("Meta", bag::fire)
-    .setDescription("Randomly fire one of Helix's triggers or jump a parameter");
 
   // ---- Canvases (preallocated) ------------------------------------------------
 
@@ -232,7 +213,6 @@ public class Helix extends ApotheneumPattern {
   public Helix(LX lx) {
     super(lx);
     this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
-    this.tempoLock = new TempoLock(lx);
 
     // Seed the starfield once (event-rate init, not render-loop)
     for (int i = 0; i < MAX_STARS; ++i) {
@@ -256,17 +236,6 @@ public class Helix extends ApotheneumPattern {
     addParameter("cube", this.cube);
     addParameter("hue", this.hue);
     addParameter("audio", this.audioDepth);
-    addParameter("sync", this.sync);
-    addParameter("tempoDiv", this.tempoDiv);
-    addParameter("meta", this.meta);
-
-    // Meta jump candidates — mirrored 1:1 in the Jump candidates table in Helix.md
-    bag.jumpable(this.twist, 1, 6);
-    bag.jumpable(this.unstrand, 0, 1);
-    bag.jumpable(this.moire, 0, 0.7);
-    bag.jumpable(this.stars, 0.1, 0.8);
-    bag.jumpable(this.climb, 0.4, 1.3);
-    bag.jumpable(this.pulses, 0.2, 0.9);
   }
 
   // ---- Trigger handlers -------------------------------------------------------
@@ -355,25 +324,17 @@ public class Helix extends ApotheneumPattern {
       this.starU[i] -= Math.floor(this.starU[i]);
     }
 
-    // Pulse emission: audio hits + auto (grid-gated when Sync, else free timer).
-    // crossed() is polled unconditionally every frame (see TempoLock javadoc).
-    final boolean crossed = this.tempoLock.crossed(this.tempoDiv.getEnum());
+    // Pulse emission: audio hits + a free-running auto timer.
     if (this.audio.bassHit()) {
       firePulse();
     }
     this.pulseTimerMs += deltaMs;
-    if (this.sync.isOn()) {
-      if (crossed) {
-        firePulse();
-      }
-    } else {
-      double interval = Ranges.lin(this.pulses.getValue(),
-        PULSE_INTERVAL_SPARSE_MS, PULSE_INTERVAL_DENSE_MS);
-      interval /= (1 + this.audio.level); // audio level thickens the stream
-      if (this.pulseTimerMs >= interval) {
-        this.pulseTimerMs = 0;
-        firePulse();
-      }
+    double interval = Ranges.lin(this.pulses.getValue(),
+      PULSE_INTERVAL_SPARSE_MS, PULSE_INTERVAL_DENSE_MS);
+    interval /= (1 + this.audio.level); // audio level thickens the stream
+    if (this.pulseTimerMs >= interval) {
+      this.pulseTimerMs = 0;
+      firePulse();
     }
 
     // Bolt envelope

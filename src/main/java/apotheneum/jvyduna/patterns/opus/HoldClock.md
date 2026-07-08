@@ -91,19 +91,11 @@ kicks" is the whole story.)
 
 ## Tempo mapping
 
-The clock **ticks on the grid**. Each frame `TempoLock.crossed(tempoDiv)` is
-polled unconditionally (even when Sync is off, per the stale-cycle-count
-gotcha). With `Sync` on, `elapsedTicks` advances and the colon toggles on every
-`TempoDiv` crossing (default **QUARTER** — one tick per beat at 85 BPM, "on the
-beat"). With `Sync` off, the clock free-runs on a BPM-period accumulator
-(`beatPeriodMs`), so it still ticks at the musical rate but drifts off the grid
-phase — fully functional and good-looking standalone.
-
-The 85 BPM `opus` grid is rigid (fit residual ~10.7 ms), so `TempoLock` locks
-cleanly; everything snaps. No `retime` is used — the clock is a discrete
-grid-gated event, not a continuous motion that needs phase-nudging. The shimmer
-sweep is time-based (`SHIMMER_SWEEP_MS`), not grid-locked, since it's a brief
-choreographed bloom driven by a clip lane over a fixed 10 s window.
+No tempo gating — the clock free-runs on a BPM-period accumulator
+(`lx.engine.tempo.period`), ticking at the musical rate without grid-phase
+locking (Sync/TempoDiv/Meta convention retired 2026-07-08; free-run behavior =
+the old Sync-off path). The shimmer sweep is time-based (`SHIMMER_SWEEP_MS`),
+a brief choreographed bloom driven by a clip lane over a fixed 10 s window.
 
 ## Energy mapping
 
@@ -118,8 +110,8 @@ Sustained motion still respects the ≥5 s cap — see the compliance section.
 ## Parameters
 
 UI/registration order (house style; keys/labels are frozen once `.lxp` files
-reference them): triggers (Meta last of them, via the bag), pattern parameters,
-Audio, Sync, TempoDiv. No Energy param (see above).
+reference them): triggers, pattern parameters, Audio. No Energy param (see
+above).
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
@@ -127,7 +119,6 @@ Audio, Sync, TempoDiv. No Energy param (see above).
 | `boot` | Boot | TriggerParameter | — | — | leave the cold open, boot the clock (the 0:19 reveal) |
 | `baseFlip` | BaseFlip | TriggerParameter | — | — | step to the next (more esoteric) clock mode |
 | `glitch` | Glitch | TriggerParameter | — | — | arm a one-frame loop-glitch / VHS melt (button flourish) |
-| `meta` | Meta | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
 | `phase` | Phase | EnumParameter | Running | ColdOpen/Running/Blackout | top-level screen state (composition-driven; Running default for standalone) |
 | `clockMode` | Mode | EnumParameter | Decimal | Analog/Flip/Decimal/Binary/Hex/Mystic | clock face style; morphs across the outro |
 | `brightness` | Bright | CompoundParameter | 0.35 | 0..1 | deadpan resting display brightness |
@@ -136,8 +127,6 @@ Audio, Sync, TempoDiv. No Energy param (see above).
 | `freeze` | Freeze | BooleanParameter | false | — | latch the held "GOD PUT ME ON HOLD" punchline frame (committed beat ~1:25) |
 | `message` | Msg | StringParameter | "" | — | held-frame / cold-open text, driven by clip-lane string events |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth (0 = pure clock) |
-| `sync` | Sync | BooleanParameter | true | — | tick on the tempo grid; off free-runs at the BPM period |
-| `tempoDiv` | TempoDiv | EnumParameter | QUARTER | Tempo.Division | division the clock ticks / colon blinks on |
 
 ### Composition-driven timeline (how the .lxp drives it)
 
@@ -153,7 +142,7 @@ Audio, Sync, TempoDiv. No Energy param (see above).
 
 ## Triggers
 
-Four non-Meta triggers, small → large state change:
+Four triggers, small → large state change:
 
 - `tick` (small) — advances the clock one unit and toggles the colon. Reads as
   a single quiet increment; instant.
@@ -168,19 +157,6 @@ Four non-Meta triggers, small → large state change:
   phase-wobble + occasional torn band + a per-column vertical drip that grows as
   the envelope fades (the VHS melt into near-black). CURATE: the wobble/tear/
   melt magnitudes are blind-picked — tune on hardware.
-
-## Jump candidates
-
-Rows mirror the `bag.jumpable(...)` lines in the constructor 1:1. All four
-non-Meta triggers are also registered in the bag.
-
-| Param | Jump range | Status | Notes |
-|---|---|---|---|
-| `clockMode` | all (Analog..Mystic) | candidate | full morph range; logged by label |
-| `brightness` | [0.2, 0.5] | candidate | stay in the deadpan band — never lush |
-| `hue` | [0, 360] (full) | candidate | any rotation is safe |
-
-Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [a,b]`.
 
 ## Simulation-principles compliance
 
@@ -241,3 +217,4 @@ Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [
 |---|---|---|
 | 2026-07-07 | Initial first-pass, Claude autonomous session | Design doc + compiling stub: phase/mode state machine, tick engine, digit rasterizer, and the two committed beats (shimmer knob, freeze button) all wired and registered; analog/binary/mystic/flip/glitch/cascade/multi-line left as TODOs for the hardware pass |
 | 2026-07-07 | Full build-out, Claude session | Built every stubbed subsystem: multi-strand crystal-staircase shimmer cascade (seamless periodic staircase + ascending highlight, ≥5 s traversal); multi-line word-wrapped held message with auto-scale + never-resolving "EST WAIT" counter; analog face (bezel ring, 12 ticks, AA lineWu hands, smooth sub-tick sweep); split-flap FLIP styling with per-tick flap fall; binary 6×4 BCD dot-grid; base-N occult MYSTIC dial (esoteric glyph marks, counter-rotating inner ring, smooth pointer); and the VHS button-glitch melt (scratch-buffer phase-wobble + torn bands + per-column drip). Zero-alloc preserved (added bcd[6], line-range arrays, two scratch canvases, all preallocated); all parameters/keys unchanged |
+| 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path) | Project-wide retirement of the Sync/TempoDiv + Meta pattern-control convention. The clock now always ticks on the free-running BPM-period accumulator (`lx.engine.tempo.period`), the old Sync-off mode. |

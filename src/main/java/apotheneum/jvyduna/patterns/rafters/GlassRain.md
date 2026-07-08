@@ -15,7 +15,7 @@ the rain (rafters hero).
 > merge); the symbol auto-condenses out of the rain on its own via an internal
 > formation envelope (Form knob still overrides); and the moiré is a tempo-locked
 > 2D interference shimmer with vertical structure (grating phases advanced on the
-> 1/16 grid via `TempoLock.beatPosition()`). What remains are the numeric
+> 1/16 grid from the engine tempo's beat position). What remains are the numeric
 > `CURATE:` values that can only be judged on the LEDs.
 
 ## Original / inspiration
@@ -50,9 +50,9 @@ rain and transmuting into one another.
   and fall toward increasing y — matching the physical top-down LED column order.
 - **Buffers / zero-alloc**: every droplet field is a struct-of-arrays
   (`RainField.x/y/vy/active`) preallocated at `CUBE_DROPS = 160` / `CYL_DROPS =
-  100`. The two `SurfaceCanvas` buffers, the `AudioReactive`, `TempoLock`,
-  `TriggerBag` and `Random` are all constructed once. Render allocates nothing;
-  only the trigger/meta callbacks (event rate) may allocate.
+  100`. The two `SurfaceCanvas` buffers, the `AudioReactive` and `Random` are all
+  constructed once. Render allocates nothing; only the trigger callbacks (event
+  rate) may allocate.
 - **Door columns**: handled for free by `SurfaceCanvas.copyTo`, which clips each
   column to `column.points.length`, so droplet pixels below a door are simply not
   copied. No special-casing.
@@ -103,11 +103,11 @@ scales it. CURATE: symbol scale (2 → 22 px), repeat positions/counts,
   beat into horizontal interference fringes, and a third vertical grating
   (`MOIRE_FREQ_V`) adds **vertical structure** so the overlay reads as a
   shimmering 2D interference sheet, not static bars. Both grating phases
-  (`moirePhaseH/V`) are advanced on the **1/16 tempo grid** — derived from
-  `TempoLock.beatPosition() · 4` (a quarter beat = 4 sixteenths) times
-  `MOIRE_PHASE_H/V_PER_16` — so the fringes sweep and the shimmer drifts in time.
-  Max-blended over the rain, gated by the `Moire` knob and flickered by treble;
-  independent of the `Sync` toggle (it has its own knob gate). Implemented
+  (`moirePhaseH/V`) are advanced on the **1/16 tempo grid** — derived from the
+  engine tempo's continuous beat position × 4 (a quarter beat = 4 sixteenths)
+  times `MOIRE_PHASE_H/V_PER_16` — so the fringes sweep and the shimmer drifts in
+  time. Max-blended over the rain, gated by the `Moire` knob and flickered by
+  treble. Implemented
   separably (per-column fringe × per-row shimmer, precomputed into preallocated
   scratch arrays) so the inner loop is a multiply, not a trig call — zero-alloc.
 - **Sheet-wash** (`drawWash`) — the `SheetWash` trigger sends a bright horizontal
@@ -136,28 +136,18 @@ it as a layer or a sibling `Life` pattern. Not in this class.
 
 **Depth knob / silence behavior**: `Audio` defaults to 0 = pure screensaver. At
 depth 0 (or in true silence) the level term is 0, hits never fire, and the rain
-runs purely on the Density/Energy knobs + the tempo grid; the moiré runs on the
+runs purely on the Density/Energy knobs; the moiré runs on the
 `Moire` knob alone. Nothing re-gates audio locally — the knob is the single master
 gate. At knob = 1 the rain visibly breathes with the mix, kicks spatter, and the
 moiré flickers on treble.
 
 ## Tempo mapping
 
-Standard `Sync` + `TempoDiv` pair, default division **HALF** — the 70 BPM
-half-time backbone of the 140 BPM grid (the kick's perceived pulse; the brief says
-lock droplet/event motion to the 70 feel, reserve 16ths for moiré detail).
-
-- **Droplet bursts** lock to the grid: `tempoLock.crossed(tempoDiv)` is polled
-  **every frame** (never conditionally — a lapsed poll would fire a stale crossing
-  when Sync flips back on), and on a crossing with Sync on, `GRID_BURST` extra
-  droplets spawn, so the rain pulses with the backbone. Free-running density is
-  untouched underneath, so **Sync off** just removes the pulse and the rain keeps
-  falling continuously.
-- The **moiré** locks to the 1/16 grid: `drawMoire` advances both grating phases
-  from `TempoLock.beatPosition()` (see the Moiré section), so the shimmer drifts
-  in time with the transport rather than free-running.
-
-CURATE: `GRID_BURST = 3` — confirm the on-beat pulse reads as musical, not lumpy.
+No tempo gating — droplet timing free-runs (Sync/TempoDiv/Meta convention retired
+2026-07-08; free-run behavior = the old Sync-off path: continuous density-driven
+rain, no on-grid burst pulse). The **moiré** still derives its grating phases from
+the engine tempo's continuous 1/16 beat position (see the Moiré section), gated
+only by its own `Moire` knob.
 
 ## Energy mapping
 
@@ -179,9 +169,6 @@ UI/registration order (do not deviate; keys/labels are referenced by saved .lxp)
 2. `energy`
 3. Pattern params (`density`, `streak`, `bloom`, `glyph`, `form`, `moire`)
 4. `audio`
-5. `sync`
-6. `tempoDiv`
-7. `meta` (always last)
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
@@ -196,9 +183,6 @@ UI/registration order (do not deviate; keys/labels are referenced by saved .lxp)
 | `form` | Form | CompoundParameter | 0 | 0..1 | how fully the symbol has condensed (0 = pure rain) |
 | `moire` | Moire | CompoundParameter | 0 | 0..1 | 1/16-grid moiré shimmer over the rain (peaks) |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth (0 = pure screensaver) |
-| `sync` | Sync | BooleanParameter | true | — | lock droplet bursts to the tempo grid |
-| `tempoDiv` | TempoDiv | EnumParameter | HALF | Tempo.Division | division bursts land on (HALF = 70 backbone) |
-| `meta` | Meta | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
 
 Timeline usage: automate **Bloom** 0→1 at 1:22, hold across 1:56–2:20 (peak
 2:03), back to 0 by 2:44; **Moire** up only on the 1:56–2:20 plateau; **Form**
@@ -207,7 +191,7 @@ plateau, thin in the coda, near-0 in the outro.
 
 ## Triggers
 
-Three non-meta triggers, small → large:
+Three triggers, small → large:
 
 - `dropBurst` (small) — a spatter of ~18 fast droplets appears at once; reads in
   a fraction of a second, resolves as they fall. Wired to kicks / bass hits.
@@ -216,21 +200,6 @@ Three non-meta triggers, small → large:
   one symbol transmutes into another. Wired to the 2:16 vocal cluster.
 - `wash` (large) — a bright sheet sweeps the full height of both surfaces over
   `WASH_SECONDS`; a whole-room rinse gesture. Wired to section changes.
-
-## Jump candidates
-
-Rows mirror the `bag.jumpable(...)` lines in the constructor 1:1. All three
-triggers are also registered in the bag.
-
-| Param | Jump range | Status | Notes |
-|---|---|---|---|
-| `density` | [0.15, 0.9] | candidate | extremes excluded: 0 empties the glass, 1 saturates |
-| `streak` | [0.2, 0.9] | candidate | keep some trail; full 1 near-permanent |
-| `bloom` | [0, 1] (full) | candidate | any warmth level is a valid look |
-| `moire` | [0, 0.6] | candidate | upper reserved: full moiré overwhelms the rain |
-| `glyph` | all 9 symbols | candidate | applies via morph; logged at fire |
-
-Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [a,b]`.
 
 ## Simulation-principles compliance
 
@@ -259,7 +228,7 @@ Show the math (fastest sustained motion at default energy AND at energy = 1):
 
 ## CURATE notes (grep `CURATE:` in the .java)
 
-- Droplet physics (`FALL_MIN/MAX`, `RAIN_*_PER_SEC`, `GRID_BURST`, `BURST_DROPS`)
+- Droplet physics (`FALL_MIN/MAX`, `RAIN_*_PER_SEC`, `BURST_DROPS`)
   — all first-pass numbers, untuned on hardware.
 - Trail half-life range + `BLOOM_TRAIL_STRETCH` — the smear amount for the bloom.
 - `SYMBOL_SCALE`, `MORPH_SECONDS`, `AUTO_FORM_HOLD_SECONDS`, symbol repeat
@@ -285,3 +254,4 @@ envelope, tempo-locked 2D moiré). No open code TODOs remain — only the numeri
 |---|---|---|
 | 2026-07-07 | Initial first-pass, Claude autonomous session | Stub hero for rafters: rain layer + Bloom dynamics envelope + moiré + shared-`SymbolGlyphs` condensation, all params wired; physics/moiré/formation-timing left as TODO for hardware curation. Symbol drawing delegated to the shared module per critique gap #6 (split GlassRain's jobs); CA "life" layer explicitly deferred (legibility risk). |
 | 2026-07-07 | Full build-out, Claude session | Replaced the three stubs: (1) droplet physics — per-drop TTL/lifetime with end-of-life head fade, small rand²-biased horizontal wobble, variable head brightness and weight/width (thin streak vs. fat 3-column bead), and ADD-blended heads so merging beads accumulate; (2) auto-formation envelope — a glyph change (Condense or knob) auto-ramps Form over `MORPH_SECONDS`, holds, then dissolves, with effective form = `max(knob, envelope)`; (3) moiré — tempo-locked 2D interference (horizontal fringe pair × vertical grating, both phases advanced on the 1/16 grid via `beatPosition()`), separable/zero-alloc via per-field scratch arrays. Also made DropBurst drops fast (energyPct 100, matching its stated intent). Params/labels unchanged. |
+| 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path) | Project-wide retirement of the Sync/TempoDiv + Meta pattern-control convention. Droplet spawning now always free-runs (the on-grid `GRID_BURST` pulse is gone); the moiré's 1/16 phase lock is kept, reading the engine tempo's beat position directly. |

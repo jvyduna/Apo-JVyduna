@@ -78,9 +78,10 @@ onto its LED points column-major.
 
 ## Timing (StrkTime + FadeTime)
 
-No Sync toggle and no grid quantization — strikes fire **immediately** on trigger;
-their durations are tempo-derived from two `EnumParameter<Tempo.Division>` knobs
-via `TempoLock.divisionMs(div)` (captured at launch):
+No tempo gating (Sync/TempoDiv/Meta convention retired 2026-07-08) and no grid
+quantization — strikes fire **immediately** on trigger; their durations are
+tempo-derived from two `EnumParameter<Tempo.Division>` knobs via
+`tempo.period / division.multiplier` (captured at launch):
 
 - **StrkTime** (default `QUARTER`): the LEADER phase — the bolt draws top→bottom over
   `leaderMs`, a growing segment prefix, brightness ramping 0.25→0.55.
@@ -123,8 +124,7 @@ trigger, the `Storm` burst, or the audio detector. The detector reads the 16-ban
 
 ## Parameters
 
-UI order (2026-07-06 series convention): triggers first with RndTrig
-immediately after them, then algorithm, surface counts, pattern params,
+UI order: triggers first, then algorithm, surface counts, pattern params,
 timing, White, audio. (No inherited face toggles — the base-class switch
 dropped them.)
 
@@ -133,7 +133,6 @@ dropped them.)
 | `strike` | Strike | TriggerParameter | — | — | strike one bolt now |
 | `storm` | Storm | TriggerParameter | — | — | burst of 3–5 bolts over ~2 s |
 | `nextAlgo` | NextAlgo | TriggerParameter | — | — | cycle the generator algorithm |
-| `rndTrig` | RndTrig | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
 | `algorithm` | Algo | EnumParameter&lt;Algo&gt; | MIDPOINT | 4 values | Midpoint / L-System / RRT / Physical |
 | `eSurfs` | ESurfs | DiscreteParameter | 2 | 0..5 | external surfaces per strike |
 | `iSurfs` | ISurfs | DiscreteParameter | 1 | 0..5 | internal surfaces per strike |
@@ -148,8 +147,9 @@ dropped them.)
 | `audFreq` | AudFreq | DiscreteParameter | 0 | 0..14 | which FFT bin-pair to watch |
 | `emaDur` | EMADur | DiscreteParameter | 3 | 0..16 | EMA/refractory window in beats |
 
-Series RndTrig pass (2026-07-06): `meta` → `rndTrig` (label Meta → RndTrig),
-moved up to 4th, immediately after the triggers.
+Series RndTrig pass (2026-07-06): `meta` → `rndTrig` (label Meta → RndTrig).
+Removed 2026-07-08: `rndTrig` (Sync/TempoDiv/Meta convention retired); saved
+`.lxp` references to the old path are dropped on load.
 
 ### `branch`/`jag` mapping per algorithm
 
@@ -168,20 +168,6 @@ moved up to 4th, immediately after the triggers.
   one frame, glow decays over FadeTime.
 - `storm` (large) — 3–5 bolts, free-run spacing 300–700 ms. Late storm bolts recycle
   the oldest active slot if all 16 are busy.
-- `rndTrig` — one random action from the bag (3 triggers + 6 jumps below).
-
-## Jump candidates
-
-Rows mirror the `bag.jumpable(...)` lines in the constructor 1:1.
-
-| Param | Jump range | Status | Notes |
-|---|---|---|---|
-| `algorithm` | all 4 values | candidate | discrete jump |
-| `thickness` | [1, 3] | candidate | full range |
-| `branch` | [0.1, 0.8] | candidate | CURATE: avoid 0 (bare) and 1 (thicket) |
-| `jag` | [0.15, 0.9] | candidate | CURATE: subrange unverified |
-| `eSurfs` | [1, 4] | candidate | CURATE: keeps exterior lively without full coverage |
-| `iSurfs` | [0, 3] | candidate | CURATE: interior density unverified |
 
 ## Simulation-principles compliance
 
@@ -215,3 +201,4 @@ is long.
 | 2026-07-05 | Review pass: MIDPOINT_START_SPREAD 0.9→0.1; empty-generation retire; added Audio depth knob, Sync/TempoDiv (TempoLock). | Series-wide Audio/Sync/TempoDiv + bug hunt |
 | 2026-07-06 | Major reconception: switched base to `ApotheneumPattern`; added cylinder int/ext surfaces and 10-surface per-strike routing via `ISurfs`/`ESurfs` (load-balanced, fewest-displayed first); cylinder strikes render a wrapped random half-ring. Replaced Sync/TempoDiv/Glow with `StrkTime`/`FadeTime` tempo-division durations (strikes fire immediately). New audio model: `Audio` = FFT floor, `AudFreq` = bin-pair, `EMADur` = EMA+blackout refractory (Audio=0 disables). Removed random/ambient strikes and Energy/Ambient/Thresh. Added `White` boolean with per-strike random palette color via doved post-tint. | User-directed reconception |
 | 2026-07-06 | Series RndTrig ordering: `meta` → `rndTrig` (label RndTrig), moved from last to 4th, immediately after the triggers; `.lxp` values on the old `meta` path are dropped on load | Series convention: TriggerBag meta trigger sits right after the other trigger params |
+| 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path): `rndTrig` param deleted with the TriggerBag + jump-candidate table; `TempoLock.divisionMs` inlined as `tempo.period / division.multiplier` — StrkTime/FadeTime durations behave identically | Jeff 2026-07-08: Sync/TempoDiv + Meta pattern-control convention retired project-wide |

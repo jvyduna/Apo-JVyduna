@@ -94,24 +94,12 @@ pulses and star twinkle over the depth-0 baseline.
 
 ## Tempo mapping
 
-**This song is beatless** (chrome-brief.md §1: grid mode `none`, "drive
-choreography from envelopes/sections, no 16th grid"). The `Sync`/`TempoDiv` pair is
-present for series-convention parity but is **intended OFF** for this song, and the
-default composition leaves it off. The pattern's native timing is fully
-free-running:
-
-- **Free-running (Sync off, the intended mode)**: pulses auto-emit on a timer whose
-  interval interpolates from `PULSE_INTERVAL_SPARSE_MS` (2000 ms at Pulses = 0) to
-  `PULSE_INTERVAL_DENSE_MS` (450 ms at Pulses = 1), shortened by audio level. Spin,
-  pulse travel and star drift are all continuous, energy-scaled rates.
-- **Sync on (optional)**: auto-pulse emission is instead gated to
-  `TempoLock.crossed(TempoDiv)` (default `HALF`), for the rare case someone wants
-  the finale pulses to land on a transport grid. `crossed()` is polled
-  unconditionally every frame (per the TempoLock javadoc) so toggling Sync never
-  fires a stale crossing.
-
-No `retime()` clamp overrides are used — nothing here schedules a single future
-event onto the grid; only discrete pulse emission is optionally grid-gated.
+No tempo gating — all timing free-runs (Sync/TempoDiv/Meta convention retired
+2026-07-08; free-run behavior = the old Sync-off path, which was always this
+beatless song's intended mode). Pulses auto-emit on a timer whose interval
+interpolates from `PULSE_INTERVAL_SPARSE_MS` (2000 ms at Pulses = 0) to
+`PULSE_INTERVAL_DENSE_MS` (450 ms at Pulses = 1), shortened by audio level. Spin,
+pulse travel and star drift are all continuous, energy-scaled rates.
 
 ## Energy mapping
 
@@ -128,8 +116,7 @@ for the arithmetic, including the `Climb` multiplier headroom.
 ## Parameters
 
 UI/registration order convention (do not deviate; keys/labels must never be
-renamed once saved in a `.lxp`): triggers (non-meta), Energy, pattern-specific,
-Audio, Sync, TempoDiv, Meta (always last).
+renamed once saved in a `.lxp`): triggers, Energy, pattern-specific, Audio.
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
@@ -147,17 +134,13 @@ Audio, Sync, TempoDiv, Meta (always last).
 | `cube` | Cube | BooleanParameter | false | — | also render the helix on the cube ring |
 | `hue` | Hue | CompoundParameter | 0 | 0..360 | rotate the palette-sampled colors (0 = pure palette) |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth (0 = pure screensaver) |
-| `sync` | Sync | BooleanParameter | true | — | grid-gate pulses (leave OFF — beatless song) |
-| `tempoDiv` | TempoDiv | EnumParameter | HALF | Tempo.Division | division pulses emit on when Sync is on |
-| `meta` | Meta | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
 
 CURATE: `Twist` default 3.0 turns, `Stars` 0.4, `Pulses` 0.5, `Thick` 1.5 — all
-first-guess screensaver values, tune on hardware. CURATE: `TempoDiv` default HALF
-is moot while Sync is off; picked blind.
+first-guess screensaver values, tune on hardware.
 
 ## Triggers
 
-Three non-meta triggers, small → large, plus Meta:
+Three triggers, small → large:
 
 - `pulse` (small) — one bright pulse leaves the base of each strand and rides up
   over ~5–9 s. A local highlight; reads immediately, resolves over the pulse life.
@@ -165,22 +148,6 @@ Three non-meta triggers, small → large, plus Meta:
   around the ring). A continuous, few-seconds-to-read change of motion.
 - `strike` (large) — a white lightning bolt regenerates and cracks to earth with a
   ~140 ms flash then a ~1.6 s glow decay. The full-field finale-ignition event.
-
-## Jump candidates
-
-Rows mirror the `bag.jumpable(...)` lines in the constructor 1:1. The three
-triggers are also registered in the bag.
-
-| Param | Jump range | Status | Notes |
-|---|---|---|---|
-| `twist` | [1, 6] | candidate | extremes excluded: <1 barely winds, >6 reads as vertical stripes at LED pitch |
-| `unstrand` | [0, 1] | candidate | full range safe (paired ↔ fully separated) |
-| `moire` | [0, 0.7] | candidate | upper reserved: full-strength XOR can strobe the strands to black |
-| `stars` | [0.1, 0.8] | candidate | floor keeps a few stars; ceiling avoids a solid red wash |
-| `climb` | [0.4, 1.3] | candidate | outer range reserved for manual performance use |
-| `pulses` | [0.2, 0.9] | candidate | avoids the fully-sparse and machine-gun extremes |
-
-Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [a,b]`.
 
 ## Simulation-principles compliance
 
@@ -216,3 +183,4 @@ Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [
 | Date | Change | Why |
 |---|---|---|
 | 2026-07-07 | Initial first-pass, Claude autonomous session — implemented cylinder-primary double-helix ascension (spin-based), riding pulses, unstranding vertical separation + tightening twist, XOR-scratch moire composite, counter-rotating parallax starfield, self-contained lightning-strike event, palette-driven deep-red colors with Satori change-cache; Sync/TempoDiv present but intended off (beatless song); compiles clean against the arrange API | Chrome 4:05 finale centerpiece per chrome-brief.md §6 pattern #3 + Jeff's storyboard |
+| 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path) | Project-wide retirement of the Sync/TempoDiv + Meta pattern-control convention. Pulse auto-emission now always uses the free-running timer — this beatless song's intended mode all along. |

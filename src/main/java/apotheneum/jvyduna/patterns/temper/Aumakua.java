@@ -5,67 +5,60 @@ import java.util.Random;
 
 import apotheneum.Apotheneum;
 import apotheneum.ApotheneumPattern;
-import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.Ranges;
 import apotheneum.jvyduna.util.SurfaceCanvas;
-import apotheneum.jvyduna.util.TempoLock;
-import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
-import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
 import heronarts.lx.color.LXDynamicColor;
-import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundParameter;
-import heronarts.lx.parameter.EnumParameter;
 import heronarts.lx.parameter.TriggerParameter;
 import heronarts.lx.utils.LXUtils;
 
 /**
  * A generative ochre CAVE-PAINTING of human figures that slowly rise up the
- * exterior surfaces, weaving continuous FAMILY TREES of humanity. Each figure
- * is a Lascaux/Chauvet stick-body form; as it climbs, its limbs DRIP downward
- * and seed new figures below, so lineage strands branch upward across the wall.
+ * exterior surfaces, weaving continuous FAMILY TREES of humanity. Figures are
+ * drawn in the Kolo/Kondoa rock-art style — elongated legs, high hips, short
+ * forward-leaning torsos, large oval heads, bent two-segment limbs. As a
+ * figure climbs it drips children below it, connected by faint
+ * genealogy-chart lines, so lineage strands branch upward across the wall.
  *
  * The opener of "Communicating" — the genesis (childbirth + ancestry;
- * "aumakua" = ancestral guardian spirits). The cube INTERIOR is a womb-dark,
- * softer/darker echo of the exterior; the figures and their ochre warmth live
- * on the exterior faces and the cylinder ring. The trombone envelope
- * (AudioReactive level/mid) warms the glow and quickens births; at the 2:32
- * G5 melodic peak the field blooms — a burst of raised-arm ("orant") figures
- * rising brightest.
+ * "aumakua" = ancestral guardian spirits). The cube INTERIOR is a dark,
+ * softer echo of the exterior (the Inner knob); the figures and their ochre
+ * warmth live on the exterior faces and the cylinder ring. Free-running and
+ * silent by design: no tempo gating, no audio reactivity — the recording is
+ * rubato and every Temper pattern stays super chill with no sudden jumps.
  *
  * Zero-alloc: two independent {@link Field}s (cube ring, cylinder) each own a
  * fixed pool of {@link Figure} objects, all preallocated in the constructor;
- * births reuse an inactive pool slot rather than allocating. Color is
- * palette-driven (project swatch, sampled per lineage generation, warmed toward
- * ochre) with a documented ochre fallback for an empty swatch.
+ * births reuse an inactive pool slot rather than allocating. Attached
+ * children derive their y from their living parent every frame, so the GenY
+ * generation-spacing knob reshapes every living tree instantly. Color is
+ * palette-driven (project swatch, sampled per lineage generation) and the
+ * Ochre knob converges ALL generations to one deep red-brown at 1.
  *
  * See Aumakua.md (beside this file) for the full design note.
  */
 @LXCategory("Apotheneum/jvyduna")
 @LXComponent.Name("Aumakua")
-@LXComponent.Description("Generative ochre cave-painting human figures rising in family trees up the exterior, dripping new figures below, blooming with the trombone; womb-dark interior")
+@LXComponent.Description("Generative ochre Kolo-style cave-painting figures rising in family trees up the exterior, dripping new figures below with genealogy-chart connectors; dark interior echo")
 public class Aumakua extends ApotheneumPattern {
 
   // ---- Timing / motion constants ---------------------------------------------
 
-  /** Rise speed endpoints in rows/sec, mapped from Energy. Ambient is patient
+  /** Rise speed endpoints in rows/sec, mapped from Speed. Ambient is patient
    *  (a figure crosses the ~45-row cube in ~30 s); peak still keeps the full
    *  traversal >= 5 s (45 / 6.43 = 7.0 s), well inside the simulation cap. */
   private static final double RISE_ROWS_PER_SEC_AMBIENT = 1.5;
-  private static final double RISE_ROWS_PER_SEC_PEAK = 6.43; // CURATE: 7.0s cube traversal at e=1
+  private static final double RISE_ROWS_PER_SEC_PEAK = 6.43; // CURATE: 7.0s cube traversal at speed=1
 
-  /** Root-spawn idle interval endpoints (ms), mapped from Energy (exp). The
-   *  slow ambient cadence is the point — roots are the rare new ancestors;
+  /** Root-spawn idle interval endpoints (ms), mapped from Density (exp). The
+   *  slow sparse cadence is the point — roots are the rare new ancestors;
    *  most figures arrive as drips from rising parents. */
-  private static final double ROOT_INTERVAL_MS_AMBIENT = 11000; // CURATE
-  private static final double ROOT_INTERVAL_MS_PEAK = 2200;     // CURATE
-
-  /** Trombone level shortens the root interval by up to this factor at level=1
-   *  (interval /= 1 + AUDIO_SPAWN * level) — swells birth new ancestors. */
-  private static final double AUDIO_SPAWN = 2.5; // CURATE
+  private static final double ROOT_INTERVAL_MS_SPARSE = 16000; // CURATE
+  private static final double ROOT_INTERVAL_MS_DENSE = 2500;   // CURATE
 
   /** A newborn figure fades IN over this long (its "birth"), so every figure
    *  has >= 1.5 s of visual life before it can be judged an event-flash. */
@@ -80,172 +73,175 @@ public class Aumakua extends ApotheneumPattern {
   private static final double SMEAR_HALF_LIFE_MIN_MS = 200;
   private static final double SMEAR_HALF_LIFE_MAX_MS = 6000;
 
-  /** Trombone level lifts figure glow above its resting brightness by up to
-   *  this fraction at level=1 (the ochre "warms" with the horn). */
-  private static final double AUDIO_GLOW = 0.6; // CURATE
+  /** Resting fraction of newborn roots taking the raised-arm (orant) pose. */
+  private static final double RAISE_BIAS = 0.15;
 
   /** Structural maxima — all pool state is preallocated at these sizes */
   private static final int MAX_FIGURES = 64;
   private static final int MAX_GEN = 5; // lineage depth colors cycle over
 
-  // ---- Cave-painting figure geometry (fractions of figure height) ------------
+  // ---- Kolo/Kondoa figure geometry (fractions of figure height) --------------
 
-  private static final double HIP_FRAC = 0.38;
-  private static final double SHOULDER_FRAC = 0.72;
-  private static final double LEG_SPREAD = 0.22;
-  private static final double ARM_SPREAD = 0.28;
-  /** Arm end Y offset from shoulder as a fraction of height: down-and-out vs
-   *  raised (orant) pose, lerped by the figure's armRaise. */
-  private static final double ARM_DOWN_DY = 0.28;
-  private static final double ARM_UP_DY = -0.42;
-  private static final double HEAD_RADIUS_FRAC = 0.09;
+  /** High hips — the legs dominate, the classic elongated Kondoa proportion. */
+  private static final double HIP_FRAC = 0.55;
+  /** Short torso: shoulders sit just below the head. */
+  private static final double SHOULDER_FRAC = 0.82;
+  /** Knee height for the two-segment scissored legs. */
+  private static final double KNEE_FRAC = 0.26;
+  /** Head is a large filled ellipse, slightly wider than tall. */
+  private static final double HEAD_RX_FRAC = 0.10;
+  private static final double HEAD_RY_FRAC = 0.08;
+  /** Leg x-spreads (fractions of the stride spread) for the scissored
+   *  walking stance — front leg reaches, back leg trails. */
+  private static final double FRONT_KNEE_DX = 0.10;
+  private static final double FRONT_FOOT_DX = 0.20;
+  private static final double BACK_KNEE_DX = 0.06;
+  private static final double BACK_FOOT_DX = 0.22;
+  /** Below this height (rows) limbs degrade to single segments — the Kondoa
+   *  silhouette survives on proportions (high hip, big head, lean) alone. */
+  private static final double TWO_SEGMENT_MIN_HEIGHT = 12;
+  /** At/above this height the torso gets a second offset stroke (thicker
+   *  painted body vs the 1px limbs). */
+  private static final double TORSO_DOUBLE_MIN_HEIGHT = 14;
 
   /** Figure height endpoints (rows), mapped from the Scale knob */
-  private static final double FIG_HEIGHT_MIN = 7;
-  private static final double FIG_HEIGHT_MAX = 15;
+  private static final double FIG_HEIGHT_MIN = 10;
+  private static final double FIG_HEIGHT_MAX = 26;
 
   /** A rising parent drips a child once it has climbed this many of its own
-   *  body-heights, if the Drip roll passes and lineage depth allows. */
+   *  body-heights, if the Fertl roll passes and lineage depth allows. */
   private static final double DRIP_RISE_BODIES = 1.1; // CURATE
 
-  /** Faint lineage-strand brightness (fraction of the child color) drawn from
-   *  parent foot down to child head at a drip birth; persists via decay. */
-  private static final double STRAND_LEVEL = 0.35; // CURATE
+  // ---- Generation spacing (GenY) ----------------------------------------------
+
+  /** Gap from a parent's feet to a child's head:
+   *  GAP_MIN + GenY·GAP_RANGE + GAP_H_FRAC·parentHeight (rows). Deterministic
+   *  per parent so siblings share one genealogy rank line. */
+  private static final double GAP_MIN = 2;       // CURATE
+  private static final double GAP_RANGE = 12;    // CURATE
+  private static final double GAP_H_FRAC = 0.25; // CURATE
+
+  /** Sibling y jitter half-range (rows) — siblings sit within ±this of the
+   *  shared rank line instead of the old full-height scatter. */
+  private static final double SIB_JITTER = 0.75;
+
+  /** Genealogy-chart connector brightness (fraction of the child color),
+   *  further scaled by the child's glow envelope. */
+  private static final double CONNECTOR_LEVEL = 0.30; // CURATE
+
+  // ---- Color -------------------------------------------------------------------
+
+  /** Deep ochre convergence target: at Ochre=1 EVERY generation pulls fully to
+   *  this deep, less-bright red-brown. */
+  private static final float OCHRE_TARGET_HUE = 22;    // CURATE
+  private static final float OCHRE_TARGET_SAT = 72;    // CURATE
+  private static final float OCHRE_TARGET_BRIGHT = 45; // CURATE
 
   /** Ochre fallback (empty swatch): hue drifts sienna-red with lineage depth */
   private static final float OCHRE_HUE = 32; // CURATE
   private static final float OCHRE_HUE_DEEP = 20; // CURATE
 
-  // ---- Composition helpers / parameters --------------------------------------
+  // ---- Parameters --------------------------------------------------------------
 
-  private final TriggerBag bag = new TriggerBag("Aumakua");
-  private final AudioReactive audio;
-  private final TempoLock tempoLock;
-
-  public final TriggerParameter seed = bag.register(
+  public final TriggerParameter seed =
     new TriggerParameter("Seed", this::seed)
-    .setDescription("Birth one new root ancestor at the base of both surfaces now"));
+    .setDescription("Birth one new root ancestor at the base of both surfaces now");
 
-  public final TriggerParameter bloom = bag.register(
+  public final TriggerParameter bloom =
     new TriggerParameter("Bloom", this::bloom)
-    .setDescription("Birth bloom: raise the arms of all figures and spawn a burst of raised-arm ancestors (the 2:32 climax)"));
+    .setDescription("Birth bloom: raise the arms of all figures and spawn a burst of raised-arm ancestors (the 2:32 climax)");
 
-  public final TriggerParameter drift = bag.register(
-    new TriggerParameter("Drift", this::drift)
-    .setDescription("Re-randomize every figure's gentle horizontal sway phase and direction"));
-
-  public final TriggerParameter genesis = bag.register(
+  public final TriggerParameter genesis =
     new TriggerParameter("Genesis", this::genesis)
-    .setDescription("Fade both fields to black and begin a fresh lineage (new genesis)"));
+    .setDescription("Fade both fields to black and begin a fresh lineage: a new figure's head immediately emerges from the bottom edge at a door-free column");
 
-  public final CompoundParameter energy =
-    new CompoundParameter("Energy", 0.3)
-    .setDescription("Master energy: rise speed and birth cadence (ambient <-> quicker); stays within the >=5s traversal cap");
+  public final CompoundParameter speed =
+    new CompoundParameter("Speed", 0.3)
+    .setDescription("Rise speed of the figures (patient <-> quicker); stays within the >=5s traversal cap");
 
   public final CompoundParameter density =
     new CompoundParameter("Density", 0.5)
-    .setDescription("How many figures live at once and how readily new ancestors are born");
+    .setDescription("How many figures live at once and how readily new root ancestors are born");
 
   public final CompoundParameter figScale =
     new CompoundParameter("Scale", 0.5)
     .setDescription("Height of the cave-painting figures");
 
-  public final CompoundParameter warmth =
-    new CompoundParameter("Warmth", 0.6)
-    .setDescription("Ochre warmth: pulls the palette color toward amber/sienna and lifts its glow");
+  public final CompoundParameter ochre =
+    new CompoundParameter("Ochre", 0.6)
+    .setDescription("Ochre convergence: 0 = palette colors per generation, 1 = every figure pulled fully to one deep red-brown");
 
-  public final CompoundParameter dripChance =
-    new CompoundParameter("Drip", 0.6)
+  public final CompoundParameter fertility =
+    new CompoundParameter("Fertl", 0.6)
     .setDescription("Lineage branching: how readily a rising figure drips a new child below it");
+
+  public final CompoundParameter genSpacing =
+    new CompoundParameter("GenY", 0.4)
+    .setDescription("Generational Y spacing of the family tree; re-spaces all living figures, not just new births");
 
   public final CompoundParameter sway =
     new CompoundParameter("Sway", 0.4)
-    .setDescription("Amplitude of each figure's gentle organic horizontal sway");
+    .setDescription("Amplitude of each figure's independent gentle horizontal sway");
 
   public final CompoundParameter smear =
     new CompoundParameter("Smear", 0.5)
     .setDescription("Feedback-smear trail length: 0 = crisp figures, 1 = gauzy gossamer rising loops");
 
-  public final CompoundParameter womb =
-    new CompoundParameter("Womb", 0.25)
-    .setDescription("Interior brightness: the dark-womb echo of the exterior (0 = black interior)");
+  public final CompoundParameter interiorLevel =
+    new CompoundParameter("Inner", 0.25)
+    .setDescription("Interior brightness: the dark echo of the exterior (0 = black interior)");
 
-  public final CompoundParameter audioDepth =
-    new CompoundParameter("Audio", 0)
-    .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full trombone-driven warmth and births");
-
-  public final BooleanParameter sync =
-    new BooleanParameter("Sync", true)
-    .setDescription("Hold each due birth to the next tempo-grid boundary; off = free-running rubato births");
-
-  public final EnumParameter<Tempo.Division> tempoDiv =
-    new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.WHOLE)
-    .setDescription("Slow tempo division that due births land on when Sync is enabled (WHOLE = one breathing bar)");
-
-  public final TriggerParameter meta =
-    new TriggerParameter("Meta", bag::fire)
-    .setDescription("Randomly fire one of Aumakua's triggers or jump a parameter");
+  public final CompoundParameter cylinderLevel =
+    new CompoundParameter("Cyl", 1.0)
+    .setDescription("Brightness of all cylinder figures (scales the whole cylinder field)");
 
   // ---- Palette color cache (Satori-style change detection) -------------------
 
   private final int[] genColor = new int[MAX_GEN + 1];
   private final int[] cachedSwatch = new int[16];
   private int cachedSwatchCount = -1;
-  private double cachedWarmth = Double.NaN;
+  private double cachedOchre = Double.NaN;
 
   // ---- Fields (surfaces) -----------------------------------------------------
 
   private final Field cubeField;
   private final Field cylinderField;
 
-  /** True on this frame if a birth may fire now (tempo gate crossed, or Sync
-   *  off). Computed once per frame, shared by both fields. */
-  private boolean birthGateOpen;
-
   public Aumakua(LX lx) {
     super(lx);
-    this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
-    this.tempoLock = new TempoLock(lx);
 
-    this.cubeField = new Field(Apotheneum.Cube.Ring.LENGTH, Apotheneum.GRID_HEIGHT, 0x5eed01);
-    this.cylinderField = new Field(Apotheneum.Cylinder.Ring.LENGTH, Apotheneum.CYLINDER_HEIGHT, 0x5eed02);
+    this.cubeField = new Field(
+      Apotheneum.Cube.Ring.LENGTH, Apotheneum.GRID_HEIGHT,
+      (Apotheneum.cube != null) ? Apotheneum.cube.exterior : null, 0x5eed01);
+    this.cylinderField = new Field(
+      Apotheneum.Cylinder.Ring.LENGTH, Apotheneum.CYLINDER_HEIGHT,
+      (Apotheneum.cylinder != null) ? Apotheneum.cylinder.exterior : null, 0x5eed02);
 
     addParameter("seed", this.seed);
     addParameter("bloom", this.bloom);
-    addParameter("drift", this.drift);
     addParameter("genesis", this.genesis);
-    addParameter("energy", this.energy);
+    addParameter("speed", this.speed);
     addParameter("density", this.density);
     addParameter("figScale", this.figScale);
-    addParameter("warmth", this.warmth);
-    addParameter("dripChance", this.dripChance);
+    addParameter("ochre", this.ochre);
+    addParameter("fertility", this.fertility);
+    addParameter("genY", this.genSpacing);
     addParameter("sway", this.sway);
     addParameter("smear", this.smear);
-    addParameter("womb", this.womb);
-    addParameter("audio", this.audioDepth);
-    addParameter("sync", this.sync);
-    addParameter("tempoDiv", this.tempoDiv);
-    addParameter("meta", this.meta);
-
-    // Meta jump candidates — mirrored 1:1 in the Jump candidates table in Aumakua.md
-    bag.jumpable(this.density, 0.25, 0.9);
-    bag.jumpable(this.figScale, 0.2, 0.9);
-    bag.jumpable(this.warmth, 0.3, 1.0);
-    bag.jumpable(this.dripChance, 0.3, 1.0);
-    bag.jumpable(this.sway, 0.0, 0.8);
-    bag.jumpable(this.smear, 0.2, 0.9);
+    addParameter("interior", this.interiorLevel);
+    addParameter("cylinder", this.cylinderLevel);
 
     // Seed a couple of ancestors so the field is never empty at load
-    this.cubeField.spawnRoot(false, 1.0);
-    this.cubeField.spawnRoot(false, 1.0);
-    this.cylinderField.spawnRoot(false, 1.0);
+    this.cubeField.spawnRoot(false, false);
+    this.cubeField.spawnRoot(false, false);
+    this.cylinderField.spawnRoot(false, false);
   }
 
   // ---- Trigger handlers ------------------------------------------------------
 
   private void seed() {
-    this.cubeField.spawnRoot(false, 1.0);
-    this.cylinderField.spawnRoot(false, 1.0);
+    this.cubeField.spawnRoot(false, false);
+    this.cylinderField.spawnRoot(false, false);
   }
 
   /** The birth bloom: raise arms across the living lineage and add a burst of
@@ -255,12 +251,8 @@ public class Aumakua extends ApotheneumPattern {
     this.cylinderField.bloom();
   }
 
-  private void drift() {
-    this.cubeField.reseed();
-    this.cylinderField.reseed();
-  }
-
-  /** Fade to black and clear the lineage — a fresh genesis. */
+  /** Fade to black, clear the lineage, and immediately begin anew: one
+   *  figure's head emerges from the bottom edge at a door-free column. */
   private void genesis() {
     this.cubeField.genesis();
     this.cylinderField.genesis();
@@ -270,65 +262,47 @@ public class Aumakua extends ApotheneumPattern {
 
   @Override
   protected void render(double deltaMs) {
-    this.audio.tick(deltaMs);
     setColors(LXColor.BLACK);
-
-    // Birth gate: poll the tempo crossing EXACTLY ONCE per frame (crossed()
-    // consumes the crossing; both fields must share this boolean). Rubato
-    // songs use a slow division, so this only nudges births onto a breathing
-    // bar line — never a foot-tappable click. Sync off = always open.
-    final boolean crossed = this.tempoLock.crossed(this.tempoDiv.getEnum());
-    this.birthGateOpen = !this.sync.isOn() || crossed;
-
     refreshColors();
 
-    // The trombone envelope: level (overall) blended with mid (the horn's
-    // voice sits in the mid bands). Depth-gated inside AudioReactive, so this
-    // is exactly 0 at silence / Audio=0 (pure screensaver).
-    final double trom = 0.6 * this.audio.level + 0.4 * this.audio.mid;
+    final double riseRowsPerSec =
+      Ranges.lin(this.speed.getValue(), RISE_ROWS_PER_SEC_AMBIENT, RISE_ROWS_PER_SEC_PEAK);
+    final double rootIntervalMs =
+      Ranges.exp(this.density.getValue(), ROOT_INTERVAL_MS_SPARSE, ROOT_INTERVAL_MS_DENSE);
 
-    final double e = this.energy.getValue();
-    final double riseRowsPerSec = Ranges.lin(e, RISE_ROWS_PER_SEC_AMBIENT, RISE_ROWS_PER_SEC_PEAK);
-    double rootIntervalMs = Ranges.exp(e, ROOT_INTERVAL_MS_AMBIENT, ROOT_INTERVAL_MS_PEAK);
-    rootIntervalMs /= (1 + AUDIO_SPAWN * trom);
-    rootIntervalMs *= LXUtils.lerp(1.8, 0.5, this.density.getValue()); // dense = faster ancestors
-
-    // Warmth-lifted glow: resting brightness plus the trombone envelope
-    final double glowMult = 1 + AUDIO_GLOW * trom;
-
-    double halfLifeMs = Ranges.exp(this.smear.getValue(), SMEAR_HALF_LIFE_MIN_MS, SMEAR_HALF_LIFE_MAX_MS);
+    final double halfLifeMs = Ranges.exp(this.smear.getValue(), SMEAR_HALF_LIFE_MIN_MS, SMEAR_HALF_LIFE_MAX_MS);
     final double decayMult = Math.pow(0.5, deltaMs / halfLifeMs);
 
-    // Trombone swell also biases newborns toward the raised (orant) pose
-    final double raiseBias = LXUtils.constrain(0.15 + trom, 0, 1);
+    this.cubeField.render(deltaMs, riseRowsPerSec, rootIntervalMs, decayMult);
+    this.cylinderField.render(deltaMs, riseRowsPerSec, rootIntervalMs, decayMult);
 
-    this.cubeField.render(deltaMs, riseRowsPerSec, rootIntervalMs, decayMult, glowMult, raiseBias);
-    this.cylinderField.render(deltaMs, riseRowsPerSec, rootIntervalMs, decayMult, glowMult, raiseBias);
-
-    // Exterior at full brightness; interior a dimmed, softer womb echo.
-    final double wombMult = this.womb.getValue();
+    // Exterior at full brightness (cylinder scaled by Cyl); interior a
+    // dimmed, softer echo via Inner.
+    final double innerMult = this.interiorLevel.getValue();
+    final double cylMult = this.cylinderLevel.getValue();
     this.cubeField.canvas.copyTo(Apotheneum.cube.exterior, this.colors);
-    this.cylinderField.canvas.copyTo(Apotheneum.cylinder.exterior, this.colors);
+    this.cylinderField.canvas.copyTo(Apotheneum.cylinder.exterior, this.colors, cylMult, false);
     if (Apotheneum.cube.interior != null) {
-      this.cubeField.canvas.copyTo(Apotheneum.cube.interior, this.colors, wombMult, false);
+      this.cubeField.canvas.copyTo(Apotheneum.cube.interior, this.colors, innerMult, false);
     }
     if (Apotheneum.cylinder.interior != null) {
-      this.cylinderField.canvas.copyTo(Apotheneum.cylinder.interior, this.colors, wombMult, false);
+      this.cylinderField.canvas.copyTo(Apotheneum.cylinder.interior, this.colors, innerMult * cylMult, false);
     }
   }
 
   // ---- Palette-driven ochre colors -------------------------------------------
 
-  /** Rebuild the per-generation lineage colors only when the swatch or Warmth
+  /** Rebuild the per-generation lineage colors only when the swatch or Ochre
    *  actually changed (Satori cache idiom). Colors come from the project
-   *  palette, warmed toward ochre; an empty swatch falls back to an ochre
-   *  ramp so the pattern is never colorless. */
+   *  palette; the Ochre knob converges them all to one deep red-brown at 1.
+   *  An empty swatch falls back to an ochre ramp so the pattern is never
+   *  colorless. */
   private void refreshColors() {
     final List<LXDynamicColor> swatch = this.lx.engine.palette.swatch.colors;
     final int n = Math.min(swatch.size(), this.cachedSwatch.length);
-    final double w = this.warmth.getValue();
+    final double w = this.ochre.getValue();
 
-    boolean changed = (n != this.cachedSwatchCount) || (w != this.cachedWarmth);
+    boolean changed = (n != this.cachedSwatchCount) || (w != this.cachedOchre);
     for (int i = 0; i < n && !changed; ++i) {
       if (this.cachedSwatch[i] != swatch.get(i).getColor()) {
         changed = true;
@@ -338,7 +312,7 @@ public class Aumakua extends ApotheneumPattern {
       return;
     }
     this.cachedSwatchCount = n;
-    this.cachedWarmth = w;
+    this.cachedOchre = w;
     for (int i = 0; i < n; ++i) {
       this.cachedSwatch[i] = swatch.get(i).getColor();
     }
@@ -347,7 +321,7 @@ public class Aumakua extends ApotheneumPattern {
       final int base = (n > 0)
         ? this.cachedSwatch[g % n]
         : ochreFallback(g);
-      this.genColor[g] = warmColor(base, w, g);
+      this.genColor[g] = ochreColor(base, w, g);
     }
   }
 
@@ -359,18 +333,23 @@ public class Aumakua extends ApotheneumPattern {
     return LXColor.hsb(hue, 62, bright);
   }
 
-  /** Warm a base color toward ochre by the Warmth knob and dim slightly with
-   *  lineage depth so older generations recede. */
-  private int warmColor(int base, double w, int gen) {
-    final float h = LXColor.h(base);
-    final float s = LXColor.s(base);
-    final float b = LXColor.b(base);
-    final float target = LXUtils.lerpf(OCHRE_HUE, OCHRE_HUE_DEEP, gen / (float) MAX_GEN);
-    final float hue = hueLerp(h, target, (float) (0.5 * w));
-    final float sat = LXUtils.constrainf(s + (float) (18 * w), 0, 100);
+  /** Converge a base color toward the deep ochre target by the Ochre knob.
+   *  At w=0: the palette color, dimmed slightly with lineage depth so older
+   *  generations recede. At w=1: exactly the OCHRE_TARGET for every
+   *  generation — one deep, less-bright red-brown across the whole family
+   *  tree. */
+  private int ochreColor(int base, double w, int gen) {
     final float depth = LXUtils.lerpf(1f, 0.72f, gen / (float) MAX_GEN);
-    final float bright = LXUtils.constrainf(b * depth + (float) (10 * w), 0, 100);
-    return LXColor.hsb(hue, sat, bright);
+    final float baseHue = LXColor.h(base);
+    final float baseSat = LXColor.s(base);
+    final float baseBright = LXColor.b(base) * depth;
+    final float t = (float) w;
+    final float hue = hueLerp(baseHue, OCHRE_TARGET_HUE, t);
+    final float sat = LXUtils.lerpf(baseSat, OCHRE_TARGET_SAT, t);
+    final float bright = LXUtils.lerpf(baseBright, OCHRE_TARGET_BRIGHT, t);
+    return LXColor.hsb(hue,
+      LXUtils.constrainf(sat, 0, 100),
+      LXUtils.constrainf(bright, 0, 100));
   }
 
   /** Shortest-path hue lerp on the 0..360 wheel */
@@ -392,22 +371,33 @@ public class Aumakua extends ApotheneumPattern {
 
   // ---- Figure ----------------------------------------------------------------
 
-  /** One cave-painting human. Pooled and reused; never allocated in render. */
+  /** One Kolo-style cave-painting human. Pooled and reused; never allocated
+   *  in render. */
   private static final class Figure {
     boolean active;
     double x;          // column (wraps in [0, width))
     double y;          // feet row; top = 0, so rising means y decreases
     double height;     // rows
-    double armRaise;   // 0 = arms down/out, 1 = raised (orant) pose
+    double armRaise;   // 0 = arms down-forward, 1 = raised (orant) pose
     int gen;           // lineage depth (colors by min(gen, MAX_GEN))
     double glow;       // 0..1 birth-in / fade-out envelope
     double ageMs;
     double swayPhase;
     double swayRate;   // rad/ms
     double legJitter;  // per-figure leg spread jitter
-    double birthY;     // feet row at birth, for measuring rise since last drip
     double lastDripY;  // feet row at the last drip
     int children;
+    // Family-tree attachment: while the parent lives, y is DERIVED from it
+    // every frame (so GenY re-spaces living trees). -1 = root or detached.
+    int parentSlot;
+    int parentBirthId; // parent's birthId at link time (pool-reuse guard)
+    int birthId;       // monotonic per-Field stamp, set at every spawn
+    double sibJitter;  // tiny y offset off the shared sibling rank line
+    // Kolo pose
+    double lean;       // forward pitch (fraction of h at head height)
+    int dir;           // facing, ±1
+    double stride;     // leg scissor amount
+    double armAsym;    // hand-drawn arm asymmetry (fraction of h)
   }
 
   // ---- Field (one surface's generative system) -------------------------------
@@ -415,14 +405,17 @@ public class Aumakua extends ApotheneumPattern {
   private final class Field {
     private final SurfaceCanvas canvas;
     private final int W, H;
+    private final Apotheneum.Orientation orientation; // door lookup; may be null
     private final Figure[] pool = new Figure[MAX_FIGURES];
     private final Random rng;
     private double sinceRootMs;
+    private int birthCounter;
 
-    private Field(int width, int height, long seed) {
+    private Field(int width, int height, Apotheneum.Orientation orientation, long seed) {
       this.canvas = new SurfaceCanvas(width, height);
       this.W = width;
       this.H = height;
+      this.orientation = orientation;
       this.rng = new Random(seed);
       for (int i = 0; i < MAX_FIGURES; ++i) {
         this.pool[i] = new Figure();
@@ -449,8 +442,56 @@ public class Aumakua extends ApotheneumPattern {
       return c;
     }
 
-    /** Birth a root ancestor at the base of the wall. */
-    private void spawnRoot(boolean raised, double glowScale) {
+    /** Gap from a parent's feet row down to a child's head row. Deterministic
+     *  per parent — siblings share one genealogy rank line. */
+    private double gapBase(Figure parent) {
+      return GAP_MIN + genSpacing.getValue() * GAP_RANGE + GAP_H_FRAC * parent.height;
+    }
+
+    /** The figure's drawn x this frame: base x plus its own independent sway. */
+    private double drawX(Figure f) {
+      return f.x + sway.getValue() * f.height * 0.35
+        * Math.sin(f.swayPhase + f.ageMs * f.swayRate);
+    }
+
+    /** Randomize the per-figure sway and Kolo pose fields at any spawn. */
+    private void randomizePose(Figure f) {
+      f.swayPhase = this.rng.nextDouble() * Math.PI * 2;
+      f.swayRate = (0.4 + this.rng.nextDouble() * 0.6) * 0.001; // slow
+      f.legJitter = 0.75 + this.rng.nextDouble() * 0.5;
+      f.dir = this.rng.nextBoolean() ? 1 : -1;
+      f.lean = -0.05 + this.rng.nextDouble() * 0.19; // [-0.05, 0.14], biased forward
+      f.stride = 0.35 + this.rng.nextDouble() * 0.65;
+      f.armAsym = (this.rng.nextDouble() - 0.5) * 0.06;
+    }
+
+    /** Pick a spawn column whose surroundings are clear of door openings, so
+     *  an emerging figure isn't swallowed by a portal. Bounded rng retries;
+     *  falls back to the last try if the surface is too tight (never spins). */
+    private int pickDoorFreeColumn(double height) {
+      int x = this.rng.nextInt(this.W);
+      if (this.orientation == null) {
+        return x;
+      }
+      final int m = (int) Math.ceil(0.25 * height);
+      for (int attempt = 0; attempt < 16; ++attempt) {
+        x = this.rng.nextInt(this.W);
+        boolean clear = true;
+        for (int d = -m; d <= m && clear; ++d) {
+          final int col = Math.floorMod(x + d, this.W);
+          clear = (this.orientation.available(col) >= this.H);
+        }
+        if (clear) {
+          return x;
+        }
+      }
+      return x;
+    }
+
+    /** Birth a root ancestor at the base of the wall. When emerging, only the
+     *  head crests the bottom edge (at a door-free column) and the body
+     *  reveals as it rises — the Genesis entrance. */
+    private void spawnRoot(boolean raised, boolean emerging) {
       final int slot = freeSlot();
       if (slot < 0) {
         return;
@@ -458,58 +499,61 @@ public class Aumakua extends ApotheneumPattern {
       final Figure f = this.pool[slot];
       final double h = figureHeight();
       f.active = true;
-      f.x = this.rng.nextInt(this.W);
-      f.y = this.H - 1 - this.rng.nextInt(3); // feet near the bottom
       f.height = h;
-      f.armRaise = raised ? 1.0 : (this.rng.nextDouble() < 0.15 ? 1.0 : 0.0);
+      if (emerging) {
+        f.x = pickDoorFreeColumn(h);
+        f.y = this.H - 1 + h; // feet below the wall; only the head shows
+      } else {
+        f.x = this.rng.nextInt(this.W);
+        f.y = this.H - 1 - this.rng.nextInt(3); // feet near the bottom
+      }
+      f.armRaise = raised ? 1.0 : (this.rng.nextDouble() < RAISE_BIAS ? 1.0 : 0.0);
       f.gen = 0;
-      f.glow = 0; // birth-in envelope handles the fade-up; glowScale caps it
+      f.glow = 0; // birth-in envelope handles the fade-up
       f.ageMs = 0;
-      f.swayPhase = this.rng.nextDouble() * Math.PI * 2;
-      f.swayRate = (0.4 + this.rng.nextDouble() * 0.6) * 0.001; // slow
-      f.legJitter = 0.75 + this.rng.nextDouble() * 0.5;
-      f.birthY = f.y;
       f.lastDripY = f.y;
       f.children = 0;
+      f.parentSlot = -1;
+      f.parentBirthId = 0;
+      f.birthId = ++this.birthCounter;
+      f.sibJitter = 0;
+      randomizePose(f);
     }
 
-    /** Drip a child below a rising parent — the lineage branch. */
-    private void spawnChild(Figure parent) {
+    /** Drip a child below a rising parent — the lineage branch. Returns false
+     *  (without consuming the drip) if the child's head would start below the
+     *  wall; the parent then retries on later frames as it climbs. */
+    private boolean spawnChild(Figure parent, int parentSlot) {
       final int slot = freeSlot();
       if (slot < 0) {
-        return;
+        return false;
       }
       final Figure c = this.pool[slot];
       final double h = figureHeight() * (0.8 + this.rng.nextDouble() * 0.3);
+      final double sibJitter = (this.rng.nextDouble() - 0.5) * 2 * SIB_JITTER;
+      final double headY = parent.y + gapBase(parent) + sibJitter;
+      if (headY > this.H - 1) {
+        return false; // no room below yet; retry as the parent rises
+      }
       c.active = true;
       final double dx = (this.rng.nextBoolean() ? 1 : -1)
         * (parent.height * (0.4 + this.rng.nextDouble() * 0.6));
       c.x = Math.floorMod((int) Math.round(parent.x + dx), this.W);
-      // Child head hangs just below the parent's feet
-      c.y = parent.y + h + parent.height * 0.25;
-      if (c.y >= this.H + h) {
-        c.active = false; // dripped off the bottom; drop it
-        return;
-      }
+      c.y = headY + h;
       c.height = h;
       c.armRaise = (this.rng.nextDouble() < 0.2) ? 1.0 : 0.0;
       c.gen = parent.gen + 1;
       c.glow = 0;
       c.ageMs = 0;
-      c.swayPhase = this.rng.nextDouble() * Math.PI * 2;
-      c.swayRate = (0.4 + this.rng.nextDouble() * 0.6) * 0.001;
-      c.legJitter = 0.75 + this.rng.nextDouble() * 0.5;
-      c.birthY = c.y;
       c.lastDripY = c.y;
       c.children = 0;
+      c.parentSlot = parentSlot;
+      c.parentBirthId = parent.birthId;
+      c.birthId = ++this.birthCounter;
+      c.sibJitter = sibJitter;
+      randomizePose(c);
       parent.children++;
-
-      // Lineage strand: faint descending line from parent feet to child head,
-      // drawn once, left to decay as a fading branch of the family tree.
-      final int strand = LXColor.scaleBrightness(this.genColor(c.gen), (float) STRAND_LEVEL);
-      this.canvas.lineMax(
-        (int) Math.round(parent.x), (int) Math.round(parent.y),
-        (int) Math.round(c.x), (int) Math.round(c.y - c.height), strand);
+      return true;
     }
 
     private int genColor(int gen) {
@@ -529,50 +573,69 @@ public class Aumakua extends ApotheneumPattern {
       }
       final int burst = 3 + (int) Math.round(3 * density.getValue());
       for (int i = 0; i < burst; ++i) {
-        spawnRoot(true, 1.0);
+        spawnRoot(true, false);
       }
     }
 
-    private void reseed() {
-      for (int i = 0; i < MAX_FIGURES; ++i) {
-        final Figure f = this.pool[i];
-        if (f.active) {
-          f.swayPhase = this.rng.nextDouble() * Math.PI * 2;
-          f.swayRate = (0.4 + this.rng.nextDouble() * 0.6) * 0.001;
-        }
-      }
-    }
-
+    /** Clear everything, then immediately begin the new lineage: a fresh
+     *  ancestor's head emerges from the bottom edge at a door-free column. */
     private void genesis() {
       for (int i = 0; i < MAX_FIGURES; ++i) {
         this.pool[i].active = false;
       }
       this.canvas.fill(LXColor.BLACK);
       this.sinceRootMs = 0;
+      spawnRoot(false, true);
     }
 
     private void render(double deltaMs, double riseRowsPerSec, double rootIntervalMs,
-                        double decayMult, double glowMult, double raiseBias) {
+                        double decayMult) {
       this.canvas.decay(decayMult);
 
-      // Root births on the idle timer, gated to the tempo grid this frame.
+      // (1) Root births on the idle timer (Density-driven cadence).
       this.sinceRootMs += deltaMs;
       final int cap = 6 + (int) Math.round((MAX_FIGURES - 8) * density.getValue());
-      if ((this.sinceRootMs >= rootIntervalMs) && birthGateOpen && (liveCount() < cap)) {
-        spawnRoot(this.rng.nextDouble() < raiseBias, 1.0);
+      if ((this.sinceRootMs >= rootIntervalMs) && (liveCount() < cap)) {
+        spawnRoot(this.rng.nextDouble() < RAISE_BIAS, false);
         this.sinceRootMs = 0;
       }
 
-      final double dripThreshold = dripChance.getValue();
       final double riseRows = riseRowsPerSec * deltaMs * 0.001;
 
+      // (2) Integrate y for roots and detached figures only.
+      for (int i = 0; i < MAX_FIGURES; ++i) {
+        final Figure f = this.pool[i];
+        if (f.active && (f.parentSlot < 0)) {
+          f.y -= riseRows;
+        }
+      }
+
+      // (3) Attachment-resolve, generation by generation: an attached child's
+      // y is DERIVED from its living parent, so GenY re-spaces living trees
+      // instantly. Parents (gen g-1) are always resolved before children (g).
+      for (int g = 1; g <= MAX_GEN; ++g) {
+        for (int i = 0; i < MAX_FIGURES; ++i) {
+          final Figure c = this.pool[i];
+          if (!c.active || (c.gen != g) || (c.parentSlot < 0)) {
+            continue;
+          }
+          final Figure p = this.pool[c.parentSlot];
+          if (!p.active || (p.birthId != c.parentBirthId)) {
+            c.parentSlot = -1; // orphan-safe: detach, keep last derived y
+            continue;
+          }
+          c.y = p.y + gapBase(p) + c.height + c.sibJitter;
+        }
+      }
+
+      // (4) Lifecycle: envelopes, retirement, drips.
+      final double fertl = fertility.getValue();
       for (int i = 0; i < MAX_FIGURES; ++i) {
         final Figure f = this.pool[i];
         if (!f.active) {
           continue;
         }
         f.ageMs += deltaMs;
-        f.y -= riseRows;
 
         // Birth-in envelope, then fade out as the figure nears the top.
         double env = LXUtils.constrain(f.ageMs / BIRTH_IN_MS, 0, 1);
@@ -581,73 +644,157 @@ public class Aumakua extends ApotheneumPattern {
         }
         f.glow = env;
 
-        // Retire once fully risen off the top.
+        // Retire once fully risen off the top; detach my children in place
+        // (their last derived y is continuous; they self-integrate after).
         if (f.y + f.height < 0) {
+          for (int j = 0; j < MAX_FIGURES; ++j) {
+            final Figure c = this.pool[j];
+            if (c.active && (c.parentSlot == i) && (c.parentBirthId == f.birthId)) {
+              c.parentSlot = -1;
+            }
+          }
           f.active = false;
           continue;
         }
 
-        // Drip a child once the figure has climbed ~DRIP_RISE_BODIES of its own
-        // height since its last drip (lineage branching), tempo-gated too.
+        // Drip a child once the figure has climbed ~DRIP_RISE_BODIES of its
+        // own height since its last drip (lineage branching). A drip blocked
+        // by the bottom edge does NOT consume lastDripY — it retries as the
+        // parent rises, so deep generations unroll from the bottom.
         final double climbed = f.lastDripY - f.y;
         if ((climbed >= DRIP_RISE_BODIES * f.height)
             && (f.gen < MAX_GEN)
             && (f.children < 2)
             && (f.glow > 0.4)
-            && birthGateOpen
-            && (this.rng.nextDouble() < dripThreshold)) {
-          spawnChild(f);
-          f.lastDripY = f.y;
+            && (this.rng.nextDouble() < fertl)) {
+          if (spawnChild(f, i)) {
+            f.lastDripY = f.y;
+          }
         }
+      }
 
-        drawFigure(f, glowMult);
+      // (5) Draw: genealogy connectors first, figures over them.
+      for (int i = 0; i < MAX_FIGURES; ++i) {
+        final Figure f = this.pool[i];
+        if (f.active && (f.parentSlot >= 0)) {
+          drawConnector(f);
+        }
+      }
+      for (int i = 0; i < MAX_FIGURES; ++i) {
+        final Figure f = this.pool[i];
+        if (f.active) {
+          drawFigure(f);
+        }
       }
     }
 
-    /** Draw one cave-painting figure with MAX blending (limbs and lineage
-     *  union, never erase) at its glow, warmth-lifted by glowMult. */
-    private void drawFigure(Figure f, double glowMult) {
-      final double glow = LXUtils.constrain(f.glow * glowMult, 0, 1.5);
+    /** Genealogy-chart connector, drawn every frame between a living parent
+     *  and an attached child: a right-angle T — vertical stub down from the
+     *  parent's feet to the shared sibling rail, horizontal rail the short
+     *  way around the ring, vertical drop to the child's head. Fades with the
+     *  child's glow; when the pair detaches it simply stops being drawn and
+     *  the smear decay fades the residue. */
+    private void drawConnector(Figure c) {
+      final Figure p = this.pool[c.parentSlot]; // validated in pass (3)
+      final double level = CONNECTOR_LEVEL * c.glow;
+      if (level <= 0.01) {
+        return;
+      }
+      final int conn = LXColor.scaleBrightness(genColor(c.gen), (float) level);
+      final int px = (int) Math.round(drawX(p));
+      final int cx = (int) Math.round(drawX(c));
+      final int railY = (int) Math.round(p.y + 0.5 * gapBase(p));
+      final int parentFeetY = (int) Math.round(p.y);
+      final int childHeadY = (int) Math.round(c.y - c.height);
+      // Short way around the ring; |dx| <= W/2 satisfies the wrap contract.
+      final int dx = Math.floorMod(cx - px + this.W / 2, this.W) - this.W / 2;
+      this.canvas.lineMax(px, parentFeetY, px, railY, conn);
+      this.canvas.lineMax(px, railY, px + dx, railY, conn);
+      this.canvas.lineMax(px + dx, railY, px + dx, childHeadY, conn);
+    }
+
+    /** Draw one Kolo/Kondoa-style figure with MAX blending (strokes union,
+     *  never erase) at its glow: elongated legs from high hips, short
+     *  forward-leaning torso, large oval head, bent two-segment limbs with a
+     *  scissored walking stride. Small figures degrade to single-segment
+     *  limbs but keep the proportions. */
+    private void drawFigure(Figure f) {
+      final double glow = LXUtils.constrain(f.glow, 0, 1);
       if (glow <= 0.01) {
         return;
       }
-      final int argb = LXColor.scaleBrightness(genColor(f.gen), (float) Math.min(1.0, glow));
+      final int argb = LXColor.scaleBrightness(genColor(f.gen), (float) glow);
 
-      final double swayX = sway.getValue() * f.height * 0.35
-        * Math.sin(f.swayPhase + f.ageMs * f.swayRate);
-      final double cx = f.x + swayX;
-      final double feetY = f.y;
       final double h = f.height;
+      final double cx = drawX(f);
+      final double feetY = f.y;
+      final double lean = f.lean * f.dir; // forward pitch, signed by facing
+
+      // Joint x at height-fraction q leans forward proportionally to q.
       final double hipY = feetY - HIP_FRAC * h;
+      final double hipX = cx + lean * HIP_FRAC * h;
       final double shoulderY = feetY - SHOULDER_FRAC * h;
-      final double headY = feetY - h;
-      final int headR = Math.max(1, (int) Math.round(HEAD_RADIUS_FRAC * h));
+      final double shoulderX = cx + lean * SHOULDER_FRAC * h;
+      final int headRx = Math.max(1, (int) Math.round(HEAD_RX_FRAC * h));
+      final int headRy = Math.max(1, (int) Math.round(HEAD_RY_FRAC * h));
+      final double headCy = feetY - h + headRy;
+      final double headCx = cx + lean * (h - headRy);
 
-      final int xc = (int) Math.round(cx);
-      final int legX = (int) Math.round(LEG_SPREAD * h * f.legJitter);
-      final int armX = (int) Math.round(ARM_SPREAD * h);
-      final double armDy = LXUtils.lerp(ARM_DOWN_DY, ARM_UP_DY, f.armRaise) * h;
-      final int armEndY = (int) Math.round(shoulderY + armDy);
+      final boolean twoSegment = h >= TWO_SEGMENT_MIN_HEIGHT;
 
-      // Torso + neck
-      this.canvas.lineMax(xc, (int) Math.round(hipY), xc, (int) Math.round(shoulderY), argb);
-      this.canvas.lineMax(xc, (int) Math.round(shoulderY), xc, (int) Math.round(headY + headR), argb);
-      // Head disc
-      stampDisc(xc, (int) Math.round(headY), headR, argb);
-      // Legs
-      this.canvas.lineMax(xc, (int) Math.round(hipY), xc - legX, (int) Math.round(feetY), argb);
-      this.canvas.lineMax(xc, (int) Math.round(hipY), xc + legX, (int) Math.round(feetY), argb);
-      // Arms
-      this.canvas.lineMax(xc, (int) Math.round(shoulderY), xc - armX, armEndY, argb);
-      this.canvas.lineMax(xc, (int) Math.round(shoulderY), xc + armX, armEndY, argb);
+      // Torso (double-stroked when big enough: painted body, thicker than limbs)
+      this.canvas.lineWu(hipX, hipY, shoulderX, shoulderY, argb, true);
+      if (h >= TORSO_DOUBLE_MIN_HEIGHT) {
+        this.canvas.lineWu(hipX + 0.7, hipY, shoulderX + 0.7, shoulderY, argb, true);
+      }
+      // Neck up to the bottom of the head, then the big oval head
+      this.canvas.lineWu(shoulderX, shoulderY, headCx, headCy + headRy, argb, true);
+      stampEllipse(headCx, headCy, headRx, headRy, argb);
+
+      // Legs — scissored walking stride from the high hip
+      final double kneeY = feetY - KNEE_FRAC * h;
+      final double spread = f.stride * f.legJitter * h;
+      final double frontFootX = hipX + f.dir * FRONT_FOOT_DX * spread;
+      final double backFootX = hipX - f.dir * BACK_FOOT_DX * spread;
+      if (twoSegment) {
+        final double frontKneeX = hipX + f.dir * FRONT_KNEE_DX * spread;
+        final double backKneeX = hipX - f.dir * BACK_KNEE_DX * spread;
+        this.canvas.lineWu(hipX, hipY, frontKneeX, kneeY, argb, true);
+        this.canvas.lineWu(frontKneeX, kneeY, frontFootX, feetY, argb, true);
+        this.canvas.lineWu(hipX, hipY, backKneeX, kneeY, argb, true);
+        this.canvas.lineWu(backKneeX, kneeY, backFootX, feetY, argb, true);
+      } else {
+        this.canvas.lineWu(hipX, hipY, frontFootX, feetY, argb, true);
+        this.canvas.lineWu(hipX, hipY, backFootX, feetY, argb, true);
+      }
+
+      // Arms — two segments lerped between down-forward and raised (orant)
+      final double r = f.armRaise;
+      for (int s = -1; s <= 1; s += 2) {
+        final double asym = (s > 0) ? f.armAsym * h : 0;
+        final double elbowX = shoulderX + s * LXUtils.lerp(0.09, 0.15, r) * h + asym;
+        final double elbowY = shoulderY + LXUtils.lerp(0.12, -0.05, r) * h;
+        final double handX = shoulderX + s * LXUtils.lerp(0.12, 0.19, r) * h
+          + f.dir * 0.04 * h * (1 - r) + asym;
+        final double handY = shoulderY + LXUtils.lerp(0.24, -0.22, r) * h;
+        if (twoSegment) {
+          this.canvas.lineWu(shoulderX, shoulderY, elbowX, elbowY, argb, true);
+          this.canvas.lineWu(elbowX, elbowY, handX, handY, argb, true);
+        } else {
+          this.canvas.lineWu(shoulderX, shoulderY, handX, handY, argb, true);
+        }
+      }
     }
 
-    /** Small filled disc (the head), max-blended, x wraps. */
-    private void stampDisc(int px, int py, int r, int argb) {
-      for (int dy = -r; dy <= r; ++dy) {
-        final int dxMax = (int) Math.sqrt(Math.max(0, r * r - dy * dy));
+    /** Filled ellipse (the head), max-blended, x wraps. */
+    private void stampEllipse(double cx, double cy, int rx, int ry, int argb) {
+      final int icx = (int) Math.round(cx);
+      final int icy = (int) Math.round(cy);
+      for (int dy = -ry; dy <= ry; ++dy) {
+        final double t = dy / (double) ry;
+        final int dxMax = (int) Math.round(rx * Math.sqrt(Math.max(0, 1 - t * t)));
         for (int dx = -dxMax; dx <= dxMax; ++dx) {
-          this.canvas.setMax(px + dx, py + dy, argb);
+          this.canvas.setMax(icx + dx, icy + dy, argb);
         }
       }
     }

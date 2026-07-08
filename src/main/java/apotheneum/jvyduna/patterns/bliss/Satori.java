@@ -7,7 +7,6 @@ import apotheneum.Apotheneum;
 import apotheneum.ApotheneumPattern;
 import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.PerceptualHue;
-import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
@@ -98,19 +97,17 @@ public class Satori extends ApotheneumPattern {
 
   // ---- Parameters -------------------------------------------------------------
 
-  private final TriggerBag bag = new TriggerBag("Satori");
-
-  public final TriggerParameter newField = bag.register(
+  public final TriggerParameter newField =
     new TriggerParameter("NewField", this::reseed)
-    .setDescription("Reseed the field centers and seeds, keeping the current Field variant"));
+    .setDescription("Reseed the field centers and seeds, keeping the current Field variant");
 
-  public final TriggerParameter reverse = bag.register(
+  public final TriggerParameter reverse =
     new TriggerParameter("Reverse", this::reverseDirection)
-    .setDescription("Flip the direction of the color cycle"));
+    .setDescription("Flip the direction of the color cycle");
 
-  public final TriggerParameter pulse = bag.register(
+  public final TriggerParameter pulse =
     new TriggerParameter("Pulse", this::firePulse)
-    .setDescription("Launch the radial phase pulse manually: bands warp outward from the seeded center, relaxing over 2s"));
+    .setDescription("Launch the radial phase pulse manually: bands warp outward from the seeded center, relaxing over 2s");
 
   public final EnumParameter<FieldMode> fieldMode =
     new EnumParameter<FieldMode>("Field", FieldMode.INTERFERENCE)
@@ -135,9 +132,6 @@ public class Satori extends ApotheneumPattern {
 
   public final CompoundParameter audioDepth = new CompoundParameter("Audio", 0)
     .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
-
-  public final TriggerParameter rndTrig = new TriggerParameter("RndTrig", bag::fire)
-    .setDescription("Randomly fire a trigger or jump a parameter");
 
   // ---- State ------------------------------------------------------------------
 
@@ -200,7 +194,6 @@ public class Satori extends ApotheneumPattern {
     addParameter("newField", this.newField);
     addParameter("reverse", this.reverse);
     addParameter("pulse", this.pulse);
-    addParameter("rndTrig", this.rndTrig);
     addParameter("fieldMode", this.fieldMode);
     addParameter("speed", this.speed);
     addParameter("width", this.width);
@@ -208,12 +201,6 @@ public class Satori extends ApotheneumPattern {
     addParameter("rnbwSm", this.rnbwSm);
     addParameter("smooth", this.smooth);
     addParameter("audio", this.audioDepth);
-
-    // RndTrig jump candidates — mirrored 1:1 in the Satori.md table
-    this.bag.jumpable(this.fieldMode);
-    this.bag.jumpable(this.speed, 0.5, 1.5);
-    this.bag.jumpable(this.width);
-    this.bag.jumpable(this.posterize);
   }
 
   // ---- Triggers ---------------------------------------------------------------
