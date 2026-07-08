@@ -99,31 +99,59 @@ No tempo gating — all timing free-runs (Sync/TempoDiv/Meta convention retired
 beatless song's intended mode). Pulses auto-emit on a timer whose interval
 interpolates from `PULSE_INTERVAL_SPARSE_MS` (2000 ms at Pulses = 0) to
 `PULSE_INTERVAL_DENSE_MS` (450 ms at Pulses = 1), shortened by audio level. Spin,
-pulse travel and star drift are all continuous, energy-scaled rates.
+pulse travel and star drift are all continuous, Speed-scaled rates.
 
-## Energy mapping
+## Speed mapping
 
-| Quantity | Ambient (e=0) | Peak (e=1) | Curve (lin/exp) |
+(Formerly "Energy"; the param was renamed `energy`→`speed` on 2026-07-08 because its
+only effect is scaling motion rate.)
+
+| Quantity | Ambient (Speed=0) | Peak (Speed=1) | Curve (lin/exp) |
 |---|---|---|---|
 | Helix spin (ascension twist) | 0.03 turns/s | 0.12 turns/s (×Climb, ≤0.18) | lin |
 | Pulse travel (full height) | 0.11 /s → 9.1 s | 0.18 /s → 5.5 s | lin |
 | Star counter-rotation (nearest layer) | 0.06 turns/s | 0.13 turns/s → 7.7 s/turn | lin |
 
-`Energy` defaults to 0.35 (the soothing-ambient regime). Every sustained rate above
-respects the ≥5 s full-traversal cap even at energy 1 — see the compliance section
+`Speed` defaults to 0.35 (the soothing-ambient regime). Every sustained rate above
+respects the ≥5 s full-traversal cap even at Speed 1 — see the compliance section
 for the arithmetic, including the `Climb` multiplier headroom.
+
+## Speed units — DECISION NEEDED
+
+Chrome is a per-song **outlier**: parts of the track are tempo-grid-driven, other
+parts deserve continuous, tempo-independent speeds. Because of that, Helix timing
+was **NOT** converted to live host tempo in the 2026-07-08 conventions pass —
+**nothing here was changed pending Jeff's input.** Every rate below is still an
+absolute constant (turns/sec or normalized-height/sec) scaled by the `Speed` knob,
+exactly as before.
+
+For each speed-ish quantity, Jeff to decide whether it should be:
+  (a) **beat-relative continuous** — derived from live `lx.engine.tempo.period`
+      (rate expressed per beat/bar, so it tracks tempo automation continuously);
+  (b) **tempo-grid driven** — quantized/triggered on the beat grid; or
+  (c) **left absolute** — the current fixed constant × `Speed` (tempo-independent).
+
+| Quantity | Current basis | Constants | (a) beat-rel / (b) grid / (c) absolute? |
+|---|---|---|---|
+| Helix ascension / spin | absolute turns/sec × `Climb` × `Speed` | `SPIN_TURNS_AMBIENT` 0.03 → `SPIN_TURNS_PEAK` 0.12 turns/s | ? |
+| Pulse travel (up the strands) | absolute normalized-height/sec × `Speed` | `PULSE_SPEED_AMBIENT` 0.11 → `PULSE_SPEED_PEAK` 0.18 /s | ? |
+| Star counter-rotation (parallax) | absolute turns/sec × depth × `Speed` | `STAR_TURNS_AMBIENT` 0.06 → `STAR_TURNS_PEAK` 0.13 turns/s | ? |
+
+(Auto-pulse *emission spacing* — `PULSE_INTERVAL_SPARSE_MS` 2000 → `..._DENSE_MS`
+450, shortened by audio level — is a separate cadence question; flag it here too if
+it should quantize to the grid rather than free-run.)
 
 ## Parameters
 
 UI/registration order convention (do not deviate; keys/labels must never be
-renamed once saved in a `.lxp`): triggers, Energy, pattern-specific, Audio.
+renamed once saved in a `.lxp`): triggers, Speed, pattern-specific, Smooth, Audio.
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
 | `pulse` | Pulse | TriggerParameter | — | — | release one bright pulse up each strand |
 | `reverse` | Reverse | TriggerParameter | — | — | flip the ascension twist direction |
 | `strike` | Strike | TriggerParameter | — | — | fire the lightning bolt to earth (finale ignition) |
-| `energy` | Energy | CompoundParameter | 0.35 | 0..1 | master energy (ambient ↔ peak rates, capped) |
+| `speed` | Speed | CompoundParameter | 0.35 | 0..1 | scales ascension/pulse/star speed (ambient ↔ peak rates, capped) |
 | `climb` | Climb | CompoundParameter | 1.0 | 0..1.5 | ascension twist-rate multiplier |
 | `twist` | Twist | CompoundParameter | 3.0 | 0.5..8 | whole turns each strand winds over the full height |
 | `unstrand` | Unstrnd | CompoundParameter | 0 | 0..1 | strand vertical separation (also tightens the twist) |
@@ -133,6 +161,7 @@ renamed once saved in a `.lxp`): triggers, Energy, pattern-specific, Audio.
 | `thick` | Thick | CompoundParameter | 1.5 | 1..3 | strand stroke thickness (px) |
 | `cube` | Cube | BooleanParameter | false | — | also render the helix on the cube ring |
 | `hue` | Hue | CompoundParameter | 0 | 0..360 | rotate the palette-sampled colors (0 = pure palette) |
+| `smooth` | Smooth | CompoundParameter | 1.0 | 0..1 | motion blending + antialiasing (0 = steppy/pixel-snapped/hard edges, 1 = smooth sub-pixel motion + antialiased forms) |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth (0 = pure screensaver) |
 
 CURATE: `Twist` default 3.0 turns, `Stars` 0.4, `Pulses` 0.5, `Thick` 1.5 — all
@@ -184,3 +213,4 @@ Three triggers, small → large:
 |---|---|---|
 | 2026-07-07 | Initial first-pass, Claude autonomous session — implemented cylinder-primary double-helix ascension (spin-based), riding pulses, unstranding vertical separation + tightening twist, XOR-scratch moire composite, counter-rotating parallax starfield, self-contained lightning-strike event, palette-driven deep-red colors with Satori change-cache; Sync/TempoDiv present but intended off (beatless song); compiles clean against the arrange API | Chrome 4:05 finale centerpiece per chrome-brief.md §6 pattern #3 + Jeff's storyboard |
 | 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path) | Project-wide retirement of the Sync/TempoDiv + Meta pattern-control convention. Pulse auto-emission now always uses the free-running timer — this beatless song's intended mode all along. |
+| 2026-07-08 | Conventions pass: renamed `energy`→`speed` (its only effect is scaling motion rate); added `Smooth` (default 1.0) — the house motion-blur/antialiasing + sub-pixel interpolation convention, wired into `plotDisc` (feathered coverage-scaled disc edges + sub-pixel centers) and the starfield (bilinear sub-pixel splat), gated so Smooth=0 is byte-for-byte the old hard/steppy render; flagged Chrome's per-song speed units (spin/pulse/star) for a per-param beat-relative vs grid vs absolute decision (see "Speed units — DECISION NEEDED") — no timing changed pending Jeff's input | Adopt package-wide param-naming + Blend/Smooth AA conventions; Chrome is a tempo outlier so speed-unit choices need Jeff's call rather than a blanket live-tempo conversion |

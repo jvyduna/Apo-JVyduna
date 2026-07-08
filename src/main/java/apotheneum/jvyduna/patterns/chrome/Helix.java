@@ -125,9 +125,9 @@ public class Helix extends ApotheneumPattern {
     new TriggerParameter("Strike", this::strike)
     .setDescription("Fire a white lightning bolt to earth — the finale-ignition event");
 
-  public final CompoundParameter energy =
-    new CompoundParameter("Energy", 0.35)
-    .setDescription("Master energy: scales ascension/pulse/star speed within the >=5s traversal cap");
+  public final CompoundParameter speed =
+    new CompoundParameter("Speed", 0.35)
+    .setDescription("Speed: scales ascension/pulse/star speed within the >=5s traversal cap");
 
   public final CompoundParameter climb =
     new CompoundParameter("Climb", 1.0, 0, 1.5)
@@ -164,6 +164,10 @@ public class Helix extends ApotheneumPattern {
   public final CompoundParameter hue =
     new CompoundParameter("Hue", 0, 0, 360)
     .setDescription("Rotates the palette-sampled colors (0 = pure project palette)");
+
+  public final CompoundParameter smooth =
+    new CompoundParameter("Smooth", 1.0)
+    .setDescription("Motion blending + antialiasing: 0 = steppy/pixel-snapped/hard edges, 1 = smooth sub-pixel motion and antialiased forms");
 
   public final CompoundParameter audioDepth =
     new CompoundParameter("Audio", 0)
@@ -202,6 +206,10 @@ public class Helix extends ApotheneumPattern {
 
   private double pulseTimerMs = 0;
 
+  /** Per-frame cached Smooth amount (AA / sub-pixel strength), set in render().
+   *  0 = hard/steppy pixel-snapped forms, 1 = feathered edges + sub-pixel centers. */
+  private double smoothAmt = 1.0;
+
   // ---- Palette cache (Satori-style change detection) --------------------------
 
   private int cachedBase = 0;
@@ -225,7 +233,7 @@ public class Helix extends ApotheneumPattern {
     addParameter("pulse", this.pulse);
     addParameter("reverse", this.reverse);
     addParameter("strike", this.strike);
-    addParameter("energy", this.energy);
+    addParameter("speed", this.speed);
     addParameter("climb", this.climb);
     addParameter("twist", this.twist);
     addParameter("unstrand", this.unstrand);
@@ -235,6 +243,7 @@ public class Helix extends ApotheneumPattern {
     addParameter("thick", this.thick);
     addParameter("cube", this.cube);
     addParameter("hue", this.hue);
+    addParameter("smooth", this.smooth);
     addParameter("audio", this.audioDepth);
   }
 
@@ -299,7 +308,8 @@ public class Helix extends ApotheneumPattern {
 
     updatePalette();
 
-    final double e = this.energy.getValue();
+    final double e = this.speed.getValue();
+    this.smoothAmt = this.smooth.getValue();
 
     // Ascension twist: rotate the whole winding around the ring over time (capped)
     final double spinTurnsPerSec =
@@ -459,14 +469,29 @@ public class Helix extends ApotheneumPattern {
     final int w = c.width;
     final int h = c.height;
     final double twinkle = 1 + TREBLE_TWINKLE * this.audio.treble;
+    final double sm = this.smoothAmt;
     for (int i = 0; i < MAX_STARS; ++i) {
       final double b = amount * this.starDepth[i] * this.starDepth[i] * twinkle;
       if (b <= 0.02) {
         continue;
       }
-      final int col = (int) Math.round(this.starU[i] * w);
-      final int row = (int) Math.round(this.starV[i] * (h - 1));
-      c.setMax(col, row, scaleRGB(this.starArgb, b));
+      final double fx = this.starU[i] * w;
+      final double fy = this.starV[i] * (h - 1);
+      if (sm <= 0.001) {
+        // Hard: original nearest-pixel star.
+        c.setMax((int) Math.round(fx), (int) Math.round(fy), scaleRGB(this.starArgb, b));
+        continue;
+      }
+      // Sub-pixel splat: bilinear over the 2x2 neighborhood, fractional weighting
+      // gated by Smooth so the drifting field reads as smooth sub-pixel motion.
+      final int ix = (int) Math.floor(fx);
+      final int iy = (int) Math.floor(fy);
+      final double tx = (fx - ix) * sm;
+      final double ty = (fy - iy) * sm;
+      c.setMax(ix,     iy,     scaleRGB(this.starArgb, b * (1 - tx) * (1 - ty)));
+      c.setMax(ix + 1, iy,     scaleRGB(this.starArgb, b * tx * (1 - ty)));
+      c.setMax(ix,     iy + 1, scaleRGB(this.starArgb, b * (1 - tx) * ty));
+      c.setMax(ix + 1, iy + 1, scaleRGB(this.starArgb, b * tx * ty));
     }
   }
 
@@ -512,19 +537,60 @@ public class Helix extends ApotheneumPattern {
     }
   }
 
-  /** Filled disc, max-blended; x wraps, out-of-range y dropped */
+  /**
+   * Filled disc, max-blended; x wraps, out-of-range y dropped. The Smooth knob
+   * (cached in {@link #smoothAmt}) selects the look:
+   *   - smoothAmt = 0: exact original hard/steppy disc — center snapped to the
+   *     nearest pixel, every covered pixel written at full brightness.
+   *   - smoothAmt > 0: sub-pixel fractional center (interpolated toward the true
+   *     cxf/cyf by smoothAmt) with a coverage-feathered edge whose softness grows
+   *     with smoothAmt, so edge pixels are MAX-blended at fractional brightness
+   *     (via scaleRGB) — the same coverage-before-blend approach SurfaceCanvas
+   *     uses in plotWu/lineWu. Zero heap allocation.
+   */
   private void plotDisc(SurfaceCanvas c, double cxf, double cyf, double r, int argb) {
-    final int cx = (int) Math.round(cxf);
-    final int cy = (int) Math.round(cyf);
-    if (r <= 0.6) {
-      c.setMax(cx, cy, argb);
+    final double sm = this.smoothAmt;
+
+    // Hard path: byte-for-byte the original steppy render at Smooth = 0.
+    if (sm <= 0.001) {
+      final int cx = (int) Math.round(cxf);
+      final int cy = (int) Math.round(cyf);
+      if (r <= 0.6) {
+        c.setMax(cx, cy, argb);
+        return;
+      }
+      final int ri = (int) Math.round(r);
+      for (int dy = -ri; dy <= ri; ++dy) {
+        final int dxMax = (int) Math.sqrt(r * r - dy * dy);
+        for (int dx = -dxMax; dx <= dxMax; ++dx) {
+          c.setMax(cx + dx, cy + dy, argb);
+        }
+      }
       return;
     }
-    final int ri = (int) Math.round(r);
-    for (int dy = -ri; dy <= ri; ++dy) {
-      final int dxMax = (int) Math.sqrt(r * r - dy * dy);
-      for (int dx = -dxMax; dx <= dxMax; ++dx) {
-        c.setMax(cx + dx, cy + dy, argb);
+
+    // Smooth path: fractional center gated by sm, feathered edge scaled by sm.
+    final double rx = Math.round(cxf);
+    final double ry = Math.round(cyf);
+    final double cx = rx + (cxf - rx) * sm; // sub-pixel placement gated by Smooth
+    final double cy = ry + (cyf - ry) * sm;
+    final double feather = sm; // CURATE: edge softness in px at Smooth=1 (1.0)
+    final double inner = r - 0.5 * feather;
+    final double outer = r + 0.5 * feather;
+    final int x0 = (int) Math.floor(cx - outer);
+    final int x1 = (int) Math.ceil(cx + outer);
+    final int y0 = (int) Math.floor(cy - outer);
+    final int y1 = (int) Math.ceil(cy + outer);
+    for (int py = y0; py <= y1; ++py) {
+      final double ddy = py - cy;
+      for (int px = x0; px <= x1; ++px) {
+        final double ddx = px - cx;
+        final double d = Math.sqrt(ddx * ddx + ddy * ddy);
+        if (d >= outer) {
+          continue;
+        }
+        final double cov = (d <= inner) ? 1.0 : (outer - d) / feather;
+        c.setMax(px, py, scaleRGB(argb, cov));
       }
     }
   }

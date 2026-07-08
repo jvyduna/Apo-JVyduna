@@ -205,6 +205,10 @@ public class GlassRain extends ApotheneumPattern {
     new CompoundParameter("Moire", 0)
     .setDescription("1/16-grid moire interference shimmer over the rain (peaks only)");
 
+  public final CompoundParameter smooth =
+    new CompoundParameter("Smooth", 1.0)
+    .setDescription("Motion blending + antialiasing: 0 = steppy/pixel-snapped/hard edges, 1 = smooth sub-pixel motion and antialiased forms");
+
   public final CompoundParameter audioDepth =
     new CompoundParameter("Audio", 0)
     .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
@@ -255,6 +259,7 @@ public class GlassRain extends ApotheneumPattern {
     addParameter("glyph", this.glyph);
     addParameter("form", this.form);
     addParameter("moire", this.moire);
+    addParameter("smooth", this.smooth);
     addParameter("audio", this.audioDepth);
   }
 
@@ -360,10 +365,13 @@ public class GlassRain extends ApotheneumPattern {
 
     final int dropletColor = LXColor.lerp(this.cold, this.warm, this.bloom.getValue());
 
+    // Smooth: 0 = pixel-snapped/steppy droplets, 1 = sub-pixel fall + AA edges.
+    final double smoothAmt = this.smooth.getValue();
+
     renderField(this.cubeField, CUBE_FACE_W, 4, deltaMs, decayMult,
-      dropletColor, effForm, moirePhaseH, moirePhaseV);
+      dropletColor, effForm, moirePhaseH, moirePhaseV, smoothAmt);
     renderField(this.cylField, CYL_SYMBOL_W, 3, deltaMs, decayMult,
-      dropletColor, effForm, moirePhaseH, moirePhaseV);
+      dropletColor, effForm, moirePhaseH, moirePhaseV, smoothAmt);
 
     // Cube ring exterior → interior copy; cylinder likewise
     this.cubeField.canvas.copyTo(Apotheneum.cube.exterior, this.colors);
@@ -376,9 +384,10 @@ public class GlassRain extends ApotheneumPattern {
    *  condense the symbol on top. */
   private void renderField(RainField f, int symbolW, int symbolRepeat, double deltaMs,
                            double decayMult, int dropletColor,
-                           double formAmt, double moirePhaseH, double moirePhaseV) {
+                           double formAmt, double moirePhaseH, double moirePhaseV,
+                           double smoothAmt) {
     spawnRain(f, deltaMs);
-    f.step(deltaMs, decayMult, dropletColor);
+    f.step(deltaMs, decayMult, dropletColor, smoothAmt);
 
     // Moiré overlay (peaks): a tempo-locked 2D interference shimmer, gated by
     // the Moire knob and flickered by treble.
@@ -599,7 +608,7 @@ public class GlassRain extends ApotheneumPattern {
      *  path, paint the new streak segment (max-blend so trails stack) with an
      *  ADD-blended head (so merging beads accumulate/brighten), and retire drops
      *  that fall off the bottom or reach the end of their TTL. */
-    void step(double deltaMs, double decayMult, int color) {
+    void step(double deltaMs, double decayMult, int color, double smooth) {
       this.canvas.decay(decayMult);
       final double dt = deltaMs * 0.001;
       for (int i = 0; i < this.cap; ++i) {
@@ -625,7 +634,7 @@ public class GlassRain extends ApotheneumPattern {
           }
         }
 
-        paintStreak(xOld, yOld, xNew, yNew, this.weight[i], this.headBright[i] * env, color);
+        paintStreak(xOld, yOld, xNew, yNew, this.weight[i], this.headBright[i] * env, color, smooth);
 
         if ((yNew >= this.canvas.height) || (this.ageMs[i] >= this.ttlMs[i])) {
           this.active[i] = false;
@@ -635,30 +644,66 @@ public class GlassRain extends ApotheneumPattern {
 
     /** Paint one drop's per-frame streak: a dim wet trail (MAX-blended, widened
      *  to 3 columns for a fat bead) plus a brighter ADD-blended head so merging
-     *  beads accumulate. */
+     *  beads accumulate. The {@code smooth} amount (0..1) crossfades the whole
+     *  streak from pixel-snapped/steppy (0) to sub-pixel + antialiased (1): the
+     *  trail is a Wu-AA line and the head's fall position is a fractional-row
+     *  crossfade. Zero-alloc — {@code scaleRGB} returns an int, no heap. */
     private void paintStreak(double xOld, double yOld, double xNew, double yNew,
-                             double wt, double headMul, int color) {
-      final int xo = (int) Math.round(xOld);
-      final int yo = (int) Math.round(yOld);
-      final int xn = (int) Math.round(xNew);
-      final int yn = (int) Math.round(yNew);
+                             double wt, double headMul, int color, double smooth) {
       final boolean fat = wt > FAT_WEIGHT;
+      final double s = (smooth < 0) ? 0 : (smooth > 1 ? 1 : smooth);
 
       final int trail = scaleRGB(color, TRAIL_LEVEL * (0.7 + 0.3 * headMul));
-      this.canvas.lineMax(xo, yo, xn, yn, trail);
+      paintTrail(xOld, yOld, xNew, yNew, trail, s);
       if (fat) {
         final int trailDim = scaleRGB(trail, 0.55);
-        this.canvas.lineMax(xo - 1, yo, xn - 1, yn, trailDim);
-        this.canvas.lineMax(xo + 1, yo, xn + 1, yn, trailDim);
+        paintTrail(xOld - 1, yOld, xNew - 1, yNew, trailDim, s);
+        paintTrail(xOld + 1, yOld, xNew + 1, yNew, trailDim, s);
       }
 
       // Head: brighter, ADD-blended so two beads crossing the same pixel bead up.
       final int head = scaleRGB(color, Math.min(1, headMul));
-      this.canvas.setBlend(xn, yn, head, SurfaceCanvas.Blend.ADD);
+      paintHead(xNew, yNew, head, s);
       if (fat) {
         final int headDim = scaleRGB(head, 0.5);
-        this.canvas.setBlend(xn - 1, yn, headDim, SurfaceCanvas.Blend.ADD);
-        this.canvas.setBlend(xn + 1, yn, headDim, SurfaceCanvas.Blend.ADD);
+        paintHead(xNew - 1, yNew, headDim, s);
+        paintHead(xNew + 1, yNew, headDim, s);
+      }
+    }
+
+    /** Draw one wet-trail segment as a smooth-gated crossfade between a
+     *  pixel-snapped integer MAX line (steppy edges, weight 1-s) and a Xiaolin-Wu
+     *  antialiased sub-pixel MAX line (soft edges, weight s). Both MAX-blend, so a
+     *  dim AA fringe never darkens a brighter trail crossing. Zero-alloc. */
+    private void paintTrail(double x0, double y0, double x1, double y1, int argb, double s) {
+      if (s < 1) {
+        final int snap = scaleRGB(argb, 1 - s);
+        this.canvas.lineMax((int) Math.round(x0), (int) Math.round(y0),
+                            (int) Math.round(x1), (int) Math.round(y1), snap);
+      }
+      if (s > 0) {
+        final int aa = scaleRGB(argb, s);
+        this.canvas.lineWu(x0, y0, x1, y1, aa, true); // Wu AA, MAX-blend, x wraps
+      }
+    }
+
+    /** ADD-blend a head bead at a sub-pixel fall position. The smooth amount
+     *  gates a fractional-row crossfade: at s=0 the head snaps entirely onto the
+     *  nearest row (steppy), at s=1 it splits (1-frac)/(frac) across the two
+     *  straddled rows so the fall reads as continuous sub-pixel motion. Zero-alloc. */
+    private void paintHead(double x, double y, int argb, double s) {
+      final int xi = (int) Math.round(x);
+      // Snapped contribution (weight 1-s) lands entirely on the nearest row.
+      if (s < 1) {
+        final int snap = scaleRGB(argb, 1 - s);
+        this.canvas.setBlend(xi, (int) Math.round(y), snap, SurfaceCanvas.Blend.ADD);
+      }
+      // Smooth contribution (weight s) crossfades across the two straddled rows.
+      if (s > 0) {
+        final int yLo = (int) Math.floor(y);
+        final double frac = y - yLo;
+        this.canvas.setBlend(xi, yLo, scaleRGB(argb, s * (1 - frac)), SurfaceCanvas.Blend.ADD);
+        this.canvas.setBlend(xi, yLo + 1, scaleRGB(argb, s * frac), SurfaceCanvas.Blend.ADD);
       }
     }
   }

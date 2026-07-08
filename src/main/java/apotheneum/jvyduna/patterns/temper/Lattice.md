@@ -104,6 +104,7 @@ A / B / C (identity taken **after** Shift). Default 1.
 - Iterates each surface's `columns()` × `column.points`, bounding rows by
   `points.length` (door columns are shorter). `Y = 0` is the top row.
 - `setColors(0x00000000)` each frame so any undrawn LED stays transparent.
+- Smooth (house AA/interp convention) intentionally omitted — this bench IS the subpixel-arrangement study, so a global smoothing knob would corrupt the comparison.
 
 ## Verification
 
@@ -118,3 +119,13 @@ A / B / C (identity taken **after** Shift). Default 1.
    - `Alpha < 1` lets a solid pattern on a lower channel show through.
    - `DimA/B/C` dim each color independently; edit the swatch to recolor A/B/C
      live; empty the swatch → pastel-CMY fallback.
+
+## Curation log
+
+- **2026-07-08** — Conventions pass. Declined the house `Smooth`
+  (AA/interp) convention: Lattice is a static (no audio/tempo/motion) bench
+  whose purpose is a controlled comparison of discrete subpixel arrangements.
+  There is no moving edge to antialias, and a global smoothing/AA knob would
+  blur the exact pixel-snapped `roleFor` lattice that is the object of study —
+  corrupting the comparison. Exemption noted under Implementation notes. No
+  other changes.

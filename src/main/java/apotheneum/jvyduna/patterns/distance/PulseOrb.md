@@ -93,39 +93,45 @@ mix envelope. Default gentle per the brief ("`Audio` depth knob default gentle")
 
 ## Tempo mapping
 
-No tempo gating — both rolling periods (orb breathe, wall drift) free-run at
-their energy-derived values (`Ranges.lin`), which are already good-looking
-(Sync/TempoDiv/Meta convention retired 2026-07-08; free-run behavior = the old
-Sync-off path).
+No Sync/TempoDiv **grid gate** (that convention was retired 2026-07-08). But
+Distance is grid-less, so per the convention pass both rolling periods (orb
+breathe, wall drift) are now **beat-relative and continuous**: their beat counts
+(Speed-mapped) are multiplied by the live `lx.engine.tempo.period` and clamped to
+`MIN_PERIOD_MS = 5 s`. Motion follows the arrange tempo lane without ever snapping
+to a division or jumping. Beat counts reproduce the prior 8 s / 5 s breathe and
+24 s / 12 s drift at the referenceBpm 120.
 
-## Energy mapping
+## Speed mapping
 
-| Quantity | Ambient (e=0) | Peak (e=1) | Curve (lin/exp) |
+`Speed` is now **speed-only** (it only drives the breathe/drift *rate* — the
+render never scaled brightness by it, so the old "Energy" name/description was a
+misnomer; renamed to `speed` in the convention pass).
+
+| Quantity | Ambient (Speed=0) @ 120 BPM | Peak (Speed=1) @ 120 BPM | Curve |
 |---|---|---|---|
-| Orb breathe period (full inhale+exhale) | 8 s | 5 s | lin |
-| Wall-drift period | 24 s | 12 s (÷ Drift) | lin |
-| Orb brightness / radius | via Size × breathe | (same, audio adds) | lin |
+| Orb breathe period (full inhale+exhale) | 16 beats ≈ 8 s | 10 beats ≈ 5 s | lin (beats) |
+| Wall-drift period | 48 beats ≈ 24 s | 24 beats ≈ 12 s (÷ Drift) | lin (beats) |
 
-Default energy 0.35 sits deep in the ambient regime. Even at energy = 1 the
-breathe cycle is 5 s and the wall drift is 12 s (before Drift) — both at/under
-the ≥5 s sustained cap (see compliance). Energy scales *rate and intensity*,
-never past the traversal cap.
+Default Speed 0.35 sits deep in the ambient regime. At Speed = 1 (120 BPM) the
+breathe cycle is ~5 s and the wall drift ~12 s (before Drift), both at/under the
+≥5 s cap; the `MIN_PERIOD_MS` clamp holds the floor at any tempo.
 
 ## Parameters
 
-Registration order (triggers → Energy → pattern params → Audio):
+Registration order (triggers → Speed → pattern params → Smooth → Audio):
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
 | `pulse` | Pulse | TriggerParameter | — | — | manual breath swell (orb radius/brightness surge, settles ~2 s) |
 | `ripple` | Ripple | TriggerParameter | — | — | one outward ring from the orb across the walls (~3 s) — the 4:04 snare bloom |
 | `fold` | Fold | TriggerParameter | — | — | fold the wall topology inside-out to a new configuration (~2.5 s morph) |
-| `energy` | Energy | CompoundParameter | 0.35 | 0..1 | master energy (breathe/drift rate + intensity) |
+| `speed` | Speed | CompoundParameter | 0.35 | 0..1 | breathe/drift rate, beat-relative & continuous (speed-only) |
 | `size` | Size | CompoundParameter | 0.4 | 0..1 | base orb radius (breathes around it); automate for 2:57 bloom / 5:07 contract |
 | `warmth` | Warmth | CompoundParameter | 0.7 | 0..1 | palette warm/cool bias; low = the F→Fm cool ache |
 | `morph` | Morph | CompoundParameter | 0.5 | 0..1 | wall-field presence: 0 = near-dark walls, 1 = full K-hole topology |
 | `warp` | Warp | CompoundParameter | 0.5 | 0..1 | domain-warp fold intensity |
 | `drift` | Drift | CompoundParameter | 1 | 0.5..2 | wall-drift speed multiplier (kept slower than the orb) |
+| `smooth` | Smooth | CompoundParameter | 1.0 | 0..1 | motion blending + antialiasing: 1 = smooth continuous gradients (default), 0 = posterized/banded steppy field |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth (0 = pure screensaver) |
 
 The 2:57 bloom / 4:04 re-escalation / 5:07 contract-to-point arc is delivered by
@@ -159,12 +165,13 @@ Three triggers, small → large:
 ## Simulation-principles compliance
 
 - **Orb breathe (sustained motion)** — a full inhale+exhale is one sine period:
-  8 s ambient, **5 s at energy = 1** → exactly at the ≥5 s cap. Radius travels
-  slowly (a soft radial falloff, no hard edge sweeping across the surface).
+  ~8 s ambient, **~5 s at Speed = 1** (120 BPM) → at the ≥5 s cap. The
+  `MIN_PERIOD_MS = 5 s` floor holds this even if the host tempo runs fast. Radius
+  travels slowly (a soft radial falloff, no hard edge sweeping across the surface).
 - **Wall-field drift (sustained motion)** — the domain-warp phase advances one
-  full turn over 24 s ambient / **12 s at energy = 1** (before Drift). Drift ≤ 2
-  can halve that to 6 s at peak energy — still ≥ 5 s. CURATE: confirm Drift = 2 +
-  energy = 1 (6 s field turnover) still reads as drift, not motion.
+  full turn over ~24 s ambient / **~12 s at Speed = 1** (before Drift). Drift ≤ 2
+  can halve that to ~6 s at peak Speed — still ≥ 5 s (and clamped ≥ 5 s at any
+  tempo). CURATE: confirm Drift = 2 + Speed = 1 still reads as drift, not motion.
 - **Ripple (event-like)** — ~2.5 s expansion, 3 s total life ≥ 1.5 s minimum;
   fired sparingly (once at 4:04).
 - **Pulse (event-like)** — 2 s brightness/radius settle ≥ 1.5 s minimum, no
@@ -208,3 +215,4 @@ see the Curation log — leaving only these two hardware-balance items.)
 | 2026-07-07 | Initial first-pass, Claude autonomous session | Design doc + compiling stub: orb + coupled domain-warp wall field + palette morph wired to params/AudioReactive/TempoLock; domain-warp math and topology-fold transition left as marked TODOs for hardware tuning |
 | 2026-07-07 | Full build-out, Claude session | Replaced the two-octave-sine placeholder with a real inside-out-fold iterative domain warp (Quilez-style two-pass fbm-of-fbm, seam-safe via integer angle harmonics + vertical-only angle displacements, verified invariant under xn→xn+1); implemented the `Fold` trigger as a true inside-out coordinate reconfiguration (eased vertical center↔edge inversion + rigid seamless ring rotation `FOLD_ROT` + warp re-texture, crossfaded on the eased `foldPhase` in fold-units) |
 | 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path) | Project-wide retirement of the Sync/TempoDiv + Meta pattern-control convention. The breathe and wall-drift periods now always free-run at their energy-derived values (the `quantizePeriod` snapping is gone). |
+| 2026-07-08 | Convention pass (non-bliss) | `Energy`→`speed` (it only ever drove the breathe/drift *rate* — the render never scaled brightness by it, so it was already speed-only). Breathe + drift periods made **beat-relative**: Speed-mapped beat counts × live `lx.engine.tempo.period`, clamped ≥ 5 s (`MIN_PERIOD_MS`) — continuous, tempo-following, never a grid snap. Added house **Smooth** knob (default 1.0): the field is continuous, so Smooth controls gradient banding (1 = smooth gradients, 0 = posterized/steppy) — CURATE, Jeff may prefer a different mapping. |

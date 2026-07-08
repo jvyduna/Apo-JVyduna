@@ -27,9 +27,11 @@ import heronarts.lx.utils.LXUtils;
  * The opener of "Communicating" — the genesis (childbirth + ancestry;
  * "aumakua" = ancestral guardian spirits). The cube INTERIOR is a dark,
  * softer echo of the exterior (the Inner knob); the figures and their ochre
- * warmth live on the exterior faces and the cylinder ring. Free-running and
- * silent by design: no tempo gating, no audio reactivity — the recording is
- * rubato and every Temper pattern stays super chill with no sudden jumps.
+ * warmth live on the exterior faces and the cylinder ring. Silent by design (no
+ * audio reactivity); the rise speed is BEAT-RELATIVE — a continuous rate that
+ * follows the (rubato) arrange tempo lane, never snapping to a grid and never
+ * jumping, so every Temper pattern stays super chill. This is not the retired
+ * Sync/TempoDiv gate; it is a smooth tempo-relative speed.
  *
  * Zero-alloc: two independent {@link Field}s (cube ring, cylinder) each own a
  * fixed pool of {@link Figure} objects, all preallocated in the constructor;
@@ -48,11 +50,20 @@ public class Aumakua extends ApotheneumPattern {
 
   // ---- Timing / motion constants ---------------------------------------------
 
-  /** Rise speed endpoints in rows/sec, mapped from Speed. Ambient is patient
-   *  (a figure crosses the ~45-row cube in ~30 s); peak still keeps the full
-   *  traversal >= 5 s (45 / 6.43 = 7.0 s), well inside the simulation cap. */
-  private static final double RISE_ROWS_PER_SEC_AMBIENT = 1.5;
-  private static final double RISE_ROWS_PER_SEC_PEAK = 6.43; // CURATE: 7.0s cube traversal at speed=1
+  /** Rise speed endpoints in rows-per-BEAT, mapped from Speed, so motion is
+   *  continuous and tempo-relative — it tracks the (rubato) arrange tempo lane
+   *  rather than an absolute rows/sec. Each frame the endpoint is multiplied by
+   *  the live beat rate (1000/beatMs) and clamped to MAX_RISE_ROWS_PER_SEC so
+   *  the >= 5 s full-traversal floor holds at any tempo. Endpoints are chosen so
+   *  that at the nominal ~96.8 BPM Temper tempo the rates match the prior
+   *  1.5 / 6.4 rows-per-sec feel. This is NOT the retired Sync/TempoDiv grid
+   *  gate: the rate is continuous and never snaps to a division. */
+  private static final double RISE_ROWS_PER_BEAT_AMBIENT = 0.93; // CURATE: ~1.5 rows/s @ 96.8 BPM
+  private static final double RISE_ROWS_PER_BEAT_PEAK = 4.0;     // CURATE: ~6.4 rows/s @ 96.8 BPM
+  /** Rise-rate ceiling (rows/sec): 45-row cube / 8 = 5.6 s, inside the 5 s cap. */
+  private static final double MAX_RISE_ROWS_PER_SEC = 8.0;       // CURATE
+  /** Floor on ms/beat, guarding against a zero/absurd host tempo. */
+  private static final double MIN_BEAT_MS = 50;
 
   /** Root-spawn idle interval endpoints (ms), mapped from Density (exp). The
    *  slow sparse cadence is the point — roots are the rare new ancestors;
@@ -195,6 +206,10 @@ public class Aumakua extends ApotheneumPattern {
     new CompoundParameter("Cyl", 1.0)
     .setDescription("Brightness of all cylinder figures (scales the whole cylinder field)");
 
+  public final CompoundParameter smooth =
+    new CompoundParameter("Smooth", 1.0)
+    .setDescription("Motion blending + antialiasing: 0 = pixel-snapped rise and hard-edged heads, 1 = smooth sub-pixel rise and antialiased forms");
+
   // ---- Palette color cache (Satori-style change detection) -------------------
 
   private final int[] genColor = new int[MAX_GEN + 1];
@@ -265,8 +280,14 @@ public class Aumakua extends ApotheneumPattern {
     setColors(LXColor.BLACK);
     refreshColors();
 
-    final double riseRowsPerSec =
-      Ranges.lin(this.speed.getValue(), RISE_ROWS_PER_SEC_AMBIENT, RISE_ROWS_PER_SEC_PEAK);
+    // Beat-relative rise: rows-per-beat (Speed-mapped) scaled by the live host
+    // beat rate, clamped so the full traversal stays >= 5 s at any tempo. This
+    // is a continuous, tempo-following rate — never a Sync/TempoDiv grid snap.
+    final double beatMs = Math.max(this.lx.engine.tempo.period.getValue(), MIN_BEAT_MS);
+    final double riseRowsPerSec = Math.min(
+      Ranges.lin(this.speed.getValue(), RISE_ROWS_PER_BEAT_AMBIENT, RISE_ROWS_PER_BEAT_PEAK)
+        * 1000.0 / beatMs,
+      MAX_RISE_ROWS_PER_SEC);
     final double rootIntervalMs =
       Ranges.exp(this.density.getValue(), ROOT_INTERVAL_MS_SPARSE, ROOT_INTERVAL_MS_DENSE);
 
@@ -369,6 +390,15 @@ public class Aumakua extends ApotheneumPattern {
     return h;
   }
 
+  /** Scale an ARGB's RGB channels by coverage (0..1), alpha forced opaque —
+   *  the coverage-before-blend used for antialiased rim fringes. Zero-alloc. */
+  private static int scaleRgb(int argb, double cov) {
+    final int r = (int) (((argb >> 16) & 0xff) * cov);
+    final int g = (int) (((argb >> 8) & 0xff) * cov);
+    final int b = (int) ((argb & 0xff) * cov);
+    return 0xff000000 | (r << 16) | (g << 8) | b;
+  }
+
   // ---- Figure ----------------------------------------------------------------
 
   /** One Kolo-style cave-painting human. Pooled and reused; never allocated
@@ -410,6 +440,8 @@ public class Aumakua extends ApotheneumPattern {
     private final Random rng;
     private double sinceRootMs;
     private int birthCounter;
+    /** Smooth knob cached per-frame: 1 = sub-pixel glide + AA, 0 = pixel-snap. */
+    private double smoothV = 1.0;
 
     private Field(int width, int height, Apotheneum.Orientation orientation, long seed) {
       this.canvas = new SurfaceCanvas(width, height);
@@ -452,6 +484,13 @@ public class Aumakua extends ApotheneumPattern {
     private double drawX(Figure f) {
       return f.x + sway.getValue() * f.height * 0.35
         * Math.sin(f.swayPhase + f.ageMs * f.swayRate);
+    }
+
+    /** Blend a coordinate between its true sub-pixel value (Smooth=1) and its
+     *  integer-snapped value (Smooth=0): low Smooth reads as pixel-stepped
+     *  motion, high Smooth as a smooth sub-pixel glide (motion blending). */
+    private double snap(double v) {
+      return LXUtils.lerp((double) Math.round(v), v, this.smoothV);
     }
 
     /** Randomize the per-figure sway and Kolo pose fields at any spawn. */
@@ -590,6 +629,7 @@ public class Aumakua extends ApotheneumPattern {
 
     private void render(double deltaMs, double riseRowsPerSec, double rootIntervalMs,
                         double decayMult) {
+      this.smoothV = smooth.getValue();
       this.canvas.decay(decayMult);
 
       // (1) Root births on the idle timer (Density-driven cadence).
@@ -726,8 +766,8 @@ public class Aumakua extends ApotheneumPattern {
       final int argb = LXColor.scaleBrightness(genColor(f.gen), (float) glow);
 
       final double h = f.height;
-      final double cx = drawX(f);
-      final double feetY = f.y;
+      final double cx = snap(drawX(f));
+      final double feetY = snap(f.y);
       final double lean = f.lean * f.dir; // forward pitch, signed by facing
 
       // Joint x at height-fraction q leans forward proportionally to q.
@@ -786,15 +826,25 @@ public class Aumakua extends ApotheneumPattern {
       }
     }
 
-    /** Filled ellipse (the head), max-blended, x wraps. */
+    /** Filled ellipse (the head), max-blended, x wraps. The left/right rim is
+     *  antialiased by fractional edge coverage, blended toward a hard step as
+     *  Smooth -> 0, so the biggest drawn form softens with the Smooth knob. */
     private void stampEllipse(double cx, double cy, int rx, int ry, int argb) {
       final int icx = (int) Math.round(cx);
       final int icy = (int) Math.round(cy);
       for (int dy = -ry; dy <= ry; ++dy) {
         final double t = dy / (double) ry;
-        final int dxMax = (int) Math.round(rx * Math.sqrt(Math.max(0, 1 - t * t)));
+        final double hw = rx * Math.sqrt(Math.max(0, 1 - t * t)); // exact half-width
+        final int dxMax = (int) Math.ceil(hw);
         for (int dx = -dxMax; dx <= dxMax; ++dx) {
-          this.canvas.setMax(icx + dx, icy + dy, argb);
+          final double aa = LXUtils.constrain(hw - Math.abs(dx) + 0.5, 0, 1);
+          final double hard = (aa >= 0.5) ? 1 : 0;
+          final double cov = LXUtils.lerp(hard, aa, this.smoothV);
+          if (cov <= 0) {
+            continue;
+          }
+          this.canvas.setMax(icx + dx, icy + dy,
+            (cov >= 0.999) ? argb : scaleRgb(argb, cov));
         }
       }
     }

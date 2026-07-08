@@ -93,7 +93,7 @@ public class Cathedral extends ApotheneumPattern {
 
   // ---- Timing constants -------------------------------------------------------
 
-  /** CA generation interval when free-running, energy 0 -> 1 (ms). One row of
+  /** CA generation interval when free-running, Speed 0 -> 1 (ms). One row of
    *  tracery flows per step, so a full-height traversal is tens of seconds. */
   private static final double CA_STEP_AMBIENT_MS = 3500;
   private static final double CA_STEP_PEAK_MS = 1200;
@@ -179,9 +179,9 @@ public class Cathedral extends ApotheneumPattern {
     new TriggerParameter("RandRule", this::randomRuleTrigger)
     .setDescription("Pick a new CA rule via a random walk that never revisits the last half of the available rules");
 
-  public final CompoundParameter energy =
-    new CompoundParameter("Energy", 0.35)
-    .setDescription("Master energy: ambient (slow CA) to peak (faster CA)");
+  public final CompoundParameter speed =
+    new CompoundParameter("Speed", 0.35)
+    .setDescription("CA advance speed: ambient (slow CA) to peak (faster CA)");
 
   public final CompoundParameter growth =
     new CompoundParameter("Growth", 0.4)
@@ -212,9 +212,9 @@ public class Cathedral extends ApotheneumPattern {
     new CompoundParameter("Drip", 0, -1, 1)
     .setDescription("Bidirectional ridge energy: negative drips a scintillating coating down the arch ribs; positive builds it upward into flowing beams out of each arch peak (up to 1x installation height, 1/4 arch width). Never touches the windows");
 
-  public final CompoundParameter blend =
-    new CompoundParameter("Blend", 1.0)
-    .setDescription("Antialiasing + smooth interpolation: 0 = steppy/posterized, 1 = smooth CA down-flow and antialiased arch edges");
+  public final CompoundParameter smooth =
+    new CompoundParameter("Smooth", 1.0)
+    .setDescription("Motion blending + antialiasing: 0 = steppy/posterized, 1 = smooth CA down-flow and antialiased arch edges");
 
   public final CompoundParameter audioDepth =
     new CompoundParameter("Audio", 0)
@@ -312,7 +312,7 @@ public class Cathedral extends ApotheneumPattern {
     addParameter("heal", this.heal);
     addParameter("tearDown", this.tearDown);
     addParameter("randomRule", this.randomRule);
-    addParameter("energy", this.energy);
+    addParameter("speed", this.speed);
     addParameter("growth", this.growth);
     addParameter("rule", this.rule);
     addParameter("arches", this.arches);
@@ -320,7 +320,7 @@ public class Cathedral extends ApotheneumPattern {
     addParameter("glitch", this.glitch);
     addParameter("gold", this.gold);
     addParameter("drip", this.drip);
-    addParameter("blend", this.blend);
+    addParameter("smooth", this.smooth);
     addParameter("audio", this.audioDepth);
     addParameter("tempoDiv", this.tempoDiv);
 
@@ -415,9 +415,9 @@ public class Cathedral extends ApotheneumPattern {
     this.growthShown = this.growth.getValue(); // instant: Growth == height
     updateEnvelopes(deltaMs);
 
-    // CA free-runs on the energy-scaled timer; track a fractional flow phase so
+    // CA free-runs on the speed-scaled timer; track a fractional flow phase so
     // the tracery slides down smoothly instead of snapping row-by-row.
-    final double stepMs = Ranges.exp(this.energy.getValue(), CA_STEP_AMBIENT_MS, CA_STEP_PEAK_MS);
+    final double stepMs = Ranges.exp(this.speed.getValue(), CA_STEP_AMBIENT_MS, CA_STEP_PEAK_MS);
     this.caAccumMs += deltaMs;
     boolean stepNow = false;
     if (this.caAccumMs >= stepMs) {
@@ -686,7 +686,7 @@ public class Cathedral extends ApotheneumPattern {
 
     final double springH = g * SPRING_FRAC * (h - 1);
     final double fullApex = g * APEX_FRAC * (h - 1);
-    final double bl = this.blend.getValue();
+    final double sm = this.smooth.getValue();
     final double cph = this.caPhase;
     final double tp = this.tearPhase;
 
@@ -705,9 +705,9 @@ public class Cathedral extends ApotheneumPattern {
         if (erode && eroded(x, hb, h, tp)) {
           continue;                                 // crumbled away
         }
-        // Antialiased silhouette edge (softened by Blend)
+        // Antialiased silhouette edge (softened by Smooth)
         final double edgeCover = clamp01((topH - hb) + 0.5);
-        final double cover = 1 - bl * (1 - edgeCover);
+        final double cover = 1 - sm * (1 - edgeCover);
 
         final boolean pier = (norm > PIER_NORM) && (hb <= springH);
         final boolean mullion = (norm < MULLION_NORM) && (hb <= springH);
@@ -718,10 +718,10 @@ public class Cathedral extends ApotheneumPattern {
           col = this.stoneColor;
         } else {
           // CA tracery, vertically interpolated toward the row above so it flows
-          // down smoothly rather than stepping (scaled by Blend).
+          // down smoothly rather than stepping (scaled by Smooth).
           final double cell = (y == 0)
-            ? lerp(ca[0][x], this.caIncoming[x], cph * bl)
-            : lerp(ca[y][x], ca[y - 1][x], cph * bl);
+            ? lerp(ca[0][x], this.caIncoming[x], cph * sm)
+            : lerp(ca[y][x], ca[y - 1][x], cph * sm);
           col = LXColor.lerp(this.windowBack, this.traceryColor, (float) clamp01(cell));
         }
         c.set(x, y, scale(col, cover));
