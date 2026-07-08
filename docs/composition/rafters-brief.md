@@ -160,8 +160,8 @@ searching** moment — the emotional dip that makes the later "reconstruction" l
 
 Ranked. New classes live under `patterns/rafters/` (mirroring `patterns/bliss/`);
 all follow the conventions (palette-driven, `Audio` depth knob defaulting to 0 =
-screensaver, `TempoLock` grid sync, ≥3 non-meta triggers, zero-alloc render, ≥5 s
-full-traversal cap).
+screensaver, ≥3 triggers, zero-alloc render, ≥5 s full-traversal cap; no tempo
+gating or Meta triggers — that convention was retired 2026-07-08).
 
 1. **★ HERO — `GlassRain` (NEW pattern)** — rain-on-a-loft-window: droplets spawn and
    streak **down** the cube faces + cylinder, leaving wet vertical trails, with occasional

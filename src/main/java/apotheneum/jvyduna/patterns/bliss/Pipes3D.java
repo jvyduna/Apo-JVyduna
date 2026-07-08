@@ -8,8 +8,6 @@ import apotheneum.Apotheneum;
 import apotheneum.ApotheneumPattern;
 import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.PerceptualHue;
-import apotheneum.jvyduna.util.TempoLock;
-import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
@@ -257,36 +255,30 @@ public class Pipes3D extends ApotheneumPattern {
 
   // ---- Parameters -----------------------------------------------------------
 
-  private final TriggerBag bag = new TriggerBag("Pipes3D");
-
-  public final TriggerParameter sparkle = bag.register(
+  public final TriggerParameter sparkle =
     new TriggerParameter("Sparkle", this::flashSparkle)
-    .setDescription("Flash the recent elbow joints white (the bass sparkle, fired manually)"));
+    .setDescription("Flash the recent elbow joints white (the bass sparkle, fired manually)");
 
-  public final TriggerParameter teleport = bag.register(
+  public final TriggerParameter teleport =
     new TriggerParameter("Teleport", this::teleportRandomPipe)
-    .setDescription("A growing pipe jumps to a random free cell and continues (the classic)"));
+    .setDescription("A growing pipe jumps to a random free cell and continues (the classic)");
 
-  public final TriggerParameter plsThk = bag.register(
+  public final TriggerParameter plsThk =
     new TriggerParameter("PlsThk", () -> this.thkPulse.trigger(
       this.thickness.getValue(), (THICK_MIN + THICK_MAX) / 2))
-    .setDescription("Pulse Thick 50% of its range toward (usually past) center: 32nd-note attack, one-beat decay"));
+    .setDescription("Pulse Thick 50% of its range toward (usually past) center: 32nd-note attack, one-beat decay");
 
-  public final TriggerParameter plsShd = bag.register(
+  public final TriggerParameter plsShd =
     new TriggerParameter("PlsShd", () -> this.shdPulse.trigger(this.shaded.getValue(), 0.5))
-    .setDescription("Pulse Shaded 50% of its range toward (usually past) center: 32nd-note attack, one-beat decay"));
+    .setDescription("Pulse Shaded 50% of its range toward (usually past) center: 32nd-note attack, one-beat decay");
 
-  public final TriggerParameter plsCap = bag.register(
+  public final TriggerParameter plsCap =
     new TriggerParameter("PlsCap", () -> this.capPulse.trigger(this.capDia.getValue(), 1))
-    .setDescription("Pulse CapDia 50% of its range toward (usually past) center: 32nd-note attack, one-beat decay"));
+    .setDescription("Pulse CapDia 50% of its range toward (usually past) center: 32nd-note attack, one-beat decay");
 
-  public final TriggerParameter drain = bag.register(
+  public final TriggerParameter drain =
     new TriggerParameter("Drain", this::startDrain)
-    .setDescription("Fade the room out, concluding exactly on a beat (0.5-1.5 beats), then restart with the Pipes-knob count in the first palette colors"));
-
-  public final TriggerParameter rndTrig =
-    new TriggerParameter("RndTrig", bag::fire)
-    .setDescription("Randomly fire one of the gesture triggers or toggle Reverse");
+    .setDescription("Fade the room out, concluding exactly on a beat (0.5-1.5 beats), then restart with the Pipes-knob count in the first palette colors");
 
   public final DiscreteParameter pipes =
     new DiscreteParameter("Pipes", 1, 1, MAX_PIPES + 1)
@@ -352,7 +344,6 @@ public class Pipes3D extends ApotheneumPattern {
   // ---- Preallocated state (zero-alloc render path) ---------------------------
 
   private final AudioReactive audio;
-  private final TempoLock tempoLock;
   private final Random random = new Random();
 
   /** Per-wall color and depth buffers, cleared and fully re-rastered each frame */
@@ -482,7 +473,6 @@ public class Pipes3D extends ApotheneumPattern {
   public Pipes3D(LX lx) {
     super(lx);
     this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
-    this.tempoLock = new TempoLock(lx);
 
     addParameter("sparkle", this.sparkle);
     addParameter("teleport", this.teleport);
@@ -490,7 +480,6 @@ public class Pipes3D extends ApotheneumPattern {
     addParameter("plsShd", this.plsShd);
     addParameter("plsCap", this.plsCap);
     addParameter("drain", this.drain);
-    addParameter("rndTrig", this.rndTrig);
     addParameter("pipes", this.pipes);
     addParameter("speed", this.speed);
     addParameter("onBeats", this.onBeats); // key kept for .lxp compat; UI label is CapDiv
@@ -506,11 +495,6 @@ public class Pipes3D extends ApotheneumPattern {
     addParameter("rotY", this.rotY);
     addParameter("rstRot", this.rstRot);
     addParameter("audio", this.audioDepth);
-
-    // RndTrig bag = strictly the gesture triggers registered above (Sparkle,
-    // Teleport, the three pulses, Drain) plus a Reverse toggle. No parameter
-    // jumps — the pulse triggers took over that role (sixth pass).
-    bag.register(new TriggerParameter("RevTgl", this.reverse::toggle));
 
     this.lastBeats = lx.engine.tempo.getCompositeBasis();
     this.prevRate = this.speed.getValue();
@@ -1260,7 +1244,7 @@ public class Pipes3D extends ApotheneumPattern {
     if (!this.draining) {
       this.draining = true;
       final double periodMs = this.lx.engine.tempo.period.getValue();
-      double ms = this.tempoLock.msUntilNext(Tempo.Division.QUARTER);
+      double ms = (1 - this.lx.engine.tempo.getBasis(Tempo.Division.QUARTER)) * periodMs;
       if (ms < 0.5 * periodMs) {
         ms += periodMs; // never shorter than half a beat: target the beat after
       }

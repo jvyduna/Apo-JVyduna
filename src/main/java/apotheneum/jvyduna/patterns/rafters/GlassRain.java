@@ -9,15 +9,12 @@ import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.Ranges;
 import apotheneum.jvyduna.util.SurfaceCanvas;
 import apotheneum.jvyduna.util.SymbolGlyphs;
-import apotheneum.jvyduna.util.TempoLock;
-import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
 import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
 import heronarts.lx.color.LXDynamicColor;
-import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundParameter;
 import heronarts.lx.parameter.EnumParameter;
 import heronarts.lx.parameter.TriggerParameter;
@@ -42,8 +39,8 @@ import heronarts.lx.utils.LXUtils;
  * weight/width, and ADD-blended head accumulation where beads merge); the
  * symbol auto-condenses out of the rain on its own via an internal formation
  * envelope (the Form knob still overrides); and the moiré is a tempo-locked 2D
- * interference shimmer (grating phases advanced on the 1/16 grid via
- * {@link TempoLock}). Remaining values that can only be judged on the LEDs are
+ * interference shimmer (grating phases advanced on the 1/16 grid from the engine
+ * tempo's beat position). Remaining values that can only be judged on the LEDs are
  * marked with inline {@code CURATE:} notes. See GlassRain.md beside this file.
  *
  * <p>Candidate alternative layer (NOT built here): a cellular-automata
@@ -73,10 +70,6 @@ public class GlassRain extends ApotheneumPattern {
    *  before the Density knob and audio scale it. CURATE. */
   private static final double RAIN_MIN_PER_SEC = 2.0;
   private static final double RAIN_MAX_PER_SEC = 14.0;
-
-  /** Extra droplets injected on each tempo-grid crossing when Sync is on, so
-   *  the rain visibly pulses with the 70 half-time backbone. CURATE. */
-  private static final int GRID_BURST = 3;
 
   /** Heavy-drop burst size (DropBurst trigger / bass hit). CURATE. */
   private static final int BURST_DROPS = 18;
@@ -142,7 +135,7 @@ public class GlassRain extends ApotheneumPattern {
 
   /** Moiré phase advance per 1/16 grid step (radians), horizontal and vertical
    *  respectively. Small so the shimmer drifts slowly (a full cycle over ~a
-   *  bar), tempo-locked via {@link TempoLock#beatPosition()}. CURATE. */
+   *  bar), tempo-locked to the engine tempo's beat position. CURATE. */
   private static final double MOIRE_PHASE_H_PER_16 = 0.5;
   private static final double MOIRE_PHASE_V_PER_16 = 0.33;
 
@@ -166,25 +159,23 @@ public class GlassRain extends ApotheneumPattern {
 
   // ---- Composition helpers -----------------------------------------------------
 
-  private final TriggerBag bag = new TriggerBag("GlassRain");
   private final AudioReactive audio;
-  private final TempoLock tempoLock;
   private final Random random = new Random();
 
-  // ---- Parameters (registration order: triggers, energy, pattern, audio,
-  //      sync, tempoDiv, meta — see GlassRain.md) --------------------------------
+  // ---- Parameters (registration order: triggers, energy, pattern, audio —
+  //      see GlassRain.md) --------------------------------------------------------
 
-  public final TriggerParameter dropBurst = bag.register(
+  public final TriggerParameter dropBurst =
     new TriggerParameter("DropBurst", this::dropBurst)
-    .setDescription("Spatter a cluster of heavy droplets across both surfaces (small change; on a kick)"));
+    .setDescription("Spatter a cluster of heavy droplets across both surfaces (small change; on a kick)");
 
-  public final TriggerParameter condense = bag.register(
+  public final TriggerParameter condense =
     new TriggerParameter("Condense", this::condense)
-    .setDescription("Begin condensing a new religious symbol out of the rain, morphing from the current one (medium change; on the 2:16 vocal cluster)"));
+    .setDescription("Begin condensing a new religious symbol out of the rain, morphing from the current one (medium change; on the 2:16 vocal cluster)");
 
-  public final TriggerParameter wash = bag.register(
+  public final TriggerParameter wash =
     new TriggerParameter("SheetWash", this::sheetWash)
-    .setDescription("Send a bright sheet of water washing down the glass, rinsing the field (large change; on a section change)"));
+    .setDescription("Send a bright sheet of water washing down the glass, rinsing the field (large change; on a section change)");
 
   public final CompoundParameter energy =
     new CompoundParameter("Energy", 0.3)
@@ -217,18 +208,6 @@ public class GlassRain extends ApotheneumPattern {
   public final CompoundParameter audioDepth =
     new CompoundParameter("Audio", 0)
     .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
-
-  public final BooleanParameter sync =
-    new BooleanParameter("Sync", true)
-    .setDescription("Lock droplet spawn bursts to the tempo grid; off restores free-running rain");
-
-  public final EnumParameter<Tempo.Division> tempoDiv =
-    new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.HALF)
-    .setDescription("Tempo division droplet bursts land on when Sync is on (HALF = the 70 BPM half-time backbone of the 140 grid)");
-
-  public final TriggerParameter meta =
-    new TriggerParameter("Meta", bag::fire)
-    .setDescription("Randomly fire one of GlassRain's triggers or jump a parameter");
 
   // ---- Rain fields (preallocated in the constructor) ---------------------------
 
@@ -265,7 +244,6 @@ public class GlassRain extends ApotheneumPattern {
   public GlassRain(LX lx) {
     super(lx);
     this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
-    this.tempoLock = new TempoLock(lx);
 
     addParameter("dropBurst", this.dropBurst);
     addParameter("condense", this.condense);
@@ -278,16 +256,6 @@ public class GlassRain extends ApotheneumPattern {
     addParameter("form", this.form);
     addParameter("moire", this.moire);
     addParameter("audio", this.audioDepth);
-    addParameter("sync", this.sync);
-    addParameter("tempoDiv", this.tempoDiv);
-    addParameter("meta", this.meta);
-
-    // Meta jump candidates — mirrored 1:1 in the Jump candidates table in GlassRain.md
-    bag.jumpable(this.density, 0.15, 0.9);
-    bag.jumpable(this.streak, 0.2, 0.9);
-    bag.jumpable(this.bloom, 0.0, 1.0);
-    bag.jumpable(this.moire, 0.0, 0.6);
-    bag.jumpable(this.glyph);
   }
 
   // ---- Trigger handlers --------------------------------------------------------
@@ -363,10 +331,6 @@ public class GlassRain extends ApotheneumPattern {
     // Effective Form: the knob / timeline overrides the autonomous envelope.
     final double effForm = Math.max(this.form.getValue(), this.autoForm);
 
-    // Tempo grid gate — poll every frame so it never fires a stale crossing
-    final boolean crossed = this.tempoLock.crossed(this.tempoDiv.getEnum());
-    final boolean gridSpawn = this.sync.isOn() && crossed;
-
     // Bass hit → an extra spatter (audio-gated by the depth knob)
     if (this.audio.bassHit()) {
       burst(this.cubeField, (int) Math.round(BURST_DROPS * this.audio.depth()));
@@ -386,17 +350,19 @@ public class GlassRain extends ApotheneumPattern {
     }
     // Moiré phases locked to the 1/16 tempo grid via the continuous beat
     // position (a quarter-note beat = 4 sixteenths), so the interference
-    // shimmer drifts in time instead of free-running. Independent of the Sync
-    // toggle (moiré is gated by its own knob), and cheap: two scalars/frame.
-    final double sixteenth = this.tempoLock.beatPosition() * 4.0;
+    // shimmer drifts in time instead of free-running. Gated by the Moire knob;
+    // cheap: two scalars/frame.
+    final Tempo tempo = this.lx.engine.tempo;
+    final double sixteenth = (tempo.getCycleCount(Tempo.Division.QUARTER)
+      + tempo.getBasis(Tempo.Division.QUARTER)) * 4.0;
     final double moirePhaseH = sixteenth * MOIRE_PHASE_H_PER_16;
     final double moirePhaseV = sixteenth * MOIRE_PHASE_V_PER_16;
 
     final int dropletColor = LXColor.lerp(this.cold, this.warm, this.bloom.getValue());
 
-    renderField(this.cubeField, CUBE_FACE_W, 4, deltaMs, gridSpawn, decayMult,
+    renderField(this.cubeField, CUBE_FACE_W, 4, deltaMs, decayMult,
       dropletColor, effForm, moirePhaseH, moirePhaseV);
-    renderField(this.cylField, CYL_SYMBOL_W, 3, deltaMs, gridSpawn, decayMult,
+    renderField(this.cylField, CYL_SYMBOL_W, 3, deltaMs, decayMult,
       dropletColor, effForm, moirePhaseH, moirePhaseV);
 
     // Cube ring exterior → interior copy; cylinder likewise
@@ -409,9 +375,9 @@ public class GlassRain extends ApotheneumPattern {
   /** One surface's frame: spawn rain, step droplets, overlay moiré + wash, then
    *  condense the symbol on top. */
   private void renderField(RainField f, int symbolW, int symbolRepeat, double deltaMs,
-                           boolean gridSpawn, double decayMult, int dropletColor,
+                           double decayMult, int dropletColor,
                            double formAmt, double moirePhaseH, double moirePhaseV) {
-    spawnRain(f, deltaMs, gridSpawn);
+    spawnRain(f, deltaMs);
     f.step(deltaMs, decayMult, dropletColor);
 
     // Moiré overlay (peaks): a tempo-locked 2D interference shimmer, gated by
@@ -443,7 +409,7 @@ public class GlassRain extends ApotheneumPattern {
 
   // ---- Rain spawning -----------------------------------------------------------
 
-  private void spawnRain(RainField f, double deltaMs, boolean gridSpawn) {
+  private void spawnRain(RainField f, double deltaMs) {
     final double e = this.energy.getValue();
     // Density knob + audio level scale the base rate (audio auto-gated by depth)
     final double dens = LXUtils.constrain(this.density.getValue() * (1 + 0.6 * this.audio.level), 0, 2);
@@ -451,9 +417,6 @@ public class GlassRain extends ApotheneumPattern {
     f.spawnAccum += rate * deltaMs * 0.001;
     int budget = (int) f.spawnAccum;
     f.spawnAccum -= budget;
-    if (gridSpawn) {
-      budget += GRID_BURST;
-    }
     for (int i = 0; i < budget; ++i) {
       spawnDrop(f, (int) Math.round(100 * e));
     }
@@ -510,7 +473,7 @@ public class GlassRain extends ApotheneumPattern {
    * into horizontal interference fringes; a vertical grating (FREQ_V) adds
    * vertical structure so the field reads as a shimmering interference SHEET,
    * not static vertical bars. Both grating phases are advanced on the 1/16 grid
-   * (moirePhaseH / moirePhaseV, derived from {@link TempoLock#beatPosition()}),
+   * (moirePhaseH / moirePhaseV, derived from the engine tempo's beat position),
    * so the fringes sweep and the vertical shimmer drifts in time with the music.
    * Max-blended over the rain, scaled by the (treble-flickered) Moire amount.
    *

@@ -7,7 +7,6 @@ import apotheneum.ApotheneumPattern;
 import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.Ranges;
 import apotheneum.jvyduna.util.SurfaceCanvas;
-import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
@@ -48,8 +47,8 @@ import heronarts.lx.parameter.TriggerParameter;
  * drumbeats and stay accelerated under sustained bass. Both knobs default
  * to 0 = pure screensaver.
  *
- * Triggers (Kick/Reseed/Tint, including RndTrig-fired ones) execute
- * immediately; alignment to the music happens in the composition timeline.
+ * Triggers (Kick/Reseed/Tint) execute immediately; alignment to the music
+ * happens in the composition timeline.
  * Y rotation is tempo-relative: one quarter turn per YRotDiv division.
  *
  * See Lorre.md (beside this file) for the full design note.
@@ -221,23 +220,17 @@ public class Lorre extends ApotheneumPattern {
     }
   }
 
-  private final TriggerBag bag = new TriggerBag("Lorre");
-
-  public final TriggerParameter kick = bag.register(
+  public final TriggerParameter kick =
     new TriggerParameter("Kick", this::kickSwarm)
-    .setDescription("Punt every particle off the attractor; the swarm re-converges over ~5s"));
+    .setDescription("Punt every particle off the attractor; the swarm re-converges over ~5s");
 
-  public final TriggerParameter reseed = bag.register(
+  public final TriggerParameter reseed =
     new TriggerParameter("Reseed", this::reseedSwarm)
-    .setDescription("Re-scatter all particles uniformly in the attractor's bounding box"));
+    .setDescription("Re-scatter all particles uniformly in the attractor's bounding box");
 
-  public final TriggerParameter tint = bag.register(
+  public final TriggerParameter tint =
     new TriggerParameter("Tint", this::tintSwarm)
-    .setDescription("Crossfade every particle to its next palette color over one beat"));
-
-  public final TriggerParameter rndTrig =
-    new TriggerParameter("RndTrig", bag::fire)
-    .setDescription("Randomly fire a trigger or jump a parameter");
+    .setDescription("Crossfade every particle to its next palette color over one beat");
 
   public final CompoundParameter desat =
     new CompoundParameter("Desat", 0.55)
@@ -340,7 +333,6 @@ public class Lorre extends ApotheneumPattern {
     addParameter("kick", this.kick);
     addParameter("reseed", this.reseed);
     addParameter("tint", this.tint);
-    addParameter("rndTrig", this.rndTrig);
     addParameter("desat", this.desat);
     addParameter("rho", this.rho);
     addParameter("speed", this.speed);
@@ -351,12 +343,6 @@ public class Lorre extends ApotheneumPattern {
     addParameter("trails", this.trails);
     addParameter("audio", this.audioDepth);
     addParameter("bassSpd", this.bassSpd);
-
-    // Jump candidates -- each line mirrors a row in Lorre.md's Jump-candidates table
-    bag.jumpable(this.rho, 24, 40);          // regime-hopping, best jump in the suite
-    bag.jumpable(this.yRotDiv, RotDiv.FOUR.ordinal(), RotDiv.SIXTEEN.ordinal()); // slow window, never Off
-    bag.jumpable(this.trails);               // full range
-    bag.jumpable(this.speed, 1.5, 3.5);      // capped: keeps orbit tempo in a musical window (was [0.6, 1.4] pre-rebaseline)
 
     // Scatter, then integrate silently so frame one already shows the butterfly
     reseedSwarm();

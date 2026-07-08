@@ -7,17 +7,12 @@ import apotheneum.ApotheneumPattern;
 import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.Ranges;
 import apotheneum.jvyduna.util.SurfaceCanvas;
-import apotheneum.jvyduna.util.TempoLock;
-import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
-import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
 import heronarts.lx.color.LXDynamicColor;
-import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundParameter;
-import heronarts.lx.parameter.EnumParameter;
 import heronarts.lx.parameter.TriggerParameter;
 
 /**
@@ -131,22 +126,19 @@ public class PulseOrb extends ApotheneumPattern {
 
   // ---- Parameters ---------------------------------------------------------------
 
-  private final TriggerBag bag = new TriggerBag("PulseOrb");
   private final AudioReactive audio;
-  private final TempoLock tempoOrb;   // quantize stream for the breathe period
-  private final TempoLock tempoWall;  // independent quantize stream for the wall drift
 
-  public final TriggerParameter pulse = bag.register(
+  public final TriggerParameter pulse =
     new TriggerParameter("Pulse", this::onPulse)
-    .setDescription("A single breath swell — the orb radius surges and settles over ~2 s"));
+    .setDescription("A single breath swell — the orb radius surges and settles over ~2 s");
 
-  public final TriggerParameter ripple = bag.register(
+  public final TriggerParameter ripple =
     new TriggerParameter("Ripple", this::onRipple)
-    .setDescription("One decisive ring expands outward from the orb across the walls (~3 s) — the 4:04 snare bloom"));
+    .setDescription("One decisive ring expands outward from the orb across the walls (~3 s) — the 4:04 snare bloom");
 
-  public final TriggerParameter fold = bag.register(
+  public final TriggerParameter fold =
     new TriggerParameter("Fold", this::onFold)
-    .setDescription("Fold the wall topology inside-out into a new configuration — the K-hole world reconfigures over ~2.5 s"));
+    .setDescription("Fold the wall topology inside-out into a new configuration — the K-hole world reconfigures over ~2.5 s");
 
   public final CompoundParameter energy =
     new CompoundParameter("Energy", 0.35)
@@ -175,18 +167,6 @@ public class PulseOrb extends ApotheneumPattern {
   public final CompoundParameter audioDepth =
     new CompoundParameter("Audio", 0)
     .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
-
-  public final BooleanParameter sync =
-    new BooleanParameter("Sync", true)
-    .setDescription("Loosely lock the breathe/drift periods to the tempo grid; off restores free-running timing");
-
-  public final EnumParameter<Tempo.Division> tempoDiv =
-    new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.WHOLE)
-    .setDescription("Tempo division the breathe/drift periods snap to when Sync is on (WHOLE = one bar ~ the pad swell)");
-
-  public final TriggerParameter meta =
-    new TriggerParameter("Meta", bag::fire)
-    .setDescription("Randomly fire one of PulseOrb's triggers or jump a parameter");
 
   // ---- Preallocated buffers (zero-alloc render) --------------------------------
 
@@ -219,11 +199,8 @@ public class PulseOrb extends ApotheneumPattern {
   public PulseOrb(LX lx) {
     super(lx);
     this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
-    this.tempoOrb = new TempoLock(lx);
-    this.tempoWall = new TempoLock(lx);
 
-    // Registration order: triggers (Meta last), Energy, pattern params, Audio,
-    // Sync, TempoDiv, Meta.
+    // Registration order: triggers, Energy, pattern params, Audio.
     addParameter("pulse", this.pulse);
     addParameter("ripple", this.ripple);
     addParameter("fold", this.fold);
@@ -234,16 +211,6 @@ public class PulseOrb extends ApotheneumPattern {
     addParameter("warp", this.warp);
     addParameter("drift", this.drift);
     addParameter("audio", this.audioDepth);
-    addParameter("sync", this.sync);
-    addParameter("tempoDiv", this.tempoDiv);
-    addParameter("meta", this.meta);
-
-    // Meta jump candidates — mirrored 1:1 in the Jump candidates table in the .md
-    bag.jumpable(this.size, 0.2, 0.9);
-    bag.jumpable(this.warmth, 0.3, 1.0);
-    bag.jumpable(this.morph, 0.15, 1.0);
-    bag.jumpable(this.warp, 0.0, 1.0);
-    bag.jumpable(this.drift, 0.6, 1.6);
   }
 
   // ---- Trigger handlers (event-rate; minimal allocation permitted) --------------
@@ -318,26 +285,17 @@ public class PulseOrb extends ApotheneumPattern {
   }
 
   /** Advance the breathe + wall-drift phases, the fold lerp, and the pulse /
-   *  ripple envelopes. When Sync is on, snap each rolling period to the tempo
-   *  grid via quantizePeriod (loose: the default stretch clamp). */
+   *  ripple envelopes. Both periods free-run at their energy-derived values. */
   private void advanceClocks(double deltaMs) {
     final double e = this.energy.getValue();
-    final boolean syncOn = this.sync.isOn();
-    final Tempo.Division div = this.tempoDiv.getEnum();
 
     final double orbPeriod = Ranges.lin(e, BREATHE_MS_AMBIENT, BREATHE_MS_PEAK);
-    double orbRate = TWO_PI / orbPeriod;
-    if (syncOn) {
-      orbRate *= this.tempoOrb.quantizePeriod(orbPeriod, div);
-    }
+    final double orbRate = TWO_PI / orbPeriod;
     this.orbPhase = wrapTwoPi(this.orbPhase + orbRate * deltaMs);
 
     final double wallPeriod =
       Ranges.lin(e, WALL_MS_AMBIENT, WALL_MS_PEAK) / this.drift.getValue();
-    double wallRate = TWO_PI / wallPeriod;
-    if (syncOn) {
-      wallRate *= this.tempoWall.quantizePeriod(wallPeriod, div);
-    }
+    final double wallRate = TWO_PI / wallPeriod;
     this.wallPhase = wrapTwoPi(this.wallPhase + wallRate * deltaMs);
 
     // Topology fold eases toward its target (set by the Fold trigger)

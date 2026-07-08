@@ -9,8 +9,6 @@ import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.PerceptualHue;
 import apotheneum.jvyduna.util.Ranges;
 import apotheneum.jvyduna.util.SurfaceCanvas;
-import apotheneum.jvyduna.util.TempoLock;
-import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
@@ -163,22 +161,20 @@ public class Mystify extends ApotheneumPattern {
 
   // ---- Parameters ---------------------------------------------------------------
 
-  private final TriggerBag bag = new TriggerBag("Mystify");
   private final AudioReactive audio;
-  private final TempoLock tempoLock;
   private final Random random = new Random();
 
-  public final TriggerParameter scatter = bag.register(
+  public final TriggerParameter scatter =
     new TriggerParameter("Scatter", this::scatter)
-    .setDescription("Re-randomize every vertex position and velocity and re-anchor the bounce grid"));
+    .setDescription("Re-randomize every vertex position and velocity and re-anchor the bounce grid");
 
-  public final TriggerParameter reverse = bag.register(
+  public final TriggerParameter reverse =
     new TriggerParameter("Reverse", this::reverse)
-    .setDescription("Negate all vertex velocities so the shapes retrace their paths"));
+    .setDescription("Negate all vertex velocities so the shapes retrace their paths");
 
-  public final TriggerParameter hueJump = bag.register(
+  public final TriggerParameter hueJump =
     new TriggerParameter("HueJump", this::hueJump)
-    .setDescription("Rotate the palette color assignment of the polyline edges"));
+    .setDescription("Rotate the palette color assignment of the polyline edges");
 
   public final EnumParameter<Geometry> geometry =
     new EnumParameter<Geometry>("GeoMode", Geometry.CUBE_RING)
@@ -225,10 +221,6 @@ public class Mystify extends ApotheneumPattern {
     new CompoundParameter("Audio", 0)
     .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
 
-  public final TriggerParameter meta =
-    new TriggerParameter("Meta", bag::fire)
-    .setDescription("Randomly fire one of Mystify's triggers or jump a parameter");
-
   // ---- Simulation state (all preallocated; normalized [0,1] coordinates) ------
   // Four face groups of MAX_SHAPES*MAX_VERTS vertices each; group g occupies
   // indices [g*GROUP_SIZE, (g+1)*GROUP_SIZE). All 40 are always simulated;
@@ -240,7 +232,7 @@ public class Mystify extends ApotheneumPattern {
   private final double[] velY = new double[FACE_GROUPS * GROUP_SIZE]; // canvas-heights/sec at rate=1
 
   /** Planned wall-arrival per axis as an ABSOLUTE transport beat index
-   *  (see TempoLock.beatPosition). NaN = unplanned: paused, or x on wrap
+   *  (see beatPosition()). NaN = unplanned: paused, or x on wrap
    *  topologies where there is no bounce event to schedule. */
   private final double[] targetBeatX = new double[FACE_GROUPS * GROUP_SIZE];
   private final double[] targetBeatY = new double[FACE_GROUPS * GROUP_SIZE];
@@ -264,6 +256,10 @@ public class Mystify extends ApotheneumPattern {
   private boolean needsReplan = true;
   private boolean wasPaused = false;
   private BounceGrid lastBounceGrid = null;
+
+  /** TrailDiv stamp-gate state: last observed division and its cycle count */
+  private Tempo.Division lastTrailDiv = null;
+  private int lastTrailCycle = 0;
 
   /** Per-edge colors (edge i of shape s at [s*MAX_VERTS + i]), refreshed from
    *  the palette each frame, cycling across ALL swatch colors — shared by all
@@ -297,7 +293,6 @@ public class Mystify extends ApotheneumPattern {
   public Mystify(LX lx) {
     super(lx);
     this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
-    this.tempoLock = new TempoLock(lx);
     this.geometry.setWrappable(false); // knob stops at Faces/Cylinder ends instead of wrapping
     for (int f = 0; f < FACE_GROUPS; ++f) {
       this.faceTrail[f] = new SurfaceCanvas(Apotheneum.GRID_WIDTH, Apotheneum.GRID_HEIGHT);
@@ -318,14 +313,6 @@ public class Mystify extends ApotheneumPattern {
     addParameter("mirror", this.mirror);
     addParameter("bounceDiv", this.bounceDiv);
     addParameter("audio", this.audioDepth);
-    addParameter("meta", this.meta);
-
-    // Meta jump candidates — mirrored 1:1 in the Jump candidates table in Mystify.md
-    bag.jumpable(this.trails, 0.25, 0.85);
-    bag.jumpable(this.vertices);
-    bag.jumpable(this.geometry);
-    bag.jumpable(this.speed, 0.4, 1.5); // CURATE: upper bound; full-range jumps to 5x would jar
-    bag.jumpable(this.shapes);
 
     scatter();
   }
@@ -387,9 +374,9 @@ public class Mystify extends ApotheneumPattern {
     }
     final boolean wrapX = geom.wrapX;
 
-    // TrailDiv stamp gate: polled EXACTLY ONCE per frame (crossed() consumes
-    // the crossing; the FACES_4 per-face loop must reuse this boolean)
-    final boolean stampNow = this.tempoLock.crossed(this.trailDiv.getEnum());
+    // TrailDiv stamp gate: polled EXACTLY ONCE per frame (trailCrossed()
+    // consumes the crossing; the FACES_4 per-face loop must reuse this boolean)
+    final boolean stampNow = trailCrossed(this.trailDiv.getEnum());
 
     // Nominal rate: drives wrap-x drift and retarget detection. Planned-axis
     // velocity comes from the random grid arrivals in planAxis().
@@ -399,7 +386,7 @@ public class Mystify extends ApotheneumPattern {
     // Bounce planner bookkeeping (order matters: anchor before any replan)
     final BounceGrid grid = this.bounceDiv.getEnum();
     if (this.needsReanchor) {
-      this.anchorBeat = this.tempoLock.beatCycle();
+      this.anchorBeat = this.lx.engine.tempo.getCycleCount(Tempo.Division.QUARTER);
       this.needsReanchor = false;
       this.needsReplan = true;
     }
@@ -493,6 +480,34 @@ public class Mystify extends ApotheneumPattern {
 
   // ---- Bounce planner -------------------------------------------------------------
 
+  /** Per-frame TrailDiv boundary gate: true on exactly the frames where the
+   *  transport crossed a boundary of the division. Call once per frame — it
+   *  consumes the crossing. The first call, or a division change, resyncs
+   *  and returns false. */
+  private boolean trailCrossed(Tempo.Division division) {
+    final int count = this.lx.engine.tempo.getCycleCount(division);
+    if (division != this.lastTrailDiv) {
+      this.lastTrailDiv = division;
+      this.lastTrailCycle = count;
+      return false;
+    }
+    final boolean crossed = (count != this.lastTrailCycle);
+    this.lastTrailCycle = count;
+    return crossed;
+  }
+
+  /** The transport's continuous absolute beat position: whole quarter-note
+   *  cycle count plus fractional phase (monotonic while the transport runs) */
+  private double beatPosition() {
+    final Tempo tempo = this.lx.engine.tempo;
+    return tempo.getCycleCount(Tempo.Division.QUARTER) + tempo.getBasis(Tempo.Division.QUARTER);
+  }
+
+  /** Signed ms until an absolute beat index at the current BPM; negative if past */
+  private double msUntilBeat(double absoluteBeat) {
+    return (absoluteBeat - beatPosition()) * this.lx.engine.tempo.period.getValue();
+  }
+
   /**
    * Plan one axis's wall arrival: a RANDOM allowed grid beat (anchorBeat +
    * m * BounceDiv) 1..kMax steps from now, where kMax = floor(8/Speed) —
@@ -506,8 +521,8 @@ public class Mystify extends ApotheneumPattern {
    */
   private double planAxis(double pos, double vel) {
     final double n = this.bounceDiv.getEnum().beats;
-    final double beatMs = this.tempoLock.beatPeriodMs();
-    final double now = this.tempoLock.beatPosition();
+    final double beatMs = this.lx.engine.tempo.period.getValue();
+    final double now = beatPosition();
     final double speedVal = Math.max(this.speed.getValue(), PAUSE_SPEED_EPS);
     final int kMax = (int) LXUtils.constrain(Math.floor(RAND_BOUNCE_STEPS / speedVal), 1, RAND_WINDOW_MAX);
 
@@ -524,7 +539,7 @@ public class Mystify extends ApotheneumPattern {
     final double guardFactor = LXUtils.constrain((SPEED_MAX - speedVal) / (SPEED_MAX - 1), 0, 1);
     final double remDist = (vel > 0) ? (1 - pos) : pos;
     final double minMs = Math.max(MIN_HEADROOM_MS, 1000 * remDist * (TRAVERSE_SEC / 5) * guardFactor);
-    for (int guard = 0; (guard < 1024) && (this.tempoLock.msUntilBeat(target) < minMs); ++guard) {
+    for (int guard = 0; (guard < 1024) && (msUntilBeat(target) < minMs); ++guard) {
       target += n;
     }
     return target;
@@ -615,10 +630,10 @@ public class Mystify extends ApotheneumPattern {
     final double wall = (dir > 0) ? 1 : 0;
     final double remDist = Math.abs(wall - pos[i]);
 
-    double msEff = this.tempoLock.msUntilBeat(target[i]);
+    double msEff = msUntilBeat(target[i]);
     if (this.slewRemainMs > 0) {
       final double t = smoothstep(1 - this.slewRemainMs / SLEW_MS);
-      msEff = LXUtils.lerp(this.tempoLock.msUntilBeat(slewOld[i]), msEff, t);
+      msEff = LXUtils.lerp(msUntilBeat(slewOld[i]), msEff, t);
     }
 
     // Stale plan (transport restart, huge BPM jump, inactive gap): the target

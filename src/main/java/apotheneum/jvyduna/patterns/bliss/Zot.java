@@ -18,8 +18,6 @@ import apotheneum.doved.lightning.PhysicallyBasedAlgorithm;
 import apotheneum.doved.lightning.RRTAlgorithm;
 import apotheneum.jvyduna.util.Ranges;
 import apotheneum.jvyduna.util.SurfaceCanvas;
-import apotheneum.jvyduna.util.TempoLock;
-import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
@@ -161,19 +159,17 @@ public class Zot extends ApotheneumPattern {
 
   // ---- Parameters -----------------------------------------------------------
 
-  private final TriggerBag bag = new TriggerBag("Zot");
-
-  public final TriggerParameter strike = bag.register(
+  public final TriggerParameter strike =
     new TriggerParameter("Strike", this::launchStrike)
-    .setDescription("Strike one bolt now"));
+    .setDescription("Strike one bolt now");
 
-  public final TriggerParameter storm = bag.register(
+  public final TriggerParameter storm =
     new TriggerParameter("Storm", this::storm)
-    .setDescription("Burst of 3-5 bolts spread over ~2 seconds"));
+    .setDescription("Burst of 3-5 bolts spread over ~2 seconds");
 
-  public final TriggerParameter nextAlgo = bag.register(
+  public final TriggerParameter nextAlgo =
     new TriggerParameter("NextAlgo", this::nextAlgorithm)
-    .setDescription("Cycle to the next lightning generator algorithm"));
+    .setDescription("Cycle to the next lightning generator algorithm");
 
   public final EnumParameter<Algo> algorithm =
     new EnumParameter<Algo>("Algo", Algo.MIDPOINT)
@@ -226,10 +222,6 @@ public class Zot extends ApotheneumPattern {
   public final DiscreteParameter emaDur =
     new DiscreteParameter("EMADur", 3, 0, 17)
     .setDescription("EMA / refractory window in beats: a strike usually won't re-fire within this many beats (0 = no EMA gate)");
-
-  public final TriggerParameter rndTrig =
-    new TriggerParameter("RndTrig", bag::fire)
-    .setDescription("Randomly fire a trigger or jump a parameter");
 
   // ---- Surfaces (10 total: external[0..4], internal[0..4]) ------------------
 
@@ -293,7 +285,6 @@ public class Zot extends ApotheneumPattern {
   // ---- State ----------------------------------------------------------------
 
   private final Random random = new Random();
-  private final TempoLock tempoLock;
   private final GraphicMeter meter;
 
   private double ema = 0;
@@ -304,7 +295,6 @@ public class Zot extends ApotheneumPattern {
 
   public Zot(LX lx) {
     super(lx);
-    this.tempoLock = new TempoLock(lx);
     this.meter = lx.engine.audio.meter;
     this.faceG = configureGraphics(this.faceScratch);
     this.cylG = configureGraphics(this.cylScratch);
@@ -331,7 +321,6 @@ public class Zot extends ApotheneumPattern {
     addParameter("strike", this.strike);
     addParameter("storm", this.storm);
     addParameter("nextAlgo", this.nextAlgo);
-    addParameter("rndTrig", this.rndTrig);
     addParameter("algorithm", this.algorithm);
     addParameter("eSurfs", this.eSurfs);
     addParameter("iSurfs", this.iSurfs);
@@ -345,14 +334,6 @@ public class Zot extends ApotheneumPattern {
     addParameter("audio", this.audioFloor);
     addParameter("audFreq", this.audFreq);
     addParameter("emaDur", this.emaDur);
-
-    // Jump candidates — mirrored 1:1 in the Zot.md "Jump candidates" table
-    bag.jumpable(this.algorithm);
-    bag.jumpable(this.thickness, 1, 3);
-    bag.jumpable(this.branch, 0.1, 0.8);
-    bag.jumpable(this.jag, 0.15, 0.9);
-    bag.jumpable(this.eSurfs, 1, 4);
-    bag.jumpable(this.iSurfs, 0, 3);
   }
 
   private static Graphics2D configureGraphics(BufferedImage image) {
@@ -398,6 +379,12 @@ public class Zot extends ApotheneumPattern {
   private void nextAlgorithm() {
     this.algorithm.increment();
     LX.log("Zot: algorithm -> " + this.algorithm.getEnum());
+  }
+
+  /** Duration of one cycle of a tempo division at the current BPM, in ms */
+  private double divisionMs(Tempo.Division division) {
+    // period is ms per quarter-note beat; multiplier is divisions per beat
+    return this.lx.engine.tempo.period.getValue() / division.multiplier;
   }
 
   /**
@@ -467,8 +454,8 @@ public class Zot extends ApotheneumPattern {
     bolt.white = this.white.isOn();
     bolt.color = bolt.white ? 0xffffffff : pickColor();
     bolt.cylOffset = this.random.nextInt(CYL_W);
-    bolt.leaderMs = this.tempoLock.divisionMs(this.strkTime.getEnum());
-    bolt.fadeMs = this.tempoLock.divisionMs(this.fadeTime.getEnum());
+    bolt.leaderMs = divisionMs(this.strkTime.getEnum());
+    bolt.fadeMs = divisionMs(this.fadeTime.getEnum());
     bolt.ageMs = 0;
     bolt.phase = Phase.LEADER;
     bolt.flashThisStrike = false;

@@ -93,25 +93,10 @@ mix envelope. Default gentle per the brief ("`Audio` depth knob default gentle")
 
 ## Tempo mapping
 
-Two **continuous rolling periods** (not scheduled events), so both use
-`TempoLock.quantizePeriod` (the Satori idiom), each on its own `TempoLock`
-instance so their harmonic latches are independent:
-
-- **Orb breathe period** (`tempoOrb`) — snapped to `TempoDiv` (default `WHOLE`
-  = one bar ≈ the pad swell) when Sync is on. Loose: the default stretch clamp
-  `[0.7, 1.4]`, so the breathe only nudges toward the bar grid, matching the
-  brief's "TempoLock in a *loose* mode."
-- **Wall-drift period** (`tempoWall`) — snapped to the same `TempoDiv` but from a
-  much longer base period, so the two systems stay decorrelated even when both
-  are grid-locked.
-
-Turning **Sync off** removes both `quantizePeriod` calls; the periods free-run at
-their energy-derived values (`Ranges.lin`), which are already good-looking (the
-`WHOLE`-bar default just aligns the breath to the ambient's ~1.4 s bar swell).
-No state needs restoring — the scale factor is multiplicative and transient.
-
-No `crossed()` gate is used (there are no discrete grid-fired events; the
-triggers are operator/clip-driven).
+No tempo gating — both rolling periods (orb breathe, wall drift) free-run at
+their energy-derived values (`Ranges.lin`), which are already good-looking
+(Sync/TempoDiv/Meta convention retired 2026-07-08; free-run behavior = the old
+Sync-off path).
 
 ## Energy mapping
 
@@ -128,8 +113,7 @@ never past the traversal cap.
 
 ## Parameters
 
-Registration order (triggers → Energy → pattern params → Audio → Sync → TempoDiv
-→ Meta):
+Registration order (triggers → Energy → pattern params → Audio):
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
@@ -143,9 +127,6 @@ Registration order (triggers → Energy → pattern params → Audio → Sync �
 | `warp` | Warp | CompoundParameter | 0.5 | 0..1 | domain-warp fold intensity |
 | `drift` | Drift | CompoundParameter | 1 | 0.5..2 | wall-drift speed multiplier (kept slower than the orb) |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth (0 = pure screensaver) |
-| `sync` | Sync | BooleanParameter | true | — | loosely lock breathe/drift periods to the tempo grid |
-| `tempoDiv` | TempoDiv | EnumParameter | WHOLE | Tempo.Division | division the periods snap to under Sync |
-| `meta` | Meta | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
 
 The 2:57 bloom / 4:04 re-escalation / 5:07 contract-to-point arc is delivered by
 **timeline automation** of `size`/`morph` (and the `ripple` trigger at 4:04),
@@ -155,7 +136,7 @@ knobs; the composition drives them).
 
 ## Triggers
 
-Three non-meta triggers, small → large:
+Three triggers, small → large:
 
 - `pulse` (small) — the orb radius/brightness swells from the current breathe
   state and settles back over ~2 s (`PULSE_DECAY_MS`). No spatial travel; reads
@@ -175,23 +156,6 @@ Three non-meta triggers, small → large:
   post-fold coordinate mapping (a topological morph, not a bare phase add). The
   K-hole "world reconfigures inside-out" gesture.
 
-Meta fires one of the above or jumps a parameter.
-
-## Jump candidates
-
-Rows mirror the `bag.jumpable(...)` lines in the constructor 1:1. All three
-triggers are also registered in the bag.
-
-| Param | Jump range | Status | Notes |
-|---|---|---|---|
-| `size` | [0.2, 0.9] | candidate | extremes excluded: 0 vanishes the orb, 1 blooms past the face |
-| `warmth` | [0.3, 1.0] | candidate | full-cool floor avoided so the field never goes fully teal |
-| `morph` | [0.15, 1.0] | candidate | floor keeps a hint of wall texture; 0 reserved for scripted breakdown |
-| `warp` | [0.0, 1.0] | candidate | any warp is safe |
-| `drift` | [0.6, 1.6] | candidate | extremes reserved for manual/scripted use |
-
-Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [a,b]`.
-
 ## Simulation-principles compliance
 
 - **Orb breathe (sustained motion)** — a full inhale+exhale is one sine period:
@@ -200,9 +164,7 @@ Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [
 - **Wall-field drift (sustained motion)** — the domain-warp phase advances one
   full turn over 24 s ambient / **12 s at energy = 1** (before Drift). Drift ≤ 2
   can halve that to 6 s at peak energy — still ≥ 5 s. CURATE: confirm Drift = 2 +
-  energy = 1 (6 s field turnover) still reads as drift, not motion; clamp Drift's
-  jump upper bound (1.6) already keeps the Meta pool inside the cap at peak
-  energy (24/1.6 = 15 s ambient; at energy 1, 12/1.6 = 7.5 s).
+  energy = 1 (6 s field turnover) still reads as drift, not motion.
 - **Ripple (event-like)** — ~2.5 s expansion, 3 s total life ≥ 1.5 s minimum;
   fired sparingly (once at 4:04).
 - **Pulse (event-like)** — 2 s brightness/radius settle ≥ 1.5 s minimum, no
@@ -245,3 +207,4 @@ see the Curation log — leaving only these two hardware-balance items.)
 |---|---|---|
 | 2026-07-07 | Initial first-pass, Claude autonomous session | Design doc + compiling stub: orb + coupled domain-warp wall field + palette morph wired to params/AudioReactive/TempoLock; domain-warp math and topology-fold transition left as marked TODOs for hardware tuning |
 | 2026-07-07 | Full build-out, Claude session | Replaced the two-octave-sine placeholder with a real inside-out-fold iterative domain warp (Quilez-style two-pass fbm-of-fbm, seam-safe via integer angle harmonics + vertical-only angle displacements, verified invariant under xn→xn+1); implemented the `Fold` trigger as a true inside-out coordinate reconfiguration (eased vertical center↔edge inversion + rigid seamless ring rotation `FOLD_ROT` + warp re-texture, crossfaded on the eased `foldPhase` in fold-units) |
+| 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path) | Project-wide retirement of the Sync/TempoDiv + Meta pattern-control convention. The breathe and wall-drift periods now always free-run at their energy-derived values (the `quantizePeriod` snapping is gone). |

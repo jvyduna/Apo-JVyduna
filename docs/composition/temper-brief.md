@@ -150,6 +150,12 @@ active choice. **Avoid:** rigid beat sync, geometric/tech screensaver motifs
 "designed." Restraint is the point — this is the quietest, most patient the whole
 piece will be.
 
+**Standing rule (2026-07-08): all Temper patterns are super chill and the
+recording is not on a fixed tempo grid — no sudden jumps, ever.** No tempo
+gating (Sync/TempoDiv), no Meta/random-jump triggers, no drift/re-randomize
+triggers, no audio reactivity in Temper patterns; everything free-runs and all
+choreography is placed on the arrange timeline by hand.
+
 ## 6. Pattern & effect plan
 
 Ranked. One hero for first-pass implementation.

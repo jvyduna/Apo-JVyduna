@@ -7,12 +7,9 @@ import apotheneum.ApotheneumPattern;
 import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.PixelFont5;
 import apotheneum.jvyduna.util.SurfaceCanvas;
-import apotheneum.jvyduna.util.TempoLock;
-import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
-import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
 import heronarts.lx.color.LXDynamicColor;
 import heronarts.lx.parameter.BooleanParameter;
@@ -49,8 +46,8 @@ import heronarts.lx.utils.LXUtils;
  * doubling down on darkness after `rafters`.
  *
  * Standalone (no composition driving it) the defaults are a good deadpan
- * screensaver: a decimal clock ticking on the quarter-note grid at a muted
- * phosphor brightness.
+ * screensaver: a decimal clock ticking at the quarter-note BPM period at a
+ * muted phosphor brightness.
  *
  * See HoldClock.md (beside this file) for the full design note. All visual
  * subsystems are built: the bezel/tick/AA-hand analog face, the split-flap
@@ -144,31 +141,25 @@ public class HoldClock extends ApotheneumPattern {
 
   // ---- Composition helpers ---------------------------------------------------
 
-  private final TriggerBag bag = new TriggerBag("HoldClock");
   private final AudioReactive audio;
-  private final TempoLock tempoLock;
 
   // ---- Parameters (registration order per house style) -----------------------
 
-  public final TriggerParameter tick = bag.register(
+  public final TriggerParameter tick =
     new TriggerParameter("Tick", this::tick)
-    .setDescription("Advance the clock by one unit immediately (a manual on-beat tick)"));
+    .setDescription("Advance the clock by one unit immediately (a manual on-beat tick)");
 
-  public final TriggerParameter boot = bag.register(
+  public final TriggerParameter boot =
     new TriggerParameter("Boot", this::boot)
-    .setDescription("The 0:19 reveal: leave the cold open and boot the hold-screen clock"));
+    .setDescription("The 0:19 reveal: leave the cold open and boot the hold-screen clock");
 
-  public final TriggerParameter baseFlip = bag.register(
+  public final TriggerParameter baseFlip =
     new TriggerParameter("BaseFlip", this::baseFlip)
-    .setDescription("Advance the clock to the next (more esoteric) mode: analog → flip → decimal → binary → hex → mystic"));
+    .setDescription("Advance the clock to the next (more esoteric) mode: analog → flip → decimal → binary → hex → mystic");
 
-  public final TriggerParameter glitch = bag.register(
+  public final TriggerParameter glitch =
     new TriggerParameter("Glitch", this::glitch)
-    .setDescription("One-frame loop-glitch / VHS melt of the current frame (the button flourish)"));
-
-  public final TriggerParameter meta =
-    new TriggerParameter("Meta", bag::fire)
-    .setDescription("Randomly fire one of HoldClock's triggers or jump a parameter");
+    .setDescription("One-frame loop-glitch / VHS melt of the current frame (the button flourish)");
 
   public final EnumParameter<Phase> phase =
     new EnumParameter<Phase>("Phase", Phase.RUNNING)
@@ -202,14 +193,6 @@ public class HoldClock extends ApotheneumPattern {
     new CompoundParameter("Audio", 0)
     .setDescription("Audio reactivity depth: 0 = pure clock (default), 1 = subtle per-kick jitter");
 
-  public final BooleanParameter sync =
-    new BooleanParameter("Sync", true)
-    .setDescription("Tick the clock on the tempo grid; off free-runs at the current BPM period");
-
-  public final EnumParameter<Tempo.Division> tempoDiv =
-    new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.QUARTER)
-    .setDescription("Tempo division the clock ticks (and the colon blinks) on when Sync is enabled");
-
   // ---- Surfaces (preallocated; zero-alloc render) ----------------------------
 
   private final SurfaceCanvas faceCanvas =
@@ -239,7 +222,7 @@ public class HoldClock extends ApotheneumPattern {
 
   private int elapsedTicks = 0;      // the clock's counted units (ticks ≈ seconds)
   private boolean colonOn = true;    // blinks each tick
-  private double freeRunMs = 0;      // free-running (Sync off) tick accumulator
+  private double freeRunMs = 0;      // free-running tick accumulator (BPM period)
   private double coldOpenMs = 0;     // time spent in COLD_OPEN, for the dawn ramp
   private double shimmerPhase = 0;   // 0..1 ascending-sweep position
   private double glitchMs = 0;       // remaining button-glitch envelope
@@ -253,15 +236,13 @@ public class HoldClock extends ApotheneumPattern {
   public HoldClock(LX lx) {
     super(lx);
     this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
-    this.tempoLock = new TempoLock(lx);
     this.clockMode.setWrappable(true); // baseFlip wraps mystic → analog
 
-    // Triggers first (Meta last of them, via the bag)
+    // Triggers first
     addParameter("tick", this.tick);
     addParameter("boot", this.boot);
     addParameter("baseFlip", this.baseFlip);
     addParameter("glitch", this.glitch);
-    addParameter("meta", this.meta);
     // Pattern parameters
     addParameter("phase", this.phase);
     addParameter("clockMode", this.clockMode);
@@ -270,15 +251,8 @@ public class HoldClock extends ApotheneumPattern {
     addParameter("shimmer", this.shimmer);
     addParameter("freeze", this.freeze);
     addParameter("message", this.message);
-    // Audio, then Sync / TempoDiv
+    // Audio
     addParameter("audio", this.audioDepth);
-    addParameter("sync", this.sync);
-    addParameter("tempoDiv", this.tempoDiv);
-
-    // Meta jump candidates — mirrored 1:1 in HoldClock.md
-    bag.jumpable(this.clockMode);
-    bag.jumpable(this.brightness, 0.2, 0.5); // CURATE: stay in the deadpan band
-    bag.jumpable(this.hue, 0, 360);
   }
 
   // ---- Trigger handlers ------------------------------------------------------
@@ -313,10 +287,7 @@ public class HoldClock extends ApotheneumPattern {
     this.audio.tick(deltaMs);
     setColors(LXColor.BLACK);
 
-    // Poll the grid gate EVERY frame (even when Sync is off) so it never
-    // misreads a stale cycle count as an instant crossing when re-enabled.
-    final boolean beat = this.tempoLock.crossed(this.tempoDiv.getEnum());
-    advanceClock(deltaMs, beat);
+    advanceClock(deltaMs);
 
     // Cold-open dawn ramp + shimmer sweep + glitch envelope
     final Phase ph = this.phase.getEnum();
@@ -358,25 +329,18 @@ public class HoldClock extends ApotheneumPattern {
     copyCylinderExterior();
   }
 
-  /** Advance the counted clock and colon blink on the tempo grid (Sync) or a
-   *  free-running BPM-period timer (Sync off). */
-  private void advanceClock(double deltaMs, boolean beat) {
+  /** Advance the counted clock and colon blink on a free-running BPM-period
+   *  timer (it ticks at the musical rate without grid-phase locking). */
+  private void advanceClock(double deltaMs) {
     if (this.freeze.isOn()) {
       return; // held button frame: the clock is frozen mid-tick
     }
-    if (this.sync.isOn()) {
-      if (beat) {
-        this.elapsedTicks++;
-        this.colonOn = !this.colonOn;
-      }
-    } else {
-      this.freeRunMs += deltaMs;
-      final double period = Math.max(1, this.tempoLock.beatPeriodMs());
-      while (this.freeRunMs >= period) {
-        this.freeRunMs -= period;
-        this.elapsedTicks++;
-        this.colonOn = !this.colonOn;
-      }
+    this.freeRunMs += deltaMs;
+    final double period = Math.max(1, this.lx.engine.tempo.period.getValue());
+    while (this.freeRunMs >= period) {
+      this.freeRunMs -= period;
+      this.elapsedTicks++;
+      this.colonOn = !this.colonOn;
     }
   }
 
@@ -1013,21 +977,13 @@ public class HoldClock extends ApotheneumPattern {
     return this.elapsedTicks + interTickFraction();
   }
 
-  /** Progress in [0, 1) from the last tick toward the next, from the tempo grid
-   *  (Sync) or the free-running BPM accumulator (Sync off). */
+  /** Progress in [0, 1) from the last tick toward the next, from the
+   *  free-running BPM accumulator. */
   private double interTickFraction() {
     if (this.freeze.isOn()) {
       return 0;
     }
-    if (this.sync.isOn()) {
-      final Tempo.Division d = this.tempoDiv.getEnum();
-      final double div = this.tempoLock.divisionMs(d);
-      if (!(div > 0)) {
-        return 0;
-      }
-      return LXUtils.constrain(1 - this.tempoLock.msUntilNext(d) / div, 0, 1);
-    }
-    final double period = Math.max(1, this.tempoLock.beatPeriodMs());
+    final double period = Math.max(1, this.lx.engine.tempo.period.getValue());
     return LXUtils.constrain(this.freeRunMs / period, 0, 1);
   }
 

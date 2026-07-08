@@ -37,14 +37,13 @@ the reactivity described here (magnitude taps scale linearly with depth;
 hits fire normally once depth > 0.01). Document what the knob at 1 adds
 visually over the knob at 0.
 
-## Tempo mapping
+## Tempo
 
-Which motion points lock to the tempo grid when `Sync` is on (via
-`TempoLock.retime(...)` at event-scheduling moments and/or
-`TempoLock.crossed(...)` per-frame gates), and against which `TempoDiv`
-default. State what turning Sync off restores — the pattern's free-running
-timing must remain fully functional and good-looking with Sync off. Note any
-clamp overrides passed to `retime()` and why.
+No tempo gating: patterns free-run. The old Sync/TempoDiv (`TempoLock`) and
+Meta (`TriggerBag`) conventions were RETIRED 2026-07-08 — do not add them to
+new patterns. All timing must be fully functional and good-looking
+free-running; choreography (event timing, section changes) comes from the
+arrange timeline, not from tempo-grid analysis or random meta jumps.
 
 ## Energy mapping
 
@@ -56,16 +55,17 @@ Sustained motion must respect the >=5s full-traversal cap even at e=1.
 
 ## Parameters
 
-UI/registration order convention (do not deviate; existing keys/labels must
-never be renamed — saved .lxp files reference them):
+UI/registration order convention (do not deviate; existing keys must never be
+renamed once a saved .lxp references them):
 
-1. Triggers (>= 3 non-meta; see Triggers section)
+1. Triggers (>= 3; see Triggers section)
 2. `energy` — Energy
 3. Pattern-specific parameters
 4. `audio` — Audio depth knob (`CompoundParameter("Audio", 0)`)
-5. `sync` — `BooleanParameter("Sync", true)`
-6. `tempoDiv` — `EnumParameter<Tempo.Division>("TempoDiv", <per-pattern default>)`
-7. `meta` — Meta, always last
+
+Naming: UI labels are max 7 characters (Chromatik knob width); the code field
+name can and should be longer and descriptive (e.g. field `genSpacing`, key
+`genY`, label `GenY`; field `interiorLevel`, key `interior`, label `Inner`).
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
@@ -73,24 +73,13 @@ never be renamed — saved .lxp files reference them):
 
 ## Triggers
 
-Requirement: at least 3 non-meta triggers, spanning small -> large state
+Requirement: at least 3 triggers, spanning small -> large state
 permutations (e.g. a subtle hue rotation, a mid-size behavior flip, and a
 full scatter/reset). Trigger handlers run at event rate and may allocate
 minimally.
 
 - `name` — what suddenly changes, and how long the change takes to read on the
   sculpture
-
-## Jump candidates
-
-Rows mirror the `bag.jumpable(...)` lines in the constructor 1:1. Status is
-updated during curation.
-
-| Param | Jump range | Status | Notes |
-|---|---|---|---|
-| ... | ... | candidate | ... |
-
-Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [a,b]`.
 
 ## Simulation-principles compliance
 

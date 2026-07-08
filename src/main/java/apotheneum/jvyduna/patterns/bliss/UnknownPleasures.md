@@ -137,7 +137,6 @@ is parented to the meter and can't be registered on the pattern).
 | reseed | Reseed | Trigger | — | — | Clear and refill the whole stack |
 | flip | Flip | Trigger | — | — | Reverse scroll direction |
 | pulse | Pulse | Trigger | — | — | Inject one oversized synth pulse line at the next division |
-| rndTrig | RndTrig | Trigger | — | — | Random trigger or parameter jump |
 | spacing | Spacing | Compound | 2 | 2–16 | Rows between baselines = scroll rows per division (zoom) |
 | amplitude | Amp | Compound | 7 | 2–12 | Peak ridge height in rows (peaks may reach 2× via SHAPE_MAX) |
 | jaggedness | Jag | Compound | 0.15 | 0–1 | Baked profile noise; at full Audio, FFT bin smoothing amount |
@@ -151,8 +150,9 @@ is parented to the meter and can't be registered on the pattern).
 
 Removed in the 2026-07-06 rework: `energy` (speed is TempoDiv × Spacing now),
 `tintHue`/`tintAmount` (colorize externally), `sync` (locking is structural).
-Series RndTrig pass (2026-07-06): `meta` → `rndTrig` (label Meta → RndTrig),
-moved up to 4th, immediately after the triggers.
+Removed 2026-07-08: `rndTrig` (the renamed `meta`), dropped with the TriggerBag
+convention. `tempoDiv` is retained — it is this pattern's structural timebase
+(TempoDiv × Spacing is the scroll speed), not a sync gate.
 
 ## Triggers
 
@@ -170,16 +170,6 @@ reseed (full scene reset).
   still grid-exact. Instant-event semantics, consistent with the roster.
 - `reseed` (large) — clears the ring; the next frame refills every grid-locked
   position with fresh shapes. Instant scene reset with unchanged timing.
-
-## Jump candidates
-
-| Param | Jump range | Status | Notes |
-|---|---|---|---|
-| spacing | [2, 8] | candidate | Density jump; kept below the new 16 max — a jump to 16 is a violent zoom |
-| amplitude | [4, 12] | candidate | Tall spikes vs calm ripples |
-| jaggedness | [0, 0.5] | candidate | Above ~0.5 lines may read as static (`CURATE:`) |
-| wavMode | full | candidate | Scene change (clears the ring) |
-| cylWavs | full (1–4) | candidate | Cylinder-only re-segmentation, seamless |
 
 ## Simulation-principles compliance
 
@@ -205,3 +195,4 @@ reseed (full scene reset).
 | 2026-07-05 | Adversarial review fix: `crossed()` evaluated every frame so the cycle-count gate never goes stale across a Sync-off interval | Match the documented behavior |
 | 2026-07-06 | Curation rework: unclamped peaks (removed [0,1] shape clamp and `MAX_RIDGE_ROWS`; overlap via painter's fill); removed Tint/TintAmt/Energy/Sync; Spacing max 2→16; division-locked absolute positioning (TempoDiv is the speed, Spacing is zoom, ring-buffer line store replaces the pool, TempoLock dropped); new WavMode (Dup/Shift/Simplex/Helix) + CylWavs with 45° cylinder rotation; Audio reworked to live per-frame mirrored-FFT mix with pattern-owned GraphicMeter + Decay knob, Jag doubling as bin smoothing | User curation session: restore the cover's overlapping-peak look, make walls distinct, make audio dramatic and tempo the timebase |
 | 2026-07-06 | Series RndTrig ordering: `meta` → `rndTrig` (label RndTrig), moved from last to 4th, immediately after the triggers; `.lxp` values on the old `meta` path are dropped on load | Series convention: TriggerBag meta trigger sits right after the other trigger params |
+| 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path). For this pattern that meant dropping `rndTrig` (the renamed Meta) and the TriggerBag/jump-candidate machinery only — `sync`/TempoLock were already gone (2026-07-06), and `tempoDiv` is deliberately KEPT because it is the structural timebase (division-locked scrolling), not a sync gate; `.lxp` values on `rndTrig` are dropped on load | Jeff retired the project-wide Sync/TempoDiv + Meta pattern-control convention |

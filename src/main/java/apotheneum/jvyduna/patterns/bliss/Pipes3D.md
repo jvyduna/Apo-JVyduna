@@ -150,7 +150,7 @@ variant to the cylinder is a follow-up curation item.
   slots), direction scratch `int[6]`×2, elbow ring buffer (48). The render
   path allocates nothing; per-frame `Arrays.fill` buffer clears are writes,
   not allocations. Event-rate exceptions (all noted): occupancy clears at
-  drain end, `LX.log` strings at drain start/end and from `TriggerBag.fire()`.
+  drain end, `LX.log` strings at drain start/end.
 - **Door columns**: cube face columns always carry the full 45 points (the
   `Apotheneum.Cube.Face` constructor enforces exactly `GRID_HEIGHT` points per
   column — doors are exposed via `available()`, **not** shorter point arrays),
@@ -198,8 +198,8 @@ Mechanics (fourth pass):
    do NOT reset cap phase — every cap everywhere shares the transport's
    grid. A backward clock jump (tap tempo / transport reset) re-anchors all
    live caps via `scheduleCap`.
-2. **Hard cap targets, derived velocity** (the Mystify idiom, cf.
-   `TempoLock`'s beat-position doc): a run's cap time is a hard absolute-beat
+2. **Hard cap targets, derived velocity** (the Mystify idiom): a run's cap
+   time is a hard absolute-beat
    target; each frame the head covers the same fraction of its remaining
    distance as the frame covers of the remaining time — exact on-grid
    arrival, robust to live BPM changes. **The Speed knob does not move
@@ -268,10 +268,10 @@ band sits live.
 ## Parameters
 
 UI/registration order (sixth pass — gesture triggers first): Sparkle,
-Teleport, the three pulses, Drain, RndTrig, then Pipes, Speed, CapDiv,
+Teleport, the three pulses, Drain, then Pipes, Speed, CapDiv,
 Thick, CapDia, Density, Shaded, Reverse, JmpPct, JumpTo, HoldBars, RotX,
 RotY, RstRot, Audio
-(21 total — well past the ~12 series guideline; this is the series'
+(20 total — well past the ~12 series guideline; this is the series'
 flagship-complexity pattern).
 
 | Param | Label | Type | Default | Range | Meaning |
@@ -282,7 +282,6 @@ flagship-complexity pattern).
 | `plsShd` | PlsShd | TriggerParameter | — | — | pulse Shaded 50% of its range toward/past center (0.5), same envelope |
 | `plsCap` | PlsCap | TriggerParameter | — | — | pulse CapDia 50% of its range toward/past center (1.0), same envelope |
 | `drain` | Drain | TriggerParameter | — | — | fade out concluding exactly on a beat (0.5–1.5 beats), clear, restart with the Pipes-knob count in the first palette colors |
-| `rndTrig` | RndTrig | TriggerParameter | — | — | randomly fire one of the gesture triggers or toggle Reverse (`TriggerBag`) |
 | `pipes` | Pipes | DiscreteParameter | 1 | 1..3 | concurrent pipe count; raising spawns a fresh pipe, lowering culls the oldest (capped where it stopped) |
 | `speed` | Speed | CompoundParameter | 1 | 0..64 (exp 3) | target growth speed in cells/beat, steers run-transit planning; 0 pauses, resume re-caps on-grid 0.5–1.5 divisions out |
 | `onBeats` | CapDiv | EnumParameter&lt;Beats&gt; | 1 | 3/4, 1, 2, 4, 8 | beat division every cap lands on, phase-aligned to the global tempo grid (key `onBeats` kept for .lxp compat) |
@@ -299,9 +298,9 @@ flagship-complexity pattern).
 | `rstRot` | RstRot | TriggerParameter | — | — | zero RotX/RotY and snap back to the orthogonal projection (jump-cut; the lighting rig keeps turning) |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth: 0 = pure screensaver, 1 = full bass-sparkle + highlight response |
 
-Series RndTrig pass (2026-07-06): `meta` → `rndTrig` (label Meta → RndTrig),
-moved from last to immediately after the plain triggers; `.lxp` values on the
-old `meta` path are dropped on load.
+Series RndTrig pass (2026-07-06): `meta` → `rndTrig` (label Meta → RndTrig).
+Removed 2026-07-08: `rndTrig` (Sync/TempoDiv/Meta convention retired); `.lxp`
+values on the old `meta`/`rndTrig` paths are dropped on load.
 Removed 2026-07-06: `energy`, `sync`, `tempoDiv` — superseded by the
 beat-planned `speed`/`onBeats` pair (same precedent as the earlier `growthDiv`
 removal) — and, in the second pass, `newPipe` (superseded by the `pipes`
@@ -375,7 +374,7 @@ drain + restart), while Reverse leaves the geometry to the unbuild cursor
 (`JmpPct = 1` + Reverse = the classic jump-to-end seed). Event-rate but
 walks ~hundreds of cells in one call at high percentages (`CURATE:` measure
 the frame hitch); bounded by the retained-list capacities and an iteration
-guard. Not in the RndTrig bag.
+guard.
 
 ## HoldBars (eighth pass) — progress bars that secretly build 3D
 
@@ -429,13 +428,12 @@ Gesture triggers, small → large:
   (see Pulses). PlsCap flashes the (default-hidden) joint balls into
   existence for a beat.
 - `rstRot` — **small/medium**: zeros the rotation speeds and jump-cuts the
-  projection back to orthogonal; a no-op when already static. (Not in the
-  bag as of the sixth pass.)
+  projection back to orthogonal; a no-op when already static.
 - `teleport` — **medium**: instant; a cap ball marks the disconnect point and
   the pipe continues from a random free cell. Reads immediately (the classic
   NT gag).
 - `jumpTo` — **large**: instantly seed the room at JmpPct through the build,
-  continuing in the current direction (see Reverse / JumpTo). Not in the bag.
+  continuing in the current direction (see Reverse / JumpTo).
 - `drain` — **large**: a brightness fade (not motion) whose duration is
   measured at trigger time to conclude **exactly on a beat**, between 0.5 and
   1.5 beats out (if the next beat is closer than half a beat, it targets the
@@ -448,15 +446,6 @@ Gesture triggers, small → large:
   retained-geometry overflow. Forces Reverse off.
 
 Boxed-in pipes no longer teleport — they intersect (see Beat planning §3).
-
-## RndTrig bag (sixth pass — triggers only)
-
-The bag is strictly: **Sparkle, Teleport, PlsThk, PlsShd, PlsCap, Drain,
-and a Reverse toggle** (a non-UI `RevTgl` entry). ALL parameter jumpables
-were removed (thickness, density, pipes, shaded, speed, onBeats, rotX,
-rotY) and `rstRot` left the pool — the pulse triggers took over the
-param-motion role. Historical jump-candidate curation rows retired with
-them.
 
 ## Simulation-principles compliance
 
@@ -483,9 +472,9 @@ Fastest sustained *growth* motion is the extrusion tip crossing a wall
 - **Rotation is a separate motion class and can violate the 5 s translation
   floor**: at 100% (90°/beat, 120 BPM) outer geometry at r ≈ 25 px moves
   ~78 px/s tangentially — a wall sweep in well under a second. Implemented
-  per spec (the knob goes there deliberately); the RndTrig pool only jumps to
-  ≤25%. `CURATE:` decide live whether the knob range needs a cap (~25–50%)
-  or whether full-rate spins are a wanted big-moment effect.
+  per spec (the knob goes there deliberately). `CURATE:` decide live whether
+  the knob range needs a cap (~25–50%) or whether full-rate spins are a
+  wanted big-moment effect.
 
 Contrast/brightness: fully saturated pipes on true black; the only mid-tones
 are the depth cue (floor at 50% brightness so far pipes stay readable, not
@@ -500,13 +489,14 @@ Time-to-fill at defaults (rough): 900 cells × 60% = 540 cells; 1 pipe at
 1 cell/beat @ 120 BPM ≈ 4.5 min to auto-drain; 3 pipes ≈ 1.5 min. Slower than
 the old peak, faster than the old ambient — and high Speed now compresses
 this dramatically (Speed 16 can fill in tens of seconds). The `drain` trigger
-and RndTrig exist to short-circuit this live. `CURATE:` fill pacing at
+exists to short-circuit this live. `CURATE:` fill pacing at
 performance tempos.
 
 ## Curation log
 
 | Date | Change | Why |
 |---|---|---|
+| 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path): `rndTrig` param deleted with the TriggerBag (the non-UI `RevTgl` toggle went with it); `TempoLock.msUntilNext(QUARTER)` in `startDrain` inlined as `(1 − tempo.getBasis(QUARTER)) × period` — drain still concludes exactly on a beat; the CapDiv global-grid planner is core and unchanged | Jeff 2026-07-08: Sync/TempoDiv + Meta pattern-control convention retired project-wide |
 | 2026-07-07 (8th pass) | **HoldBars** boolean (registered after JumpTo): progress-bar mode for the rafters→opus transition. Replicated single-mapping projection on all four walls (`u=(gx−x)·cw`, depth=z; `HOLD_BARS_FLIP` CURATE) so bars read L-to-R from the cube interior and ±z runs are invisible everywhere; instant clear on enable; constrained spawn picks (interior-left half, un-recent Y via `BAR_Y_HISTORY=4` ring); `planBarRun` phase machine (FILLING forced +x → PARKED forced ±z for `HOLD_WAIT_CAPS=4` caps → auto-advance via the teleport mechanism; manual Teleport forces it); fill auto-drain bypassed in bar mode (overflow/no-free-cell drains kept); disable keeps geometry + snaps projection back. `forceDir` hook added to `walkStep` (reset after each use; JumpTo synthesis unaffected). CURATE: interior read direction, wait length, Y-history size, corner-continuity break, long-hold row exhaustion, Reverse-unbuild feel | Jeff's HoldBars concept: unshaded pipes as never-completing progress bars, depth-parking as the hidden wait, Shaded+rotation automation as the 3D reveal |
 | 2026-07-04 | Initial implementation | First pass per approved plan; all CURATE: constants unverified on sculpture |
 | 2026-07-05 | Adversarial review pass: `beginSegment` retime estimate now folds in the audio level boost — previously completions landed up to 23% early of the retimed boundary whenever the Audio knob was up; corrected the thickness-clamp figure | Verified improver's claims against HEAD |
