@@ -84,11 +84,18 @@ Preserved signatures from the brief (`chrome-brief.md` §5-6):
   `norm ∈ [0,1]` (0 center, 1 edges); `topH = springH + (archApex−springH)·
   (1−norm)^ARCH_EXP`, with `springH`/`fullApex` scaled by `growthShown`. **Growth
   is instant** — `growthShown = Growth` directly, no easing — so the knob maps
-  straight to height. The silhouette top edge is **antialiased** (coverage
-  `clamp01((topH−hb)+0.5)`, softened by the `Smooth` knob). A pixel inside is
-  **stone** (floor plinth, pier, central mullion, or within `RIB_ROWS` of the
-  outline); otherwise **window void**, lit by the CA tracery, else a dim
-  stained-glass backing.
+  straight to height. A pixel inside is **stone** (floor plinth, pier, central
+  mullion, or within `RIB_ROWS` of the outline); otherwise **window void**, lit by
+  the CA tracery (the `CA` knob scales its brightness **linearly, so CA=0 is fully
+  off / windows dark**), else a dim stained-glass backing.
+- **Shader-quality antialiasing** (`silhouetteCoverage`): the silhouette alpha is
+  computed by an **`SS`×`SS` supersample** of the continuous `topH` field
+  (interpolated between adjacent columns, ring-wrapped), not just a 1-px vertical
+  feather. This feathers **all** edges — apex, curved sides, and arch-to-arch
+  valleys — so growing arches blend inter-pixel like a shader. `Smooth` mixes the
+  hard result toward the antialiased one (`cover = 1 − Smooth·(1−coverage)`);
+  `Smooth=0` restores the hard/posterized silhouette. `topH` is computed in a
+  first pass so the AA can read neighbors. Glitch tear-shear stays unsmoothed.
 - **Tracery CA (smooth down-flow)**: `byte[height][width]` history per surface,
   row 0 = top; a generation is an elementary (Wolfram) CA over the ring (wrap
   neighborhood). New generations push at the top and flow downward one row per
@@ -123,7 +130,7 @@ never fire: the CA free-runs purely on its timer, glow rests at its
 growth-driven baseline, and the whole build/heal/teardown grammar runs
 identically without audio. Raising the knob to 1 adds the glow bloom, tracery
 sparkle, and transient CA nudges described above. For this beatless track the
-composition drives the arc through the **Growth / Warmth / Glitch** knobs
+composition drives the arc through the **Growth / Gold / Glitch** knobs
 (arrange automation from the MIR envelopes) and modest Audio depth for glow —
 not a 16th grid.
 
@@ -131,11 +138,19 @@ not a 16th grid.
 
 This is a **beatless** track (brief: "Do not TempoLock this song"), so there is
 no `Sync` control — the CA always free-runs on an internal timer whose interval
-is **`Speed`-scaled** (`CA_STEP_AMBIENT_MS`→`CA_STEP_PEAK_MS`), currently in
-absolute ms. The only tempo hook is **`TempoDiv`**, which paces the one-time
-**TearDown erosion**: the erosion completes over one `TempoDiv` period
-(`tempoLock.divisionMs`), so the collapse is musically timed. Growth, glitch/heal
-envelopes, drip and stars are all timer/parameter driven and never touch the grid.
+is **`CASpd`-scaled** (`CA_STEP_AMBIENT_MS`→`CA_STEP_PEAK_MS`), currently in
+absolute ms. The **`TempoDiv`** knob is the single tempo hook and it now drives
+three musically-timed envelopes over one division period (`tempoLock.divisionMs`):
+
+- **Bend** and **Heal** are **pulses**: a smooth onset over the first
+  `ATTACK_FRAC` (25%) of the period, then a slower smooth fade over the remaining
+  75% (`pulse()` = two `smoothstep` legs). Heal first snaps any in-flight Bend to
+  zero, then blooms.
+- **TearDown erosion** advances linearly over the period, then its visible
+  progress is eased with `smoothstep` (`tearPhase = smoothstep(tearRaw)`) so the
+  collapse and dust build settle in and out.
+
+Growth, drip and stars are timer/parameter driven and never touch the grid.
 
 ## Speed units — DECISION NEEDED (Chrome outlier)
 
@@ -147,20 +162,18 @@ CA advance is still absolute ms. Options per param:
 
 | Param | What it drives | (a) beat-relative live-tempo | (b) tempo-grid (division) | (c) leave absolute |
 |---|---|---|---|---|
-| `speed` | CA advance step interval (`CA_STEP_*_MS`) | continuous rows/beat like Aumakua | snap step to a `TempoDiv` | keep absolute ms (current) |
-| `tempoDiv` (TearDown) | erosion duration | — | **keep** (already grid; the intended use) | — |
-| Growth ease | 0→1 nave raise time | possible | — | keep absolute (current) |
+| `caspd` (CASpd) | CA advance step interval (`CA_STEP_*_MS`) | continuous rows/beat like Aumakua | snap step to a `TempoDiv` | keep absolute ms (current) |
+| `tempoDiv` | erosion + Bend/Heal pulse duration | — | **keep** (already grid; the intended use) | — |
 
 ## Speed mapping
 
-| Quantity | Ambient (Speed=0) | Peak (Speed=1) | Curve |
+| Quantity | Ambient (CASpd=0) | Peak (CASpd=1) | Curve |
 |---|---|---|---|
-| Growth ease time (full 0→1 raise of the nave) | 8 s | 5 s | lin |
 | CA free-run step interval | 3.5 s | 1.2 s | exp |
 
-Sustained motion respects the ≥5 s full-traversal cap even at Speed=1: the growth
-ease is rate-capped to never complete a 0→1 raise faster than 5 s, and the CA
-flows one row per step (≥45 rows per full-height traversal = ≥54 s at peak).
+Growth is instant (maps straight to height — the arrange automation owns the raise
+rate). The CA flows one row per step (≥45 rows per full-height traversal = ≥54 s
+at peak), well inside the sustained-motion cap.
 
 ## Parameters
 
@@ -169,30 +182,32 @@ UI/registration order (do not deviate; keys/labels are referenced by saved
 referencing them no-op on load.
 
 1. Triggers: `seed`, `bend`, `heal`, `tearDown`, `randomRule`
-2. `speed` — Speed
-3. Pattern params: `growth`, `rule`, `arches`, `tracery`, `glitch`, `gold`,
-   `drip`, `smooth`
-4. `audio` — Audio depth knob
-5. `tempoDiv` — TempoDiv (paces TearDown erosion)
+2. Structure: `growth`, `arches`
+3. CA cluster: `ca`, `rule`, `caspd` (CA, then Rule, then CASpd)
+4. Look: `glitch`, `gold`, `drip`, `smooth`
+5. `audio` — Audio depth knob
+6. `tempoDiv` — TempoDiv (paces TearDown erosion + Bend/Heal pulses)
+
+Breaking key renames on `pattern-dev`: `tracery`→`ca`, `speed`→`caspd`.
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
 | `seed` | Seed | TriggerParameter | — | — | re-seed both CAs with a fresh random row; also **restores** the cathedral if eroded to dust |
-| `bend` | Bend | TriggerParameter | — | — | dissonance glitch pulse (hue-shift + tear-shear) that heals over ~2 s |
-| `heal` | Heal | TriggerParameter | — | — | clear the glitch and flood a completing glow over ~3 s (the 1:43 return callback) |
-| `tearDown` | TearDown | TriggerParameter | — | — | one-time time-lapse erosion → dust pile (Seed restores) |
+| `bend` | Bend | TriggerParameter | — | — | dissonance glitch **pulse** (25% smooth onset, 75% fade) over one TempoDiv |
+| `heal` | Heal | TriggerParameter | — | — | snap glitch to zero, then a completing-glow **pulse** over one TempoDiv (1:43 callback) |
+| `tearDown` | TearDown | TriggerParameter | — | — | one-time time-lapse erosion (smoothstep) → dust pile (Seed restores) |
 | `randomRule` | RandRule | TriggerParameter | — | — | random-walk pick of a new CA rule, never revisiting the last half of the rules |
-| `speed` | Speed | CompoundParameter | 0.35 | 0..1 | CA advance speed (rate regime); speed-only (see DECISION NEEDED) |
 | `growth` | Growth | CompoundParameter | 0.4 | 0..1 | arch height, grown from the floor; instant (Growth == height) |
-| `rule` | Rule | DiscreteParameter | R90 | 10 options | which curated Wolfram rule (`{30,90,110,54,60,62,102,150,126,22}`) |
 | `arches` | Arches | CompoundParameter | 3 | 1..7 | continuous count of arches shown per face (golden-ratio, self-similar) |
-| `tracery` | Tracery | CompoundParameter | 0.6 | 0..1 | brightness of the CA window tracery |
-| `glitch` | Glitch | CompoundParameter | 0 | 0..1 | dissonance: hue-shift + horizontal tear-shear |
+| `ca` | CA | CompoundParameter | 0.6 | 0..1 | brightness of the CA window tracery; **0 = off (windows dark)** |
+| `rule` | Rule | DiscreteParameter | R90 | 10 options | which curated Wolfram rule (`{30,90,110,54,60,62,102,150,126,22}`) |
+| `caspd` | CASpd | CompoundParameter | 0.35 | 0..1 | CA advance speed (rate regime); speed-only (see DECISION NEEDED) |
+| `glitch` | Glitch | CompoundParameter | 0 | 0..1 | dissonance: hue-shift + horizontal tear-shear (kept unsmoothed) |
 | `gold` | Gold | CompoundParameter | 0 | 0..1 | cool/occult → warm-gold; at full, arches go brighter/deep-gold, tracery a dimmer half-bright yellow |
-| `drip` | Drip | CompoundParameter | 0 | −1..1 | bidirectional ridge energy: −drips down the ribs, +builds upward beams from each peak (never on windows) |
-| `smooth` | Smooth | CompoundParameter | 1.0 | 0..1 | motion blending + antialiasing (0 = steppy, 1 = smooth CA flow + AA arch edges) |
+| `drip` | Drip | CompoundParameter | 0 | −1..1 | bidirectional ridge energy: −drips down the ribs, +ascending particle beams from each peak (never on windows) |
+| `smooth` | Smooth | CompoundParameter | 1.0 | 0..1 | motion blending + antialiasing (0 = steppy, 1 = supersampled arch edges + sub-pixel CA flow/particles) |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth (0 = pure screensaver) |
-| `tempoDiv` | TempoDiv | EnumParameter | WHOLE | Tempo.Division | division over which a TearDown erosion completes |
+| `tempoDiv` | TempoDiv | EnumParameter | WHOLE | Tempo.Division | division over which TearDown erosion and Bend/Heal pulses run |
 
 ## Triggers
 
@@ -202,29 +217,44 @@ Five triggers, small → large:
   cathedral if it has been eroded to dust (clears `destroyed`/`eroding`).
 - `randomRule` (small) — random-walk to a new curated CA rule that never
   revisits the last `RULES.length/2` (=5) chosen rules nor the current one.
-- `bend` (medium) — a dissonance glitch pulse: the image hue-shifts and
-  tear-shears horizontally, then heals over ~2 s. CURATE: verify the shear reads
-  as a "wrong" bend, not just noise.
-- `heal` (medium/large) — the glitch snaps to zero and a completing glow floods
-  the arches over ~3 s (also warms color via `healGlow`). The concrete
-  **return/homecoming callback** (1:43).
-- `tearDown` (large) — the codex teardown, now a **one-time, time-lapse
-  erosion**: over one `TempoDiv` period, stone/tracery pixels crumble away
-  top-down (rising-threshold hash noise) while a **domed dust pile** builds along
-  the floor (every-other-pixel checkerboard). At completion the cathedral stays
-  `destroyed` (only dust renders) until `Seed` restores it. Ignored while eroding
-  or already dust. CURATE: erosion bias + dust dome.
+- `bend` (medium) — a dissonance glitch **pulse over one TempoDiv period**: a
+  smooth swell for the first 25% (`ATTACK_FRAC`), then a slower smooth fade for
+  the remaining 75% (two `smoothstep` legs). The image hue-shifts and tear-shears
+  (the shear stays unsmoothed — Jeff likes the crunch). CURATE: verify it reads as
+  a "wrong" bend, not just noise.
+- `heal` (medium/large) — first snaps any in-flight Bend to zero, then runs the
+  **same pulse shape** as a completing glow (warms color via `healGlow`). The
+  concrete **return/homecoming callback** (1:43).
+- `tearDown` (large) — the codex teardown, a **one-time, time-lapse erosion**:
+  over one `TempoDiv` period (progress eased by `smoothstep`), stone/CA pixels
+  crumble away top-down — normalized to **each arch's own height**, so the small
+  side arches erode in step with the tall main arch — while a **domed dust pile**
+  builds along the floor (every-other-pixel checkerboard). At completion the
+  cathedral stays `destroyed` (only dust renders) until `Seed` restores it.
+  Ignored while eroding or already dust.
 
 ## Drip (ridge energy)
 
 `drip` is bidirectional (−1..1); its magnitude is eased/held in `dripEnergy` (a
 one-pole build toward `|Drip|`, `DRIP_TAU`). Energy is painted **only on the arch
-ridge/outline stone — never into the windows**. Negative Drip flows a
-scintillating coating **down the ribs**; positive Drip gathers energy at each
-arch peak and **builds it upward into a flowing beam** (up to **1× installation
-height** above the peak, clipped at the canvas top, and up to **¼ the arch
-width** wide, narrowing/tapering upward). Painted with `setMax` in `dripColor`
-(bright gold). CURATE: scintillation rate, beam taper, brightness.
+ridge/outline stone and the beam above it — never into the windows**.
+
+- **Color rules** (`dripPixel(intensity)`): the palette **warm/right hue**
+  (`baseGold*`), with brightness varying across the form and the **brightest
+  areas desaturating toward `DRIP_HOT_SAT` (20%)** — hot near-white peaks over a
+  gold body. Shared by the ridge traces and the beam particles.
+- **Center-out ridge traces**: the traveling wave is parameterized by `colNorm`
+  (0 at each arch's peak column, 1 at its edges), so it moves **down/out from the
+  peak** for negative Drip and **in/up toward the peak** for positive — following
+  the arch, not sliding horizontally across the ring.
+- **Ascending particle beam** (positive Drip): each arch peak emits **1–5 large
+  particles** (`MAX_PARTICLES`), count scaling with `dripEnergy`, each with its
+  own **rise speed** (`particleSpeed[]`, ~2–6 s to traverse). A particle rises
+  from the peak up to **1× installation height** and up to **¼ arch width** wide,
+  fading as it ascends. `Smooth` controls sub-pixel placement: at 1 the blob
+  center tracks the fractional row (smooth ascent); at 0 it snaps to a row.
+
+CURATE: `RIDGE_WAVE_K`, particle speeds/count, `PARTICLE_VRAD`, `DRIP_HOT_SAT`.
 
 ## Simulation-principles compliance
 
@@ -234,12 +264,11 @@ width** wide, narrowing/tapering upward). Painted with `setMax` in `dripColor`
   from an internal cap; the composition owns the raise rate.
 - **CA tracery flow (sustained motion)** — one row per step; free-run step
   interval 1.2 s (peak) → 3.5 s (ambient), so a full-height (45-row) traversal
-  is ≥54 s. Well above the cap. Sync-on steps land on the grid but are still one
-  row per crossing.
-- **Bend glitch (event-like)** — ~2.2 s decay, ≥1.5 s event minimum; the shear
-  is a transient distortion, not a traversal.
-- **Heal glow (event-like)** — ~3 s settle, ≥1.5 s; no spatial traversal.
-- **TearDown (one-time erosion)** — a single time-lapse collapse over one
+  is ≥54 s. Well above the cap.
+- **Bend glitch (event-like)** — a tempo pulse over one `TempoDiv` period (25%
+  smooth onset, 75% fade); a transient distortion, not a traversal.
+- **Heal glow (event-like)** — the same tempo pulse; no spatial traversal.
+- **TearDown (one-time erosion)** — a single smoothstep-eased collapse over one
   `TempoDiv` period (default WHOLE), leaving a static dust pile until Seed. Not a
   looping motion; a deliberate destroy event.
 - **Starfield** — slow twinkle (period ~10 s) + very slow parallax drift; no
@@ -264,21 +293,29 @@ Every value below is a first-pass guess to be tuned on hardware
   pop-free.
 - `BUTTRESS_ONSET` 0.60 and the strut reach/drop (6/8 columns) — struts now hang
   off each arch's pier edges (from the peak arrays). Cube only; cylinder skips.
-- Color/Gold: fallback cool (H255/S55/B62), gold (H45/S85/B100), tracery/swatch-2
-  (H52/S85/B92); full-Gold tracery target `YELLOW` (H52/S90/**B50**),
-  `GOLD_STONE_BOOST` 0.35, `WINDOW_BACK` 0.10. Palette cache: swatch[0]=cool,
-  swatch[last]=gold, **swatch[1]=CA tracery**. Confirm the split (arches brighter
-  deep-gold vs. tracery dimmer yellow) reads at full Gold.
-- Drip: `DRIP_TAU` 450 ms build; ridge coating 0.35+0.35·scint; beams to 1×
-  height, ¼ arch width, tapering; `dripColor` = bright gold. Confirm beams stay
-  off the windows and the up/down directions read.
+- Color/Gold: fallback cool (H255/S55/B62), **gold (H37/S85/B100 — toward
+  orange)**, tracery/swatch-2 (H52/S85/B92); full-Gold tracery target `YELLOW`
+  (H52/S90/**B50**), `GOLD_STONE_BOOST` 0.35, `WINDOW_BACK` 0.10. Palette cache:
+  swatch[0]=cool, swatch[last]=gold, **swatch[1]=CA tracery** — so with a palette
+  loaded, the last swatch's hue drives Gold and the H37 constant is only the
+  no-swatch fallback (CURATE: nudge `baseGoldH` on cache if the orange bias should
+  hold regardless of palette).
+- Drip: `DRIP_TAU` 450 ms build; `RIDGE_WAVE_K` 6 (center-out trace frequency);
+  `dripPixel` desaturates the brightest energy toward `DRIP_HOT_SAT` 20%; beam is
+  a particle system — `MAX_PARTICLES` 5 (1..5 scaling with energy), speeds ~2–6 s
+  traverse, `PARTICLE_VRAD` 2.5, horizontal ¼ arch width. Confirm beams stay off
+  the windows and the up/down flow directions read.
+- Antialiasing: `SS` 3 (3×3 supersample of the silhouette). Confirm growing
+  arches blend inter-pixel at Smooth=1 with no staircase on the curved sides.
+- Bend/Heal: `ATTACK_FRAC` 0.25 (25% smooth onset, 75% fade), timed to `TempoDiv`.
 - Glitch: `GLITCH_HUE_DEG` 90, `MAX_SHEAR` 6 columns, `shearNoise` a cheap
-  sin-hash — confirm the bend reads as dissonance. (Glitch AA deferred — "not
-  glitch for now.")
-- Teardown erosion: paced by `TempoDiv` (default WHOLE), `ERODE_FALLBACK_MS`
-  4000, `eroded()` bias `(1−nh)·0.75 + hash·0.25` (top crumbles first),
-  `DUST_MAX_ROWS` 6, cosine dust dome per face, checkerboard `(x+y)&1`. Confirm
-  the collapse reads as erosion and the dust as a settled pile.
+  sin-hash, kept unsmoothed (Jeff likes the crunch) — confirm it reads as
+  dissonance.
+- Teardown erosion: paced by `TempoDiv` (default WHOLE), smoothstep-eased,
+  `ERODE_FALLBACK_MS` 4000, `eroded()` bias `(1−nh)·0.75 + hash·0.25` where
+  **nh = hb/topH (per-arch)** so side arches erode in step, `DUST_MAX_ROWS` 6,
+  cosine dust dome per face, checkerboard `(x+y)&1`. Confirm the collapse reads as
+  erosion and the dust as a settled pile.
 - Starfield: `STAR_ONSET` 0.15, `NUM_STARS` 14, `STAR_MAX_B` 55, hues 0-14
   (reds) — confirm the valley holds as a near-dark field.
 - CA: curated Top-10 `RULES = {30,90,110,54,60,62,102,150,126,22}` (default R90);
@@ -293,3 +330,4 @@ Every value below is a first-pass guess to be tuned on hardware
 | 2026-07-07 | Initial first-pass, Claude autonomous session | Hero pattern for "Chrome Country": Wolfram-tracery gothic cathedral, envelope-driven growth (beatless — Sync off by default), Bend/Heal/TearDown/Seed triggers, cool→warm-gold palette, empty-valley starfield. Honors `00-overview-critique.md` gap #2 (uncanny/Wolfram as the DEFAULT rendering mode; Heal as a concrete return callback). All arch/color/timing constants marked CURATE for hardware tuning. |
 | 2026-07-08 | Jeff feedback pass | Curated CA to a Top-10 rule list + `RandRule` no-repeat random walk. Added `Blend` (house AA/interp convention): CA now flows down smoothly (fractional `caPhase` vertical interp) and arch edges are antialiased. Growth made instant (Growth == height); main arch apex reaches the top row at Growth 1. Rebuilt the arcade as a per-face golden-ratio, self-similar layout (main arch centered per wall / 3 cylinder bays; widths ÷φ, peaks trace the master lancet curve); `Arches` is now a continuous count with whole/half-edge semantics. Renamed Warmth→**Gold** with a split target (arches brighter deep-gold, tracery dimmer half-yellow); CA tracery color now from **palette swatch 2**. Added bidirectional **Drip** (ridge coating → upward peak beams, never on windows). TearDown is now a **one-time erosion** leaving a domed dust pile, paced by `TempoDiv`; Seed restores. Removed Sync and Meta. |
 | 2026-07-08 | Convention pass (non-bliss) | `Energy`→`speed` (CA advance only, so speed-only) and `Blend`→`smooth` (standardized house name; "Blend" now means compositing mode only). Behavior unchanged. Chrome flagged as a per-song **outlier**: added a "Speed units — DECISION NEEDED" section — the CA `speed` is left absolute-ms pending Jeff's per-param call on beat-relative vs grid vs absolute; `TempoDiv` (TearDown) stays grid-paced. |
+| 2026-07-08 | Jeff feedback round 2 | Bend/Heal are now **tempo pulses** (25% smooth onset / 75% fade over one `TempoDiv`, `pulse()`); Heal cancels an in-flight Bend. TearDown erosion eased with **smoothstep**. **Fixed** the erosion bug where short side arches survived until the last instant — `eroded()` now normalizes to each column's own `topH`. Renamed `tracery`→**`CA`** (linear brightness, **0 = off**) and `speed`→**`CASpd`**; reordered to CA → Rule → CASpd. Gold hue lowered 45→**37** (toward orange). Drip reworked: shared `dripPixel` color (warm hue, brightest desaturates to 20%), **center-out** ridge traces (along the arch, not horizontal), and the beam is now a **1–5 particle system** with varied rise speeds, `Smooth`-controlled sub-pixel placement. Arch AA upgraded to a **3×3 supersample** of the continuous silhouette so growth blends inter-pixel like a shader. Glitch left unsmoothed by request. |

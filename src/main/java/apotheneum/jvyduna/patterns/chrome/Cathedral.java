@@ -98,15 +98,35 @@ public class Cathedral extends ApotheneumPattern {
   private static final double CA_STEP_AMBIENT_MS = 3500;
   private static final double CA_STEP_PEAK_MS = 1200;
 
-  /** Bend (dissonance) glitch-pulse decay, and Heal glow decay (ms). */
-  private static final double BEND_MS = 2200; // CURATE
-  private static final double HEAL_MS = 3000; // CURATE
+  /** Bend/Heal pulse shape: smooth onset over the first ATTACK_FRAC of the
+   *  TempoDiv period, slower smooth fade over the remaining (1 - ATTACK_FRAC). */
+  private static final double ATTACK_FRAC = 0.25; // CURATE
 
   /** Drip energy build/decay time constant (one-pole ease toward |Drip|). */
   private static final double DRIP_TAU = 450; // CURATE
 
-  /** Fallback erosion period (ms) if the tempo division period is unavailable. */
+  /** Fallback period (ms) for tempo-timed envelopes when the tempo division
+   *  period is unavailable (Bend/Heal pulses and the TearDown erosion). */
   private static final double ERODE_FALLBACK_MS = 4000; // CURATE
+
+  // ---- Drip constants ---------------------------------------------------------
+
+  /** Spatial frequency of the center-out ridge traces (waves per arch half). */
+  private static final double RIDGE_WAVE_K = 6.0; // CURATE
+
+  /** Max ascending beam particles per arch peak (1..MAX at full Drip). */
+  private static final int MAX_PARTICLES = 5; // CURATE
+
+  /** Beam particle blob half-extent, vertical rows (horizontal is 1/4 arch). */
+  private static final double PARTICLE_VRAD = 2.5; // CURATE
+
+  /** Saturation (%) the brightest Drip pixels desaturate toward (hot near-white). */
+  private static final float DRIP_HOT_SAT = 20; // CURATE
+
+  // ---- Antialiasing -----------------------------------------------------------
+
+  /** Silhouette supersampling grid (SS x SS sub-samples per pixel). */
+  private static final int SS = 3; // CURATE
 
   // ---- Glitch constants -------------------------------------------------------
 
@@ -120,7 +140,7 @@ public class Cathedral extends ApotheneumPattern {
 
   // Fallbacks used when the palette swatch is empty. CURATE: picked blind.
   private static final float COOL_H = 255, COOL_S = 55, COOL_B = 62; // violet-indigo stone
-  private static final float GOLD_H = 45,  GOLD_S = 85, GOLD_B = 100; // finale gold
+  private static final float GOLD_H = 37,  GOLD_S = 85, GOLD_B = 100; // finale gold (toward orange)
   private static final float TRACE_H = 52, TRACE_S = 85, TRACE_B = 92; // swatch-2 fallback (amber)
 
   /** Full-Gold tracery target: a dimmer, half-brightness yellow (arches go
@@ -179,26 +199,26 @@ public class Cathedral extends ApotheneumPattern {
     new TriggerParameter("RandRule", this::randomRuleTrigger)
     .setDescription("Pick a new CA rule via a random walk that never revisits the last half of the available rules");
 
-  public final CompoundParameter speed =
-    new CompoundParameter("Speed", 0.35)
-    .setDescription("CA advance speed: ambient (slow CA) to peak (faster CA)");
-
   public final CompoundParameter growth =
     new CompoundParameter("Growth", 0.4)
     .setDescription("Height: how tall/complete the arches are, grown from the floor; maps directly to height and responds instantly");
+
+  public final CompoundParameter arches =
+    new CompoundParameter("Arches", 3, 1, 7)
+    .setDescription("Number of arches shown per face, centered on the main arch; odd counts are all whole, even counts add half-arches at the face edges (continuous)");
+
+  public final CompoundParameter ca =
+    new CompoundParameter("CA", 0.6)
+    .setDescription("Brightness of the CA-generated window tracery inside the arches; 0 = off (windows dark)");
 
   public final DiscreteParameter rule =
     new DiscreteParameter("Rule", 1, 0, RULES.length)
     .setDescription("Which curated Wolfram elementary CA rule generates the window tracery")
     .setOptions(RULE_LABELS);
 
-  public final CompoundParameter arches =
-    new CompoundParameter("Arches", 3, 1, 7)
-    .setDescription("Number of arches shown per face, centered on the main arch; odd counts are all whole, even counts add half-arches at the face edges (continuous)");
-
-  public final CompoundParameter tracery =
-    new CompoundParameter("Tracery", 0.6)
-    .setDescription("Brightness of the CA-generated window tracery inside the arches");
+  public final CompoundParameter caSpeed =
+    new CompoundParameter("CASpd", 0.35)
+    .setDescription("CA advance speed: ambient (slow CA) to peak (faster CA)");
 
   public final CompoundParameter glitch =
     new CompoundParameter("Glitch", 0)
@@ -268,8 +288,12 @@ public class Cathedral extends ApotheneumPattern {
   // ---- Animation state --------------------------------------------------------
 
   private double growthShown = 0;    // = Growth (instant, no easing)
-  private double glitchPulse = 0;    // Bend envelope 0..1
-  private double healGlow = 0;       // Heal envelope 0..1
+  private double glitchPulse = 0;    // Bend pulse value 0..1 (tempo-timed)
+  private double healGlow = 0;       // Heal pulse value 0..1 (tempo-timed)
+  private boolean bendActive = false;
+  private double bendTimeMs = 0;
+  private boolean healActive = false;
+  private double healTimeMs = 0;
   private double caAccumMs = 0;      // free-run CA timer
   private double caPhase = 0;        // fractional flow phase 0..1 within a CA step
 
@@ -278,13 +302,13 @@ public class Cathedral extends ApotheneumPattern {
 
   private boolean eroding = false;   // TearDown in progress
   private boolean destroyed = false; // eroded to dust; Seed restores
-  private double tearPhase = 0;      // 0 = intact, 1 = fully eroded
+  private double tearRaw = 0;        // linear erosion progress 0..1
+  private double tearPhase = 0;      // smoothstep(tearRaw): 0 intact, 1 dust
 
   // Per-frame color cache (computed once in computeColors)
   private int stoneColor = 0xff000000;
-  private int traceryColor = 0xff000000;
+  private int caColor = 0xff000000;
   private int windowBack = 0xff000000;
-  private int dripColor = 0xff000000;
   private int dustColor = 0xff000000;
   private double glitchEff = 0;
 
@@ -302,6 +326,10 @@ public class Cathedral extends ApotheneumPattern {
   private final double[] starHue = new double[NUM_STARS];
   private final double[] starDrift = new double[NUM_STARS];
 
+  // Ascending Drip beam particles (stateless; phase/speed fixed at construction)
+  private final double[] particlePhase = new double[MAX_PARTICLES];
+  private final double[] particleSpeed = new double[MAX_PARTICLES];
+
   public Cathedral(LX lx) {
     super(lx);
     this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
@@ -312,11 +340,11 @@ public class Cathedral extends ApotheneumPattern {
     addParameter("heal", this.heal);
     addParameter("tearDown", this.tearDown);
     addParameter("randomRule", this.randomRule);
-    addParameter("speed", this.speed);
     addParameter("growth", this.growth);
-    addParameter("rule", this.rule);
     addParameter("arches", this.arches);
-    addParameter("tracery", this.tracery);
+    addParameter("ca", this.ca);
+    addParameter("rule", this.rule);
+    addParameter("caspd", this.caSpeed);
     addParameter("glitch", this.glitch);
     addParameter("gold", this.gold);
     addParameter("drip", this.drip);
@@ -331,6 +359,12 @@ public class Cathedral extends ApotheneumPattern {
       this.starSpeed[i] = 0.0006 + this.random.nextDouble() * 0.0010; // rad/ms, slow
       this.starHue[i] = this.random.nextDouble() * 14;                // 0..14: reds
       this.starDrift[i] = (this.random.nextDouble() - 0.5) * 0.00002; // slow parallax
+    }
+
+    for (int i = 0; i < MAX_PARTICLES; ++i) {
+      this.particlePhase[i] = this.random.nextDouble();               // 0..1 along beam
+      // Varied rise speeds: a full-beam traversal takes ~2..6 s (fraction/ms)
+      this.particleSpeed[i] = 1.0 / (2000 + this.random.nextDouble() * 4000);
     }
 
     final int r0 = RULES[this.rule.getValuei()];
@@ -349,18 +383,24 @@ public class Cathedral extends ApotheneumPattern {
     seedCA(this.cylCA, Apotheneum.Cylinder.Ring.LENGTH, r0, true);
     this.destroyed = false;
     this.eroding = false;
+    this.tearRaw = 0;
     this.tearPhase = 0;
   }
 
-  /** Dissonance bend: arm the glitch pulse (hue-shift + tear-shear). */
+  /** Dissonance bend: start the glitch pulse (smooth swell then longer fade over
+   *  one TempoDiv period). */
   private void bendTrigger() {
-    this.glitchPulse = 1;
+    this.bendActive = true;
+    this.bendTimeMs = 0;
   }
 
-  /** Resolution/return: clear the bend and flood a completing glow. */
+  /** Resolution/return: snap the glitch to zero and start the completing-glow
+   *  pulse (same tempo-timed pulse shape). */
   private void healTrigger() {
+    this.bendActive = false;
     this.glitchPulse = 0;
-    this.healGlow = 1;
+    this.healActive = true;
+    this.healTimeMs = 0;
   }
 
   /** Codex teardown: begin the one-time erosion (ignored if already running or
@@ -368,6 +408,7 @@ public class Cathedral extends ApotheneumPattern {
   private void tearDownTrigger() {
     if (!this.eroding && !this.destroyed) {
       this.eroding = true;
+      this.tearRaw = 0;
       this.tearPhase = 0;
     }
   }
@@ -417,7 +458,7 @@ public class Cathedral extends ApotheneumPattern {
 
     // CA free-runs on the speed-scaled timer; track a fractional flow phase so
     // the tracery slides down smoothly instead of snapping row-by-row.
-    final double stepMs = Ranges.exp(this.speed.getValue(), CA_STEP_AMBIENT_MS, CA_STEP_PEAK_MS);
+    final double stepMs = Ranges.exp(this.caSpeed.getValue(), CA_STEP_AMBIENT_MS, CA_STEP_PEAK_MS);
     this.caAccumMs += deltaMs;
     boolean stepNow = false;
     if (this.caAccumMs >= stepMs) {
@@ -483,8 +524,27 @@ public class Cathedral extends ApotheneumPattern {
   // ---- Envelopes --------------------------------------------------------------
 
   private void updateEnvelopes(double deltaMs) {
-    this.glitchPulse = Math.max(0, this.glitchPulse - deltaMs / BEND_MS);
-    this.healGlow = Math.max(0, this.healGlow - deltaMs / HEAL_MS);
+    final double period = tempoPeriodMs();
+
+    // Bend + Heal: tempo-timed pulses (smooth ATTACK_FRAC onset, longer fade).
+    if (this.bendActive) {
+      this.bendTimeMs += deltaMs;
+      if (this.bendTimeMs >= period) {
+        this.bendActive = false;
+        this.glitchPulse = 0;
+      } else {
+        this.glitchPulse = pulse(this.bendTimeMs, period);
+      }
+    }
+    if (this.healActive) {
+      this.healTimeMs += deltaMs;
+      if (this.healTimeMs >= period) {
+        this.healActive = false;
+        this.healGlow = 0;
+      } else {
+        this.healGlow = pulse(this.healTimeMs, period);
+      }
+    }
 
     // Drip energy builds/holds toward |Drip| with a one-pole ease.
     final double dripTarget = Math.abs(this.drip.getValue());
@@ -492,18 +552,16 @@ public class Cathedral extends ApotheneumPattern {
     this.dripEnergy += (dripTarget - this.dripEnergy) * a;
     this.dripTimeMs += deltaMs;
 
-    // TearDown erosion advances over one tempo-division period.
+    // TearDown erosion advances linearly over one tempo period, then the visible
+    // progress is eased with smoothstep so the collapse and dust build settle.
     if (this.eroding) {
-      double per = this.tempoLock.divisionMs(this.tempoDiv.getEnum());
-      if (!(per > 50)) {
-        per = ERODE_FALLBACK_MS;
-      }
-      this.tearPhase += deltaMs / per;
-      if (this.tearPhase >= 1) {
-        this.tearPhase = 1;
+      this.tearRaw += deltaMs / period;
+      if (this.tearRaw >= 1) {
+        this.tearRaw = 1;
         this.eroding = false;
         this.destroyed = true;
       }
+      this.tearPhase = smoothstep(this.tearRaw);
     }
 
     for (int i = 0; i < NUM_STARS; ++i) {
@@ -532,17 +590,13 @@ public class Cathedral extends ApotheneumPattern {
     this.stoneColor = LXColor.hsb(wrap360(sh), clampB(ss), clampB(sb));
     this.windowBack = LXColor.hsb(wrap360(sh), clampB(ss), clampB((float) (sb * WINDOW_BACK)));
 
-    // Tracery (CA): base from swatch 2; toward a dimmer half-bright yellow at
-    // full Gold, so it reads distinct from the brighter gold arches.
+    // CA tracery: base from swatch 2; toward a dimmer half-bright yellow at full
+    // Gold. The CA knob scales brightness LINEARLY, so CA = 0 is fully off.
     final float th = (float) (wrapLerpHue(this.baseTraceH, YELLOW_H, goldEff) + glitchHue);
     final float ts = (float) lerp(this.baseTraceS, YELLOW_S, goldEff);
     final double tbBase = lerp(this.baseTraceB, YELLOW_B, goldEff);
-    final double traceryB = tbBase * glow * (0.5 + 0.5 * this.tracery.getValue())
-      * (1.0 + 0.4 * this.audio.treble);
-    this.traceryColor = LXColor.hsb(wrap360(th), clampB(ts), clampB((float) traceryB));
-
-    // Drip energy color: a bright version of the gold end.
-    this.dripColor = LXColor.hsb(wrap360(this.baseGoldH), clampB(this.baseGoldS), 100);
+    final double caB = tbBase * glow * this.ca.getValue() * (1.0 + 0.4 * this.audio.treble);
+    this.caColor = LXColor.hsb(wrap360(th), clampB(ts), clampB((float) caB));
 
     // Dust: a dim version of the stone.
     this.dustColor = scale(this.stoneColor, 0.5);
@@ -690,24 +744,30 @@ public class Cathedral extends ApotheneumPattern {
     final double cph = this.caPhase;
     final double tp = this.tearPhase;
 
+    // First pass: silhouette height per column. Needed up-front because the
+    // supersampled AA interpolates topH between adjacent columns.
+    for (int x = 0; x < w; ++x) {
+      final double archApex = springH + (fullApex - springH) * this.colApexShape[x];
+      final double shape = Math.pow(Math.max(0, 1 - this.colNorm[x]), ARCH_EXP);
+      this.colTopH[x] = springH + (archApex - springH) * shape;
+    }
+
+    // Second pass: paint. Silhouette coverage is 2D-supersampled so all edges —
+    // apex, curved sides, arch-to-arch valleys — blend inter-pixel as the arch
+    // grows, instead of only feathering the vertical top edge.
     for (int x = 0; x < w; ++x) {
       final double norm = this.colNorm[x];
-      final double archApex = springH + (fullApex - springH) * this.colApexShape[x];
-      final double shape = Math.pow(Math.max(0, 1 - norm), ARCH_EXP);
-      final double topH = springH + (archApex - springH) * shape;
-      this.colTopH[x] = topH;
-
+      final double topH = this.colTopH[x];
       for (int y = 0; y < h; ++y) {
-        final double hb = (h - 1) - y;             // height from the floor
-        if (hb < 0 || hb > topH + 0.5) {
-          continue;                                 // outside the silhouette
+        final double coverage = silhouetteCoverage(x, y, w, h);
+        if (coverage <= 0) {
+          continue;                                 // fully outside the silhouette
         }
-        if (erode && eroded(x, hb, h, tp)) {
+        final double hb = (h - 1) - y;             // height from the floor
+        if (erode && eroded(x, hb, topH, tp)) {
           continue;                                 // crumbled away
         }
-        // Antialiased silhouette edge (softened by Smooth)
-        final double edgeCover = clamp01((topH - hb) + 0.5);
-        final double cover = 1 - sm * (1 - edgeCover);
+        final double cover = 1 - sm * (1 - coverage);
 
         final boolean pier = (norm > PIER_NORM) && (hb <= springH);
         final boolean mullion = (norm < MULLION_NORM) && (hb <= springH);
@@ -722,17 +782,43 @@ public class Cathedral extends ApotheneumPattern {
           final double cell = (y == 0)
             ? lerp(ca[0][x], this.caIncoming[x], cph * sm)
             : lerp(ca[y][x], ca[y - 1][x], cph * sm);
-          col = LXColor.lerp(this.windowBack, this.traceryColor, (float) clamp01(cell));
+          col = LXColor.lerp(this.windowBack, this.caColor, (float) clamp01(cell));
         }
         c.set(x, y, scale(col, cover));
       }
     }
   }
 
+  /** Fraction (0..1) of a pixel covered by the arch silhouette, from an SS x SS
+   *  supersample of the continuous topH field (interpolated between columns,
+   *  ring-wrapped). This is what makes the growing arches blend like a shader. */
+  private double silhouetteCoverage(int x, int y, int w, int h) {
+    int inside = 0;
+    for (int sy = 0; sy < SS; ++sy) {
+      final double hbSub = (h - 1) - (y - 0.5 + (sy + 0.5) / SS);
+      if (hbSub < 0) {
+        continue;                                   // below the floor: outside
+      }
+      for (int sx = 0; sx < SS; ++sx) {
+        final double xf = x - 0.5 + (sx + 0.5) / SS;
+        final int x0 = Math.floorMod((int) Math.floor(xf), w);
+        final int x1 = (x0 + 1) % w;
+        final double frac = xf - Math.floor(xf);
+        final double topHi = this.colTopH[x0] + (this.colTopH[x1] - this.colTopH[x0]) * frac;
+        if (hbSub <= topHi) {
+          ++inside;
+        }
+      }
+    }
+    return inside / (double) (SS * SS);
+  }
+
   /** Rising-threshold erosion: higher pixels crumble first (collapse downward),
-   *  jittered per pixel. True once tearPhase passes the pixel's erode time. */
-  private static boolean eroded(int x, double hb, int h, double tearPhase) {
-    final double nh = hb / Math.max(1, (h - 1));      // 0 floor .. 1 top
+   *  jittered per pixel. Normalized to each column's OWN arch height (topH) so
+   *  short side arches erode top-down in step with the tall main arch instead of
+   *  surviving until the last instant. True once tearPhase passes the erode time. */
+  private static boolean eroded(int x, double hb, double topH, double tearPhase) {
+    final double nh = hb / Math.max(1, topH);         // 0 arch floor .. 1 arch top
     final double erodeTime = (1 - nh) * 0.75 + hash2(x, (int) Math.round(hb)) * 0.25;
     return tearPhase > erodeTime;
   }
@@ -783,39 +869,72 @@ public class Cathedral extends ApotheneumPattern {
     final double fullApex = g * APEX_FRAC * (h - 1);
     final double dir = Math.signum(this.drip.getValue());
     final double t = this.dripTimeMs;
+    final double sm = this.smooth.getValue();
 
-    // Ridge coating on every column's outline pixel (scintillation flows down for
-    // negative Drip, up for positive).
-    final double flow = (dir < 0) ? 1 : -1;
+    // Center-out ridge traces: waves run ALONG each arch, parameterized by
+    // colNorm (0 at the arch peak column, 1 at its edges) rather than by ring x,
+    // so they move down/out from the peak for negative Drip and in/up toward the
+    // peak for positive. Painted only on the outline pixel — never in the windows.
+    final double tdir = (dir < 0) ? -1 : 1;
     for (int x = 0; x < w; ++x) {
       final int ridgeY = (int) Math.round((h - 1) - this.colTopH[x]);
-      final double scint = 0.5 + 0.5 * Math.sin(t * 0.006 * flow + x * 0.5);
-      final double bri = e * (0.35 + 0.35 * scint);
-      c.setMax(x, ridgeY, scale(this.dripColor, bri));
+      final double scint = 0.5 + 0.5 * Math.sin(this.colNorm[x] * RIDGE_WAVE_K + tdir * t * 0.004);
+      c.setMax(x, ridgeY, dripPixel(e * (0.35 + 0.35 * scint)));
     }
 
-    // Upward beams out of each arch peak (positive Drip).
+    // Ascending beam: a particle system out of each arch peak (positive Drip).
+    // 1..MAX_PARTICLES large particles per peak, each with its own rise speed.
     if (dir >= 0) {
-      final int beamLen = (int) Math.round(e * (h - 1)); // up to 1x installation height
+      final int active = 1 + (int) Math.round(e * (MAX_PARTICLES - 1)); // 1..MAX
+      final double beamLen = e * (h - 1);                                // up to 1x height
       for (int p = 0; p < this.peakCount; ++p) {
         final int cx = this.peakX[p];
         final double archApex = springH + (fullApex - springH) * this.peakApexShape[p];
-        final int peakY = (int) Math.round((h - 1) - archApex);
-        final double beamHalfMax = 0.25 * this.peakHalfCols[p]; // ~1/4 arch width
-        for (int j = 0; j <= beamLen; ++j) {
-          final int yy = peakY - j;
-          if (yy < 0) {
-            break;
+        final double peakY = (h - 1) - archApex;
+        final double halfCols = Math.max(1.0, 0.25 * this.peakHalfCols[p]); // 1/4 arch width
+        for (int i = 0; i < active; ++i) {
+          double frac = t * this.particleSpeed[i] + this.particlePhase[i] + hash2(p, i);
+          frac -= Math.floor(frac);                            // 0..1 along the beam
+          final double py = peakY - frac * beamLen;            // fractional row
+          final double intensity = e * clamp01(1.5 * (1 - frac)); // fades as it ascends
+          if (intensity < 0.02) {
+            continue;
           }
-          final double taper = 1 - (double) j / Math.max(1, beamLen);
-          final double scint = 0.5 + 0.5 * Math.sin(t * 0.01 - j * 0.6 + cx * 0.3);
-          final double bri = e * taper * (0.5 + 0.5 * scint);
-          final int wc = (int) Math.round(beamHalfMax * taper);
-          for (int dxp = -wc; dxp <= wc; ++dxp) {
-            final double wf = 1 - Math.abs(dxp) / (double) (wc + 1);
-            c.setMax(cx + dxp, yy, scale(this.dripColor, bri * wf));
-          }
+          drawParticle(c, cx, py, halfCols, intensity, sm);
         }
+      }
+    }
+  }
+
+  /** Drip energy color for a 0..1 intensity: the palette warm/right hue, whose
+   *  brightest values desaturate toward DRIP_HOT_SAT (hot near-white). Shared by
+   *  the ridge traces and the beam particles. */
+  private int dripPixel(double intensity) {
+    final double in = clamp01(intensity);
+    final float s = (float) lerp(this.baseGoldS, DRIP_HOT_SAT, in);
+    return LXColor.hsb(wrap360(this.baseGoldH), clampB(s), clampB((float) (100 * in)));
+  }
+
+  /** A large soft Drip particle blob centered at (cx, pyf). Smooth controls the
+   *  sub-pixel vertical placement: at sm=1 the blob center tracks the fractional
+   *  row (smooth ascent); at sm=0 it snaps to an integer row (steppy). */
+  private void drawParticle(SurfaceCanvas c, int cx, double pyf, double halfCols, double intensity, double sm) {
+    final int vr = (int) Math.ceil(PARTICLE_VRAD) + 1;
+    final int hw = (int) Math.ceil(halfCols);
+    final int cy = (int) Math.round(pyf);
+    final double centerY = cy + (pyf - cy) * sm;      // sub-pixel when smooth
+    for (int dy = -vr; dy <= vr; ++dy) {
+      final int yy = cy + dy;
+      final double vfall = Math.max(0, 1 - Math.abs(yy - centerY) / (PARTICLE_VRAD + 0.5));
+      if (vfall <= 0) {
+        continue;
+      }
+      for (int dx = -hw; dx <= hw; ++dx) {
+        final double hfall = Math.max(0, 1 - Math.abs(dx) / (halfCols + 0.5));
+        if (hfall <= 0) {
+          continue;
+        }
+        c.setMax(cx + dx, yy, dripPixel(intensity * vfall * hfall));
       }
     }
   }
@@ -950,6 +1069,30 @@ public class Cathedral extends ApotheneumPattern {
 
   private static double lerp(double a, double b, double t) {
     return a + (b - a) * t;
+  }
+
+  private static double smoothstep(double t) {
+    t = clamp01(t);
+    return t * t * (3 - 2 * t);
+  }
+
+  /** One TempoDiv period in ms, with a safe fallback. */
+  private double tempoPeriodMs() {
+    final double per = this.tempoLock.divisionMs(this.tempoDiv.getEnum());
+    return (per > 50) ? per : ERODE_FALLBACK_MS;
+  }
+
+  /** Bend/Heal pulse: smooth 0->1 over the first ATTACK_FRAC of the period, then
+   *  a slower smooth 1->0 over the remainder. Returns 0 once phase reaches 1. */
+  private static double pulse(double timeMs, double periodMs) {
+    final double p = timeMs / periodMs;
+    if (p >= 1) {
+      return 0;
+    }
+    if (p < ATTACK_FRAC) {
+      return smoothstep(p / ATTACK_FRAC);
+    }
+    return smoothstep(1 - (p - ATTACK_FRAC) / (1 - ATTACK_FRAC));
   }
 
   /** Shortest-path hue interpolation in degrees (wraps around the color wheel).*/
