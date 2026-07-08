@@ -1,12 +1,35 @@
 # Blit Feedback — design note
 
 Video-feedback glitch effect, and the first `LXEffect` in this package
-(everything else is patterns). While the momentary **TriGate** is held, a
+(everything else is patterns). While the momentary **On** gate is held, a
 shape-masked region of the output is sampled at a crawling cursor and
 restamped one **Step** along **Angle** on every **Tempo** tick. Each copy
 bakes in the previous copy's result — camera pointed at its own monitor —
 so the trail degrades and smears as it travels. Releasing the gate fades the
 accumulated copies to transparent over one **Fade** division.
+
+A second momentary gate, **Random**, is a live "surprise me": on press it
+stashes the current control values, randomizes the visual params (SampleSrc,
+Shape, AspRatio, BlitAng, Angle, Step; Size over [0.25, 1] — the lower bound
+keeps the copy readable), and lights two of the available surfaces at random,
+then blits exactly like **On**. Border is currently forced on for random
+copies as a debug aid. On release it restores every stashed value, so
+repeated presses never drift from the pre-press baseline. Restore fires on
+the release edge; with the default all-surfaces-on config the two random
+surfaces are back in the active set, so their ghosts fade out normally over
+**Fade**.
+
+SrcX/SrcY are not uniform rolls — the press aims them at contrast. The live
+frame on the two chosen surfaces is scanned (every pixel, ~18K worst case,
+event-rate only) into a 16×4 zone grid laid out in *normalized source space*,
+so one zone means the same SrcX/SrcY on every surface; per-zone score is the
+variance of Rec.601 integer luma, with both surfaces pooled into shared bins.
+Zones are ranked and the source drops at a uniform random point inside a zone
+drawn from the top 20% of contrasty (variance > 0) zones, excluding the
+previously picked zone so repeated triggers roam. A flat or blank frame falls
+back to a uniform roll. Each pick logs
+`BlitFeedback Random: zone (x,y) score ... -> SrcX ... SrcY ...` for curation
+against ~/Chromatik/Logs.
 
 ## Architecture
 
@@ -14,10 +37,12 @@ accumulated copies to transparent over one **Fade** division.
   contract). Auto-generated control panel only, no custom UI.
 - Four persistent straight-ARGB rasters (`Layer`), one per surface:
   cube ext/int 200×45, cylinder ext/int 120×43. `0x00000000` = empty.
-  X wraps (`floorMod`), Y never wraps. Interiors get independent buffers and
-  cursors (not mirrors of the exterior). Orientations are re-fetched every
-  frame because `Apotheneum` rebuilds them on model changes; a null interior
-  just deactivates that layer.
+  Both axes wrap (`floorMod`) — X around the ring, Y through the top/bottom
+  edge — so a smear driven off any edge by Angle/Step re-enters on the
+  opposite side and keeps glitching indefinitely. Interiors get independent
+  buffers and cursors (not mirrors of the exterior). Orientations are
+  re-fetched every frame because `Apotheneum` rebuilds them on model changes;
+  a null interior just deactivates that layer.
 - `SurfaceCanvas` was deliberately **not** used: its `decay()` forces alpha
   opaque and `copyTo()` overwrites `colors[]` — both wrong for a compositing
   effect (and changing it would risk Mountains).
@@ -26,10 +51,10 @@ accumulated copies to transparent over one **Fade** division.
 
 1. Refresh orientations; poll `TempoLock.crossed(Tempo)` unconditionally
    (a lapsed poll fires one stale event — see TempoLock javadoc).
-2. Gate rising edge: reset each layer's cursor to SourceX/Y and arm the
-   first grab. Cube x-mapping `wrap(SourceX·200 + 25)` puts SourceX 0 at the
-   front-face center and 0.25 at the next face; cylinder `wrap(SourceX·120 +
-   15)` lands the same four azimuths. SourceY 0 = top.
+2. Gate rising edge: reset each layer's cursor to SrcX/Y and arm the
+   first grab. Cube x-mapping `wrap(SrcX·200 + 25)` puts SrcX 0 at the
+   front-face center and 0.25 at the next face; cylinder `wrap(SrcX·120 +
+   15)` lands the same four azimuths. SrcY 0 = top.
 3. On rising edge or tick while held: **blit** each active layer —
    sample the rotated rect/oval/triangle mask at the cursor into a 128×128
    scratch raster, advance the cursor Step along Angle (buffer y is
