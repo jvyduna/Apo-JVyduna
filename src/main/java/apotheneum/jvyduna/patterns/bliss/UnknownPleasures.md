@@ -29,23 +29,43 @@ multiply channel.
   of cylinder column 0; adjust sign/offset). Helix mode with CylWavs ≠ 4
   paints separate cylinder rasters (`cylHelixRaster`) because segment phase
   lags depend on the segment count.
-- **Line store: ring buffer keyed by integer birth index `k`** (`RING = 64`
-  entries: gain, max-sample, and a `float[4][50]` shape — plane 0 only except
-  Simplex). A line's position is a pure function of `k` and division-time
-  (below); there is no per-frame position mutation, no kill logic (entries
-  outside the window are simply not painted and get overwritten on ring wrap),
-  and no sorting (painter order is monotone in `k`). Shape generation is
-  event-rate; the render path allocates nothing.
-- **Painter's algorithm, unclamped peaks.** Back-to-front by baseline: each
-  line black-fills from just under its contour down to its own baseline (the
-  occlusion), then strokes the contour anti-aliased across two rows by its
-  fractional height. Shapes are constrained only by a sanity ceiling
-  (`SHAPE_MAX = 2`, i.e. up to 2× the Amp height); there is no per-line height
-  clamp, so peaks overlap the lines behind them exactly as on the cover, and
-  the fill handles the layering. `RIDGE_MARGIN = 44` rows (SHAPE_MAX × Amp max
-  × pulse gain) is only an existence-window margin so ridges never pop in/out
-  at the field edges.
+- **Everything is functional/live — nothing is baked into a buffer.** Line
+  profiles are recomputed *every frame* by `computeShape(index, slot, synth)`
+  from a deterministic per-line seed (`lineSeed = hash(k, reseedSalt)`) and the
+  *current* parameter values. So Simplex scale/turbulence, Jag, Amp, Spacing,
+  and WavMode all re-shape every already-visible line the instant you move
+  them; no reseed needed. The only per-line stored state is pulse metadata
+  (`ringKey`/`ringGain`/`ringSynth`, a small ring keyed by birth index `k`) so
+  a Pulse can be consumed by the right line; Reseed just bumps `reseedSalt`.
+  The synthesized path reseeds a reused `Random` via `setSeed` (no allocation)
+  so a line's Gaussians and jag walk are stable frame-to-frame yet respond to
+  live Jag.
+- **True antialiased curve rasterizer.** `drawCurve` connects the per-column
+  samples: each column draws the contour over the vertical span between its
+  neighbor-midpoints (`yL = ½(yc[x-1]+yc[x])`, `yR = ½(yc[x]+yc[x+1])`, plus
+  the sample itself so peaks/valleys keep their tip). Because column *x*'s
+  right edge equals column *x+1*'s left edge, consecutive columns share an
+  endpoint row — the ridge never breaks apart, even at high amplitude or high
+  Jag where adjacent samples are far apart (steep segments render as bright
+  vertical connectors). A near-flat column falls back to the classic two-row
+  fractional stroke. Below each contour the interior is filled black, and that
+  fill occludes the lines behind it (painter's algorithm, back-to-front by
+  baseline). `marginRows = Amp × Spacing × pulse gain` is the existence-window
+  margin so ridges never pop in/out at the field edges.
 - Door columns: bounded by `column.points.length` in both blit loops.
+
+## Amplitude (in units of Spacing)
+
+Each line's signal is normalized to **[0, 1]** regardless of mode: Simplex is
+`½ + ½·noise`, windowed; the synthesized pulse is down-scaled only (divided by
+its own max when that exceeds 1) so a strong line peaks at 1 while weaker lines
+stay shorter — peaks are "up to," not "always," full height. **Amp (range
+0–2) then scales that peak in units of Spacing**: peak rows = `signal × Amp ×
+Spacing` (× 1.8 for a Pulse line). Amp = 0 → flat lines in every mode; Amp = 1
+→ a full peak reaches the baseline of the line above; Amp = 2 → a full peak
+rises two rows-of-spacing tall, overlapping the two lines behind it. So the
+overlap drama scales directly and predictably with Amp, independent of Spacing
+and mode.
 
 ## Tempo mapping (division-locked scrolling)
 
@@ -87,18 +107,16 @@ interfaces are seamless flats).
   at once). The four slots trace the four sides of a square in the field's
   X-Z plane — adjacent walls share corners, so the walls read as one volume
   wrapped by the architecture; the field advances in Y per line. Params:
-  `NzScl` (X-Z scale), `NzTurb` (fBm octaves 1–4). Shapes are baked at birth
-  (event-rate, ~200 noise samples per division) rather than live-sampled —
-  static per-line profiles match the cover, and the render loop stays pure
-  array math. Jag's baked-noise term does not apply here (turbulence covers
-  roughness).
+  `NzScl` (X-Z scale), `NzTurb` (fBm octaves 1–4), both live — moving them
+  re-shapes every visible line. Jag's synth-noise term does not apply here
+  (turbulence covers roughness).
 - **Helix** — all walls show the same series, each phase-lagged by ¼ division
   (segments by 1/CylWavs), so the stack descends as a helix wrapping the
   building; after four walls the lag totals one full line, so the winding is
   continuous around the corner.
 
-WavMode changes clear the ring (reseed semantics — Simplex needs planes 1–3,
-Shift needs lookahead); CylWavs changes are blit-time only, no invalidation.
+WavMode and CylWavs changes take effect instantly — everything is recomputed
+live per frame, so no ring invalidation is needed.
 
 ## Audio mapping (live per-frame mix)
 
@@ -137,9 +155,10 @@ is parented to the meter and can't be registered on the pattern).
 | reseed | Reseed | Trigger | — | — | Clear and refill the whole stack |
 | flip | Flip | Trigger | — | — | Reverse scroll direction |
 | pulse | Pulse | Trigger | — | — | Inject one oversized synth pulse line at the next division |
+| rndTrig | RndTrig | Trigger | — | — | Random trigger or parameter jump |
 | spacing | Spacing | Compound | 2 | 2–16 | Rows between baselines = scroll rows per division (zoom) |
-| amplitude | Amp | Compound | 7 | 2–12 | Peak ridge height in rows (peaks may reach 2× via SHAPE_MAX) |
-| jaggedness | Jag | Compound | 0.15 | 0–1 | Baked profile noise; at full Audio, FFT bin smoothing amount |
+| amplitude | Amp | Compound | 1 | 0–2 | Peak height in units of Spacing: 0 = flat, 2 = peaks 2× spacing tall |
+| jaggedness | Jag | Compound | 0.15 | 0–1 | Synth profile roughness (live); at full Audio, FFT bin smoothing amount |
 | wavMode | WavMode | Enum | Dup | Dup/Shift/Simplex/Helix | How the four walls relate |
 | cylWavs | CylWavs | Discrete | 4 | 1–4 | Distinct waveforms around the cylinder |
 | nzScale | NzScl | Compound | 0.5 | 0.05–2 | Simplex: X-Z field scale |
@@ -150,9 +169,8 @@ is parented to the meter and can't be registered on the pattern).
 
 Removed in the 2026-07-06 rework: `energy` (speed is TempoDiv × Spacing now),
 `tintHue`/`tintAmount` (colorize externally), `sync` (locking is structural).
-Removed 2026-07-08: `rndTrig` (the renamed `meta`), dropped with the TriggerBag
-convention. `tempoDiv` is retained — it is this pattern's structural timebase
-(TempoDiv × Spacing is the scroll speed), not a sync gate.
+Series RndTrig pass (2026-07-06): `meta` → `rndTrig` (label Meta → RndTrig),
+moved up to 4th, immediately after the triggers.
 
 ## Triggers
 
@@ -171,6 +189,16 @@ reseed (full scene reset).
 - `reseed` (large) — clears the ring; the next frame refills every grid-locked
   position with fresh shapes. Instant scene reset with unchanged timing.
 
+## Jump candidates
+
+| Param | Jump range | Status | Notes |
+|---|---|---|---|
+| spacing | [2, 8] | candidate | Density jump; kept below the new 16 max — a jump to 16 is a violent zoom |
+| amplitude | [0.5, 2] | candidate | Calm ripples (peaks under 1 spacing) vs peaks overlapping two lines |
+| jaggedness | [0, 0.5] | candidate | Above ~0.5 lines may read as static (`CURATE:`) |
+| wavMode | full | candidate | Scene change (clears the ring) |
+| cylWavs | full (1–4) | candidate | Cylinder-only re-segmentation, seamless |
+
 ## Simulation-principles compliance
 
 - Pacing is tempo-derived: at the QUARTER default and 120 BPM, spacing 2 →
@@ -181,8 +209,9 @@ reseed (full scene reset).
   two-row anti-aliased stroke is the only gradient, used for motion
   smoothness, not texture.
 - Minimum spacing of 2 rows keeps adjacent ridgelines separate at LED-gap
-  scale. Peaks are intentionally unclamped (up to `SHAPE_MAX = 2` × Amp): a
-  pulse line can momentarily dominate the field — that is the cover's drama.
+  scale. Peak height is bounded and predictable (`signal ≤ 1` × Amp ≤ 2 ×
+  Spacing), so a full peak overlaps at most the two lines behind it; a Pulse
+  (×1.8) can momentarily dominate the field — that is the cover's drama.
 - Event motion (pulse/reseed/flip/mode change) changes content instantly but
   every line then develops over its full multi-second traversal.
 
@@ -195,4 +224,4 @@ reseed (full scene reset).
 | 2026-07-05 | Adversarial review fix: `crossed()` evaluated every frame so the cycle-count gate never goes stale across a Sync-off interval | Match the documented behavior |
 | 2026-07-06 | Curation rework: unclamped peaks (removed [0,1] shape clamp and `MAX_RIDGE_ROWS`; overlap via painter's fill); removed Tint/TintAmt/Energy/Sync; Spacing max 2→16; division-locked absolute positioning (TempoDiv is the speed, Spacing is zoom, ring-buffer line store replaces the pool, TempoLock dropped); new WavMode (Dup/Shift/Simplex/Helix) + CylWavs with 45° cylinder rotation; Audio reworked to live per-frame mirrored-FFT mix with pattern-owned GraphicMeter + Decay knob, Jag doubling as bin smoothing | User curation session: restore the cover's overlapping-peak look, make walls distinct, make audio dramatic and tempo the timebase |
 | 2026-07-06 | Series RndTrig ordering: `meta` → `rndTrig` (label RndTrig), moved from last to 4th, immediately after the triggers; `.lxp` values on the old `meta` path are dropped on load | Series convention: TriggerBag meta trigger sits right after the other trigger params |
-| 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path). For this pattern that meant dropping `rndTrig` (the renamed Meta) and the TriggerBag/jump-candidate machinery only — `sync`/TempoLock were already gone (2026-07-06), and `tempoDiv` is deliberately KEPT because it is the structural timebase (division-locked scrolling), not a sync gate; `.lxp` values on `rndTrig` are dropped on load | Jeff retired the project-wide Sync/TempoDiv + Meta pattern-control convention |
+| 2026-07-08 | Curation follow-up: (1) true connected-curve rasterizer (`drawCurve` spans neighbor-midpoints per column) so ridges no longer break apart at high Amp/Jag; (2) fully functional/live shapes — profiles recomputed each frame from a salted per-line seed + current params instead of baked at birth, so Simplex/Jag/mode changes affect already-visible lines; ring now holds only pulse metadata; (3) Amp reframed to 0–2 in units of Spacing (signal normalized to [0,1]; peak = signal × Amp × Spacing), so Amp 0 = flat and Amp 2 = peaks two spacings tall in every mode | User: fix high-amplitude line breaks, make all controls live, and make amplitude a predictable spacing-relative overlap control |
