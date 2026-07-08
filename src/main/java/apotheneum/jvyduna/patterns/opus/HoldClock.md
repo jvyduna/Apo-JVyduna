@@ -126,7 +126,17 @@ above).
 | `shimmer` | Shimmer | CompoundParameter | 0 | 0..1 | crystal-staircase cascade intensity (committed beat 0:40–0:50) |
 | `freeze` | Freeze | BooleanParameter | false | — | latch the held "GOD PUT ME ON HOLD" punchline frame (committed beat ~1:25) |
 | `message` | Msg | StringParameter | "" | — | held-frame / cold-open text, driven by clip-lane string events |
+| `smooth` | Smooth | CompoundParameter | 1.0 | 0..1 | motion blending + antialiasing (0 = steppy/hard edges, 1 = smooth sub-pixel + AA) |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth (0 = pure clock) |
+
+**Smooth** is the house AA/interpolation knob. It softens: the antialiased edges
+of every drawn line form (analog bezel/ticks/hands, the mystic dial ring/glyph
+marks/pointer, the shimmer staircase treads/risers) — Wu AA at 1, hard
+pixel-snapped integer lines at 0, the AA fringe fading in between — plus the
+eased crossfades of the cold-open dawn ramp, the shimmer brightness excursion,
+the shimmer highlight-band falloff, and the split-flap flap-fall (smoothstep-
+eased at 1, raw/stepped at 0). It does not touch the clock's beat-driven
+timing — the tick/blink still advances on the BPM-period accumulator.
 
 ### Composition-driven timeline (how the .lxp drives it)
 
@@ -218,3 +228,4 @@ Four triggers, small → large state change:
 | 2026-07-07 | Initial first-pass, Claude autonomous session | Design doc + compiling stub: phase/mode state machine, tick engine, digit rasterizer, and the two committed beats (shimmer knob, freeze button) all wired and registered; analog/binary/mystic/flip/glitch/cascade/multi-line left as TODOs for the hardware pass |
 | 2026-07-07 | Full build-out, Claude session | Built every stubbed subsystem: multi-strand crystal-staircase shimmer cascade (seamless periodic staircase + ascending highlight, ≥5 s traversal); multi-line word-wrapped held message with auto-scale + never-resolving "EST WAIT" counter; analog face (bezel ring, 12 ticks, AA lineWu hands, smooth sub-tick sweep); split-flap FLIP styling with per-tick flap fall; binary 6×4 BCD dot-grid; base-N occult MYSTIC dial (esoteric glyph marks, counter-rotating inner ring, smooth pointer); and the VHS button-glitch melt (scratch-buffer phase-wobble + torn bands + per-column drip). Zero-alloc preserved (added bcd[6], line-range arrays, two scratch canvases, all preallocated); all parameters/keys unchanged |
 | 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path) | Project-wide retirement of the Sync/TempoDiv + Meta pattern-control convention. The clock now always ticks on the free-running BPM-period accumulator (`lx.engine.tempo.period`), the old Sync-off mode. |
+| 2026-07-08 | Added `Smooth` (house AA/interpolation convention), default 1.0 | Adopts the package-wide Smooth knob: gates edge antialiasing (Wu AA at 1 → hard pixel-snapped lines at 0, via `smoothLine`) on all line forms, and eases the dawn / shimmer-brightness / shimmer-highlight / flap-fall transitions (`eased` = smoothstep blended by Smooth) instead of hard steps. Clock stays beat-driven — no timing change. Default 1.0 preserves the prior fully-AA look with zero render overhead. |

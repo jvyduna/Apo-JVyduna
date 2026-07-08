@@ -189,6 +189,10 @@ public class HoldClock extends ApotheneumPattern {
     new StringParameter("Msg", "")
     .setDescription("Held-frame / cold-open text (e.g. GOD PUT ME ON HOLD, PLEASE HOLD); driven by clip-lane string events");
 
+  public final CompoundParameter smooth =
+    new CompoundParameter("Smooth", 1.0)
+    .setDescription("Motion blending + antialiasing: 0 = steppy/pixel-snapped/hard edges, 1 = smooth sub-pixel motion and antialiased forms");
+
   public final CompoundParameter audioDepth =
     new CompoundParameter("Audio", 0)
     .setDescription("Audio reactivity depth: 0 = pure clock (default), 1 = subtle per-kick jitter");
@@ -232,6 +236,7 @@ public class HoldClock extends ApotheneumPattern {
   private int glitchSeed = 0;        // per-frame jitter seed for the row tears
   private int lastFlipTick = 0;      // last elapsedTicks a flap was armed for
   private double flipMs = 0;         // split-flap flap-fall envelope
+  private double smoothAA = 1.0;     // frame-cached Smooth: edge AA + eased transitions
 
   public HoldClock(LX lx) {
     super(lx);
@@ -251,6 +256,7 @@ public class HoldClock extends ApotheneumPattern {
     addParameter("shimmer", this.shimmer);
     addParameter("freeze", this.freeze);
     addParameter("message", this.message);
+    addParameter("smooth", this.smooth);
     // Audio
     addParameter("audio", this.audioDepth);
   }
@@ -285,6 +291,7 @@ public class HoldClock extends ApotheneumPattern {
   @Override
   protected void render(double deltaMs) {
     this.audio.tick(deltaMs);
+    this.smoothAA = LXUtils.constrain(this.smooth.getValue(), 0, 1);
     setColors(LXColor.BLACK);
 
     advanceClock(deltaMs);
@@ -354,12 +361,16 @@ public class HoldClock extends ApotheneumPattern {
         return 0;
       case COLD_OPEN: {
         final double dawn = LXUtils.constrain(this.coldOpenMs / DAWN_MS, 0, 1);
-        return this.brightness.getValue() * dawn; // near-black, dawning in
+        // Smooth eases the dawn ramp into a soft crossfade; at Smooth = 0 it is
+        // the raw linear (harder-stepping) fade-in.
+        return this.brightness.getValue() * eased(dawn); // near-black, dawning in
       }
       case RUNNING:
       default: {
         final double base = this.brightness.getValue();
-        final double sh = this.shimmer.getValue();
+        // Smooth eases the shimmer brightness excursion (soft rise/fall) rather
+        // than a linear step; gated so Smooth = 0 keeps the raw ramp.
+        final double sh = eased(this.shimmer.getValue());
         return base + sh * (SHIMMER_PEAK_MULT - base); // shimmer → brightest
       }
     }
@@ -565,7 +576,7 @@ public class HoldClock extends ApotheneumPattern {
       final double a = 2 * Math.PI * i / seg;
       final double x = cx + Math.cos(a) * r;
       final double y = cy + Math.sin(a) * r;
-      c.lineWu(px, py, x, y, dim, false, MAX);
+      smoothLine(c, px, py, x, y, dim, false);
       px = x;
       py = y;
     }
@@ -575,8 +586,8 @@ public class HoldClock extends ApotheneumPattern {
       final double a = 2 * Math.PI * k / 12 - Math.PI / 2;
       final double inner = (k % 3 == 0) ? r * 0.78 : r * 0.86;
       final int tc = (k % 3 == 0) ? color : scaleColor(color, 0.6);
-      c.lineWu(cx + Math.cos(a) * inner, cy + Math.sin(a) * inner,
-        cx + Math.cos(a) * r, cy + Math.sin(a) * r, tc, false, MAX);
+      smoothLine(c, cx + Math.cos(a) * inner, cy + Math.sin(a) * inner,
+        cx + Math.cos(a) * r, cy + Math.sin(a) * r, tc, false);
     }
 
     // Hands from a continuous (smoothly-swept) tick position
@@ -639,7 +650,8 @@ public class HoldClock extends ApotheneumPattern {
         }
         // The two seconds cards flap-fall on a fresh tick
         if (flip > 0 && ci >= len - 2) {
-          final int edge = cardTop + (int) Math.round((1 - flip) * cardH);
+          // Smooth eases the flap fall into a smooth drop; raw/stepped at 0.
+          final int edge = cardTop + (int) Math.round((1 - eased(flip)) * cardH);
           final int hl = scaleColor(color, 0.7);
           for (int xx = 0; xx < cardW; ++xx) {
             c.setMax(gx0 + xx, edge, hl);
@@ -706,7 +718,7 @@ public class HoldClock extends ApotheneumPattern {
       final double a = 2 * Math.PI * i / seg;
       final double x = cx + Math.cos(a) * r;
       final double y = cy + Math.sin(a) * r;
-      c.lineWu(px, py, x, y, dim, false, MAX);
+      smoothLine(c, px, py, x, y, dim, false);
       px = x;
       py = y;
     }
@@ -773,13 +785,15 @@ public class HoldClock extends ApotheneumPattern {
           continue;
         }
         final double xk = k * treadW + xOff;
-        // Proximity to the ascending highlight band brightens this tread.
+        // Proximity to the ascending highlight band brightens this tread. The
+        // falloff is eased by Smooth so the "wave of bliss" crossfades smoothly
+        // (Smooth = 1) rather than stepping (Smooth = 0).
         final double d = Math.abs(rk - hiRow) / (h * 0.5 + 1);
-        final double hi = Math.max(0, 1 - d);
+        final double hi = eased(Math.max(0, 1 - d));
         final int treadArgb = scaleColor(bright, sb * (0.5 + 0.5 * hi));
         // Tread (horizontal) then riser (vertical) — the staircase profile.
-        c.lineWu(xk, rk, xk + treadW, rk, treadArgb, true, MAX);
-        c.lineWu(xk + treadW, rk, xk + treadW, rNext, scaleColor(treadArgb, 0.8), true, MAX);
+        smoothLine(c, xk, rk, xk + treadW, rk, treadArgb, true);
+        smoothLine(c, xk + treadW, rk, xk + treadW, rNext, scaleColor(treadArgb, 0.8), true);
         // A crystalline glint at the leading corner of the tread.
         if (hi > 0.35) {
           stampDisc(c, (int) Math.round(xk + treadW), (int) Math.round(rk), 1,
@@ -787,6 +801,54 @@ public class HoldClock extends ApotheneumPattern {
         }
       }
     }
+  }
+
+  // ---- Smooth (house AA / interpolation convention) --------------------------
+
+  /**
+   * Draw a fractional line whose edge antialiasing is gated by the Smooth knob
+   * ({@link #smoothAA}). At Smooth = 1 it is a full Xiaolin-Wu antialiased line
+   * (soft sub-pixel edges); at 0 it collapses to a hard, pixel-snapped integer
+   * line (steppy edges); between, the AA fringe fades in with Smooth while a
+   * hard core keeps the form crisp. Zero-alloc: no per-call allocation, and the
+   * default (Smooth = 1) takes the single pure-Wu path with no overhead.
+   */
+  private void smoothLine(SurfaceCanvas c, double x0, double y0, double x1, double y1,
+                          int argb, boolean wrapX) {
+    final double s = this.smoothAA;
+    if (s >= 0.999) {
+      c.lineWu(x0, y0, x1, y1, argb, wrapX, MAX); // full AA (default)
+      return;
+    }
+    // Hard, pixel-snapped core so Smooth = 0 reads steppy. lineMax wraps x
+    // (floorMod); the clock forms sit centered within the canvas so no fringe
+    // wraps onto the opposite edge here. CURATE: revisit if any smoothLine
+    // caller ever draws right up to a face seam.
+    c.lineMax((int) Math.round(x0), (int) Math.round(y0),
+      (int) Math.round(x1), (int) Math.round(y1), argb);
+    if (s > 0) {
+      // Layer the AA fringe on top, its coverage scaled by Smooth so soft
+      // edges fade in continuously (MAX blend keeps the hard core intact).
+      c.lineWu(x0, y0, x1, y1, scaleColor(argb, s), wrapX, MAX);
+    }
+  }
+
+  /** Classic smoothstep ease (identity at the ends), for eased transitions. */
+  private static double smoothstep(double t) {
+    if (t <= 0) {
+      return 0;
+    }
+    if (t >= 1) {
+      return 1;
+    }
+    return t * t * (3 - 2 * t);
+  }
+
+  /** Blend a linear ramp {@code t} toward its smoothstep-eased form by the
+   *  Smooth knob: at Smooth = 0 the raw (hard/steppy) ramp, at 1 a fully eased
+   *  crossfade — so brightness / shimmer / flap transitions gate on Smooth. */
+  private double eased(double t) {
+    return LXUtils.lerp(t, smoothstep(t), this.smoothAA);
   }
 
   /** Draw one clock hand from center at a fraction (0 = 12 o'clock, clockwise),
@@ -797,14 +859,14 @@ public class HoldClock extends ApotheneumPattern {
     final double ex = cx + Math.cos(a) * len;
     final double ey = cy + Math.sin(a) * len;
     if (thick <= 1) {
-      c.lineWu(cx, cy, ex, ey, argb, false, MAX);
+      smoothLine(c, cx, cy, ex, ey, argb, false);
       return;
     }
     final double perpx = -Math.sin(a);
     final double perpy = Math.cos(a);
     final double half = (thick - 1) / 2.0;
     for (double o = -half; o <= half + 1e-6; o += 1) {
-      c.lineWu(cx + perpx * o, cy + perpy * o, ex + perpx * o, ey + perpy * o, argb, false, MAX);
+      smoothLine(c, cx + perpx * o, cy + perpy * o, ex + perpx * o, ey + perpy * o, argb, false);
     }
   }
 
@@ -820,16 +882,16 @@ public class HoldClock extends ApotheneumPattern {
           Math.max(1, (int) Math.round(size * 0.5)), argb);
         break;
       case 1: // radial dash
-        c.lineWu(mx - dxr * size, my - dyr * size, mx + dxr * size, my + dyr * size, argb, false, MAX);
+        smoothLine(c, mx - dxr * size, my - dyr * size, mx + dxr * size, my + dyr * size, argb, false);
         break;
       case 2: // cross (X)
-        c.lineWu(mx - dxr * size, my - dyr * size, mx + dxr * size, my + dyr * size, argb, false, MAX);
-        c.lineWu(mx - dxt * size, my - dyt * size, mx + dxt * size, my + dyt * size, argb, false, MAX);
+        smoothLine(c, mx - dxr * size, my - dyr * size, mx + dxr * size, my + dyr * size, argb, false);
+        smoothLine(c, mx - dxt * size, my - dyt * size, mx + dxt * size, my + dyt * size, argb, false);
         break;
       default: { // caret / open triangle facing outward
         final double bx = mx - dxr * size, by = my - dyr * size;
-        c.lineWu(bx - dxt * size, by - dyt * size, mx + dxr * size * 0.4, my + dyr * size * 0.4, argb, false, MAX);
-        c.lineWu(bx + dxt * size, by + dyt * size, mx + dxr * size * 0.4, my + dyr * size * 0.4, argb, false, MAX);
+        smoothLine(c, bx - dxt * size, by - dyt * size, mx + dxr * size * 0.4, my + dyr * size * 0.4, argb, false);
+        smoothLine(c, bx + dxt * size, by + dyt * size, mx + dxr * size * 0.4, my + dyr * size * 0.4, argb, false);
         break;
       }
     }

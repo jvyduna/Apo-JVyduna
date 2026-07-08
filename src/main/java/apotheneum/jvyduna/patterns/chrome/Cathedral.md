@@ -85,7 +85,7 @@ Preserved signatures from the brief (`chrome-brief.md` §5-6):
   (1−norm)^ARCH_EXP`, with `springH`/`fullApex` scaled by `growthShown`. **Growth
   is instant** — `growthShown = Growth` directly, no easing — so the knob maps
   straight to height. The silhouette top edge is **antialiased** (coverage
-  `clamp01((topH−hb)+0.5)`, softened by the `Blend` knob). A pixel inside is
+  `clamp01((topH−hb)+0.5)`, softened by the `Smooth` knob). A pixel inside is
   **stone** (floor plinth, pier, central mullion, or within `RIB_ROWS` of the
   outline); otherwise **window void**, lit by the CA tracery, else a dim
   stained-glass backing.
@@ -94,8 +94,8 @@ Preserved signatures from the brief (`chrome-brief.md` §5-6):
   neighborhood). New generations push at the top and flow downward one row per
   step; `step()` rotates array pointers (zero-alloc). Between steps a fractional
   `caPhase` **vertically interpolates** each cell toward the row above (and the
-  top row toward a freshly-evolved `caIncoming` scratch row), scaled by `Blend`,
-  so the tracery slides down smoothly instead of stepping. `Blend = 0` restores
+  top row toward a freshly-evolved `caIncoming` scratch row), scaled by `Smooth`,
+  so the tracery slides down smoothly instead of stepping. `Smooth = 0` restores
   the binary/posterized look.
 - **Buffers (all preallocated; zero-alloc render)**: `ringCanvas`/`ringWarp`,
   `cylCanvas`/`cylWarp`, the two `byte[][]` CA histories, six star arrays, and
@@ -131,20 +131,34 @@ not a 16th grid.
 
 This is a **beatless** track (brief: "Do not TempoLock this song"), so there is
 no `Sync` control — the CA always free-runs on an internal timer whose interval
-is energy-scaled (`CA_STEP_AMBIENT_MS`→`CA_STEP_PEAK_MS`). The only tempo hook is
-**`TempoDiv`**, which paces the one-time **TearDown erosion**: the erosion
-completes over one `TempoDiv` period (`tempoLock.divisionMs`), so the collapse is
-musically timed. Growth, glitch/heal envelopes, drip and stars are all
-timer/parameter driven and never touch the grid.
+is **`Speed`-scaled** (`CA_STEP_AMBIENT_MS`→`CA_STEP_PEAK_MS`), currently in
+absolute ms. The only tempo hook is **`TempoDiv`**, which paces the one-time
+**TearDown erosion**: the erosion completes over one `TempoDiv` period
+(`tempoLock.divisionMs`), so the collapse is musically timed. Growth, glitch/heal
+envelopes, drip and stars are all timer/parameter driven and never touch the grid.
 
-## Energy mapping
+## Speed units — DECISION NEEDED (Chrome outlier)
 
-| Quantity | Ambient (e=0) | Peak (e=1) | Curve |
+Chrome is a **per-song outlier**: part tempo-grid-driven (TearDown), part
+deserving continuous speeds. Per Jeff, each Cathedral speed-ish param needs his
+per-param call before converting to the grid-less **beat-relative** convention
+used for Aumakua/PulseOrb. **Nothing was changed here pending that input** — the
+CA advance is still absolute ms. Options per param:
+
+| Param | What it drives | (a) beat-relative live-tempo | (b) tempo-grid (division) | (c) leave absolute |
+|---|---|---|---|---|
+| `speed` | CA advance step interval (`CA_STEP_*_MS`) | continuous rows/beat like Aumakua | snap step to a `TempoDiv` | keep absolute ms (current) |
+| `tempoDiv` (TearDown) | erosion duration | — | **keep** (already grid; the intended use) | — |
+| Growth ease | 0→1 nave raise time | possible | — | keep absolute (current) |
+
+## Speed mapping
+
+| Quantity | Ambient (Speed=0) | Peak (Speed=1) | Curve |
 |---|---|---|---|
 | Growth ease time (full 0→1 raise of the nave) | 8 s | 5 s | lin |
-| CA free-run step interval (Sync off) | 3.5 s | 1.2 s | exp |
+| CA free-run step interval | 3.5 s | 1.2 s | exp |
 
-Sustained motion respects the ≥5 s full-traversal cap even at e=1: the growth
+Sustained motion respects the ≥5 s full-traversal cap even at Speed=1: the growth
 ease is rate-capped to never complete a 0→1 raise faster than 5 s, and the CA
 flows one row per step (≥45 rows per full-height traversal = ≥54 s at peak).
 
@@ -155,9 +169,9 @@ UI/registration order (do not deviate; keys/labels are referenced by saved
 referencing them no-op on load.
 
 1. Triggers: `seed`, `bend`, `heal`, `tearDown`, `randomRule`
-2. `energy` — Energy
+2. `speed` — Speed
 3. Pattern params: `growth`, `rule`, `arches`, `tracery`, `glitch`, `gold`,
-   `drip`, `blend`
+   `drip`, `smooth`
 4. `audio` — Audio depth knob
 5. `tempoDiv` — TempoDiv (paces TearDown erosion)
 
@@ -168,7 +182,7 @@ referencing them no-op on load.
 | `heal` | Heal | TriggerParameter | — | — | clear the glitch and flood a completing glow over ~3 s (the 1:43 return callback) |
 | `tearDown` | TearDown | TriggerParameter | — | — | one-time time-lapse erosion → dust pile (Seed restores) |
 | `randomRule` | RandRule | TriggerParameter | — | — | random-walk pick of a new CA rule, never revisiting the last half of the rules |
-| `energy` | Energy | CompoundParameter | 0.35 | 0..1 | master energy (CA rate regime) |
+| `speed` | Speed | CompoundParameter | 0.35 | 0..1 | CA advance speed (rate regime); speed-only (see DECISION NEEDED) |
 | `growth` | Growth | CompoundParameter | 0.4 | 0..1 | arch height, grown from the floor; instant (Growth == height) |
 | `rule` | Rule | DiscreteParameter | R90 | 10 options | which curated Wolfram rule (`{30,90,110,54,60,62,102,150,126,22}`) |
 | `arches` | Arches | CompoundParameter | 3 | 1..7 | continuous count of arches shown per face (golden-ratio, self-similar) |
@@ -176,7 +190,7 @@ referencing them no-op on load.
 | `glitch` | Glitch | CompoundParameter | 0 | 0..1 | dissonance: hue-shift + horizontal tear-shear |
 | `gold` | Gold | CompoundParameter | 0 | 0..1 | cool/occult → warm-gold; at full, arches go brighter/deep-gold, tracery a dimmer half-bright yellow |
 | `drip` | Drip | CompoundParameter | 0 | −1..1 | bidirectional ridge energy: −drips down the ribs, +builds upward beams from each peak (never on windows) |
-| `blend` | Blend | CompoundParameter | 1.0 | 0..1 | antialiasing + smooth interpolation (0 = steppy, 1 = smooth CA flow + AA arch edges) |
+| `smooth` | Smooth | CompoundParameter | 1.0 | 0..1 | motion blending + antialiasing (0 = steppy, 1 = smooth CA flow + AA arch edges) |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth (0 = pure screensaver) |
 | `tempoDiv` | TempoDiv | EnumParameter | WHOLE | Tempo.Division | division over which a TearDown erosion completes |
 
@@ -231,7 +245,7 @@ width** wide, narrowing/tapering upward). Painted with `setMax` in `dripColor`
 - **Starfield** — slow twinkle (period ~10 s) + very slow parallax drift; no
   fast motion.
 - **Bold forms / contrast** — stone ribs/piers/mullions with a dim window field
-  and CA tracery. The `Blend` knob controls antialiasing: at 1 the tracery
+  and CA tracery. The `Smooth` knob controls antialiasing: at 1 the tracery
   crossfades smoothly as it flows down and arch edges are antialiased; at 0 it
   reverts to the hard/posterized binary look. Depth comes from the growth reveal.
   CURATE: verify the tracery reads as intentional generated tracery, not noise.
@@ -268,9 +282,9 @@ Every value below is a first-pass guess to be tuned on hardware
 - Starfield: `STAR_ONSET` 0.15, `NUM_STARS` 14, `STAR_MAX_B` 55, hues 0-14
   (reds) — confirm the valley holds as a near-dark field.
 - CA: curated Top-10 `RULES = {30,90,110,54,60,62,102,150,126,22}` (default R90);
-  `Blend` vertical-interp down-flow and `RandRule` no-repeat walk unverified for
+  `Smooth` vertical-interp down-flow and `RandRule` no-repeat walk unverified for
   the intended "generated tracery" look on hardware.
-- Energy endpoints (CA 3.5→1.2 s) unverified against the track.
+- Speed endpoints (CA 3.5→1.2 s) unverified against the track.
 
 ## Curation log
 
@@ -278,3 +292,4 @@ Every value below is a first-pass guess to be tuned on hardware
 |---|---|---|
 | 2026-07-07 | Initial first-pass, Claude autonomous session | Hero pattern for "Chrome Country": Wolfram-tracery gothic cathedral, envelope-driven growth (beatless — Sync off by default), Bend/Heal/TearDown/Seed triggers, cool→warm-gold palette, empty-valley starfield. Honors `00-overview-critique.md` gap #2 (uncanny/Wolfram as the DEFAULT rendering mode; Heal as a concrete return callback). All arch/color/timing constants marked CURATE for hardware tuning. |
 | 2026-07-08 | Jeff feedback pass | Curated CA to a Top-10 rule list + `RandRule` no-repeat random walk. Added `Blend` (house AA/interp convention): CA now flows down smoothly (fractional `caPhase` vertical interp) and arch edges are antialiased. Growth made instant (Growth == height); main arch apex reaches the top row at Growth 1. Rebuilt the arcade as a per-face golden-ratio, self-similar layout (main arch centered per wall / 3 cylinder bays; widths ÷φ, peaks trace the master lancet curve); `Arches` is now a continuous count with whole/half-edge semantics. Renamed Warmth→**Gold** with a split target (arches brighter deep-gold, tracery dimmer half-yellow); CA tracery color now from **palette swatch 2**. Added bidirectional **Drip** (ridge coating → upward peak beams, never on windows). TearDown is now a **one-time erosion** leaving a domed dust pile, paced by `TempoDiv`; Seed restores. Removed Sync and Meta. |
+| 2026-07-08 | Convention pass (non-bliss) | `Energy`→`speed` (CA advance only, so speed-only) and `Blend`→`smooth` (standardized house name; "Blend" now means compositing mode only). Behavior unchanged. Chrome flagged as a per-song **outlier**: added a "Speed units — DECISION NEEDED" section — the CA `speed` is left absolute-ms pending Jeff's per-param call on beat-relative vs grid vs absolute; `TempoDiv` (TearDown) stays grid-paced. |

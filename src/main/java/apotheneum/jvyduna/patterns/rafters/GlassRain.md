@@ -78,6 +78,17 @@ head is **ADD-blended** so two beads crossing one pixel accumulate/brighten
 head reads brighter than its wet trail. CURATE: tune wetness/weight
 (`WOBBLE_MAX_COLS`, `FAT_WEIGHT`, `TRAIL_LEVEL`, `LIFE_FADE_START`) on hardware.
 
+The **`Smooth`** knob (house motion-blur/AA convention) softens both the fall and
+the edges. `paintStreak()` crossfades each streak by `smooth`: the wet trail
+blends a pixel-snapped integer `lineMax` (weight `1-smooth`, steppy edges) against
+a Xiaolin-Wu antialiased sub-pixel `lineWu` (weight `smooth`, soft sub-pixel
+edges), and the ADD-blended head's fall position uses a **fractional-row
+crossfade** gated by `smooth` — at `smooth = 0` the head snaps entirely onto the
+nearest row (steppy vertical stepping), at `smooth = 1` it splits `(1-frac)/frac`
+across the two straddled rows so the fall reads as continuous sub-pixel motion.
+Both paths are the existing `SurfaceCanvas` primitives (`lineMax`, `lineWu`,
+`setBlend`) with `scaleRGB` coverage weights, so it stays zero-alloc in `step()`.
+
 ### Symbol condensation (shared module)
 
 The morphing symbols are **not** drawn here. `renderField()` calls
@@ -167,7 +178,7 @@ UI/registration order (do not deviate; keys/labels are referenced by saved .lxp)
 
 1. Triggers (`dropBurst`, `condense`, `wash`)
 2. `energy`
-3. Pattern params (`density`, `streak`, `bloom`, `glyph`, `form`, `moire`)
+3. Pattern params (`density`, `streak`, `bloom`, `glyph`, `form`, `moire`, `smooth`)
 4. `audio`
 
 | Param | Label | Type | Default | Range | Meaning |
@@ -182,6 +193,7 @@ UI/registration order (do not deviate; keys/labels are referenced by saved .lxp)
 | `glyph` | Glyph | EnumParameter | CROSS | 9 symbols | which symbol is condensing; changing it morphs |
 | `form` | Form | CompoundParameter | 0 | 0..1 | how fully the symbol has condensed (0 = pure rain) |
 | `moire` | Moire | CompoundParameter | 0 | 0..1 | 1/16-grid moiré shimmer over the rain (peaks) |
+| `smooth` | Smooth | CompoundParameter | 1.0 | 0..1 | motion blending + antialiasing (0 = steppy/pixel-snapped, 1 = smooth sub-pixel + AA) |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth (0 = pure screensaver) |
 
 Timeline usage: automate **Bloom** 0→1 at 1:22, hold across 1:56–2:20 (peak
@@ -255,3 +267,4 @@ envelope, tempo-locked 2D moiré). No open code TODOs remain — only the numeri
 | 2026-07-07 | Initial first-pass, Claude autonomous session | Stub hero for rafters: rain layer + Bloom dynamics envelope + moiré + shared-`SymbolGlyphs` condensation, all params wired; physics/moiré/formation-timing left as TODO for hardware curation. Symbol drawing delegated to the shared module per critique gap #6 (split GlassRain's jobs); CA "life" layer explicitly deferred (legibility risk). |
 | 2026-07-07 | Full build-out, Claude session | Replaced the three stubs: (1) droplet physics — per-drop TTL/lifetime with end-of-life head fade, small rand²-biased horizontal wobble, variable head brightness and weight/width (thin streak vs. fat 3-column bead), and ADD-blended heads so merging beads accumulate; (2) auto-formation envelope — a glyph change (Condense or knob) auto-ramps Form over `MORPH_SECONDS`, holds, then dissolves, with effective form = `max(knob, envelope)`; (3) moiré — tempo-locked 2D interference (horizontal fringe pair × vertical grating, both phases advanced on the 1/16 grid via `beatPosition()`), separable/zero-alloc via per-field scratch arrays. Also made DropBurst drops fast (energyPct 100, matching its stated intent). Params/labels unchanged. |
 | 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path) | Project-wide retirement of the Sync/TempoDiv + Meta pattern-control convention. Droplet spawning now always free-runs (the on-grid `GRID_BURST` pulse is gone); the moiré's 1/16 phase lock is kept, reading the engine tempo's beat position directly. |
+| 2026-07-08 | Added `Smooth` (house AA/interp convention); `energy` retained unchanged | Adopted the house motion-blur/antialiasing `Smooth` knob (default 1.0), registered after the pattern params and before `audio`. Wired into `paintStreak()`: `smooth` crossfades the wet trail between a pixel-snapped `lineMax` and a Wu-AA `lineWu`, and gates a fractional-row crossfade for the ADD-blended head's sub-pixel fall — 0 = steppy/pixel-snapped, 1 = smooth sub-pixel + antialiased. Reuses existing `SurfaceCanvas` primitives + `scaleRGB` coverage, zero-alloc in `step()`. `energy` deliberately kept as-is: rafters is a rigid 140 BPM song and `energy` drives BOTH droplet density AND fall speed (not speed-only), so it was not renamed or retimed. |

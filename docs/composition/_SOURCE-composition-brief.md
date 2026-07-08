@@ -123,5 +123,10 @@ MIR chrome duration = 305 s.)
   knob (default 0 = screensaver); ≥3 triggers; zero-alloc render; ≥5 s
   full-traversal sustained-motion cap; `CURATE:` inline notes on unverifiable
   values; curation log. No tempo-grid gating and no Meta/random-jump triggers —
-  timing free-runs and choreography comes from the arrange timeline. The
+  timing free-runs and choreography comes from the arrange timeline. **Every
+  pattern exposes a `Smooth` knob** (motion blending + antialiasing; "Blend" now
+  = compositing mode only). **`energy`→`speed`** when the knob only scales
+  motion. **Grid-less songs (Distance/Chrome/Temper) express speed as continuous
+  beat-relative "tempoDiv units"** (units-per-beat × `lx.engine.tempo.period`,
+  clamped ≥5 s; never a grid snap); Chrome is a per-param outlier. The
   `te-patterns` skill is the authoring reference.

@@ -151,10 +151,18 @@ active choice. **Avoid:** rigid beat sync, geometric/tech screensaver motifs
 piece will be.
 
 **Standing rule (2026-07-08): all Temper patterns are super chill and the
-recording is not on a fixed tempo grid — no sudden jumps, ever.** No tempo
-gating (Sync/TempoDiv), no Meta/random-jump triggers, no drift/re-randomize
-triggers, no audio reactivity in Temper patterns; everything free-runs and all
-choreography is placed on the arrange timeline by hand.
+recording is not on a fixed tempo grid — no sudden jumps, ever.** No
+Sync/TempoDiv **grid gate**, no Meta/random-jump triggers, no drift/re-randomize
+triggers, no audio reactivity in Temper patterns; choreography is placed on the
+arrange timeline by hand.
+
+**Amended 2026-07-08 (convention pass):** motion *speed* may be **beat-relative
+and continuous** — expressed in tempoDiv units (rows/beat, beats/cycle, …) and
+scaled by the live `lx.engine.tempo.period` so it follows the rubato tempo lane.
+This is the preferred way to author speed for the grid-less songs (Distance /
+Chrome / Temper). It is **not** the retired Sync/TempoDiv gate: the rate stays
+continuous, never snaps to a division, and never jumps — so "super chill, no
+sudden jumps" still holds. (Aumakua's rise now works this way.)
 
 ## 6. Pattern & effect plan
 

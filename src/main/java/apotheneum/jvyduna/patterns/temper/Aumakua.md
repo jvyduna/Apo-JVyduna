@@ -91,26 +91,34 @@ Aumakua per the plan; it is a separate pattern and out of scope for this class.
   simply invisible over the opening, which is acceptable. The **Genesis**
   entrance uses `available()` to pick a door-free column (see Triggers).
 
-## No audio, no tempo (Temper convention)
+## No audio; beat-relative rise (Temper convention)
 
-This pattern is deliberately **free-running and silent**: no `AudioReactive`,
-no `TempoLock`, no Sync/TempoDiv gating, no Meta trigger. The recording is
-rubato with no fixed tempo grid, and every Temper pattern stays super chill
-with **no sudden jumps** — births free-run on their idle timers, and all
-choreography (Bloom at 2:32 etc.) is driven from the arrange timeline, not
-from audio or tempo analysis. See `docs/composition/temper-brief.md`.
+This pattern is deliberately **silent**: no `AudioReactive`. There is **no
+Sync/TempoDiv gate and no Meta trigger** (all retired). The rise speed is now
+**beat-relative**: a continuous rate expressed in rows-per-beat and multiplied
+by the live host beat period (`lx.engine.tempo.period`), so motion tracks the
+(rubato) arrange tempo lane. It **never snaps to a division** and never jumps —
+so the "super chill, no sudden jumps" Temper rule still holds; the rate just
+breathes with the tempo automation instead of an absolute rows/sec. Births
+free-run on their idle timers; choreography (Bloom at 2:32 etc.) comes from the
+arrange timeline. See `docs/composition/temper-brief.md`.
 
 ## Speed mapping
 
-| Quantity | Ambient (Speed=0.3) | Peak (Speed=1) | Curve |
+Rise speed = `Ranges.lin(Speed, 0.93, 4.0)` **rows-per-beat** × `1000/beatMs`,
+clamped to `MAX_RISE_ROWS_PER_SEC = 8.0` (rows/s) so the full traversal stays
+≥ 5 s at any tempo. Rows-per-beat endpoints are chosen to reproduce the prior
+feel at the nominal ~96.8 BPM Temper tempo:
+
+| Quantity | Ambient (Speed=0.3) @ 96.8 BPM | Peak (Speed=1) @ 96.8 BPM | Curve |
 |---|---|---|---|
-| Rise speed | ~2.98 rows/s (45-row cube ≈ 15.1 s) | 6.43 rows/s (≈ 7.0 s) | lin |
+| Rise speed | ~1.5 rows/s (45-row cube ≈ 30 s) | ~6.4 rows/s (≈ 7.0 s) | lin (rows/beat) |
 
 `Speed` drives **rise speed only** and defaults to **0.3** (CURATE — the
 calmest, most patient song in the piece). Birth cadence is Density's job:
-root-spawn interval `Ranges.exp(Density, 16 s, 2.5 s)` (CURATE). Sustained
-rise respects the ≥5 s full-traversal cap even at Speed=1 (7.0 s cube / 6.7 s
-cylinder — see compliance).
+root-spawn interval `Ranges.exp(Density, 16 s, 2.5 s)` (CURATE). At faster host
+tempos the rate rises but the 8.0 rows/s clamp keeps the cube traversal ≥ 5.6 s
+(see compliance).
 
 ## Parameters
 
@@ -133,6 +141,7 @@ descriptive (e.g. `genSpacing`, `interiorLevel`, `cylinderLevel`).
 | `smear` | Smear | CompoundParameter | 0.5 | 0..1 | feedback-smear trail length (0.2..6 s half-life) |
 | `interior` | Inner | CompoundParameter | 0.25 | 0..1 | interior brightness (0 = black interior) |
 | `cylinder` | Cyl | CompoundParameter | 1.0 | 0..1 | brightness of all cylinder figures (whole cylinder field) |
+| `smooth` | Smooth | CompoundParameter | 1.0 | 0..1 | motion blending + antialiasing: 1 = sub-pixel glide + AA head rims; 0 = pixel-snapped rise + hard heads |
 
 Removed in the 2026-07-08 round (breaking for any earlier `.lxp`): `drift`
 trigger, `energy` (→ `speed`), `warmth` (→ `ochre`), `dripChance` (→
@@ -238,3 +247,4 @@ in the `.java` too):
 |---|---|---|
 | 2026-07-07 | Initial first-pass, Claude autonomous session | Aumakua hero for `temper`: generative ochre cave-painting family tree rising up the exterior, dripping new figures; trombone-warmed glow + births; 2:32 bloom (raised-arm burst); womb-dark interior echo. Compiles against lx 1.2.2-SNAPSHOT + apotheneum 2.0.0. All tuning values marked CURATE for hardware. |
 | 2026-07-08 | Jeff feedback round 2 | Kolo/Kondoa figure restyle (elongated legs, big oval heads, bent limbs, forward lean; height 10→26); GenY generational spacing (derived child y, live re-spacing, sibling rank lines) + genealogy-chart connectors replacing the one-shot strand; Warmth→Ochre with full convergence to deep red-brown at 1; Energy→Speed (rise only; cadence → Density); Drip→Fertl; Womb→Inner (key `interior`); new Cyl cylinder-brightness knob; Genesis now immediately emerges a head from the bottom at a door-free column; REMOVED: Drift trigger, all audio reactivity, Sync/TempoDiv/Meta (Temper is rubato — no tempo grid, no sudden jumps). |
+| 2026-07-08 | Convention pass (non-bliss) | Rise speed made **beat-relative**: rows-per-beat × live `lx.engine.tempo.period`, clamped to 8.0 rows/s (≥5 s traversal at any tempo) — continuous, tempo-following, never a grid snap. Added house **Smooth** knob (default 1.0): motion-blending (coords lerp toward integer-snapped as Smooth→0, sub-pixel glide at 1) + antialiased head-ellipse rims. Endpoints (0.93/4.0 rows/beat) reproduce the prior 1.5/6.4 rows/s at nominal 96.8 BPM. |

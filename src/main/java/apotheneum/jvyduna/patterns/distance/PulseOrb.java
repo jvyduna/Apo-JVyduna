@@ -65,15 +65,25 @@ public class PulseOrb extends ApotheneumPattern {
 
   // ---- Timing constants (all >= 5 s sustained; see compliance in the .md) -------
 
-  /** Orb breathe cycle period (full inhale+exhale), ambient -> peak energy.
-   *  CURATE: 8 s reads as the pad swell; keep >= 5 s. */
-  private static final double BREATHE_MS_AMBIENT = 8000;
-  private static final double BREATHE_MS_PEAK = 5000;
+  /** Breathe + drift periods expressed in BEATS, mapped from Speed. Distance is
+   *  beatless-ambient (referenceBpm 120), but a continuous, tempo-RELATIVE rate
+   *  lets the exhale follow the arrange tempo lane without snapping to a grid
+   *  (this is NOT the retired Sync/TempoDiv gate). Each frame the beat count is
+   *  multiplied by the live beat period and clamped to >= MIN_PERIOD_MS so the
+   *  >= 5 s cap holds at any tempo. Beat counts chosen to reproduce the prior
+   *  8 s / 5 s breathe and 24 s / 12 s drift at 120 BPM. */
+  private static final double BREATHE_BEATS_AMBIENT = 16; // ~8 s @ 120 BPM
+  private static final double BREATHE_BEATS_PEAK = 10;    // ~5 s @ 120 BPM
 
-  /** Wall-field drift period — deliberately MUCH slower than the orb so the two
-   *  systems decorrelate (the anti-monotony coupling). CURATE. */
-  private static final double WALL_MS_AMBIENT = 24000;
-  private static final double WALL_MS_PEAK = 12000;
+  /** Wall-field drift — deliberately MUCH slower than the orb so the two systems
+   *  decorrelate (the anti-monotony coupling). CURATE. */
+  private static final double WALL_BEATS_AMBIENT = 48;    // ~24 s @ 120 BPM
+  private static final double WALL_BEATS_PEAK = 24;       // ~12 s @ 120 BPM
+
+  /** Period floor (ms), so breathe/drift never dip below the >= 5 s cap. */
+  private static final double MIN_PERIOD_MS = 5000;
+  /** Floor on ms/beat, guarding against a zero/absurd host tempo. */
+  private static final double MIN_BEAT_MS = 50;
 
   /** Orb radius (pixels) floor and ceiling as Size sweeps 0..1 */
   private static final double ORB_MIN_R = 2.0;
@@ -140,9 +150,9 @@ public class PulseOrb extends ApotheneumPattern {
     new TriggerParameter("Fold", this::onFold)
     .setDescription("Fold the wall topology inside-out into a new configuration — the K-hole world reconfigures over ~2.5 s");
 
-  public final CompoundParameter energy =
-    new CompoundParameter("Energy", 0.35)
-    .setDescription("Master energy: raises breathe/drift rate and brightness within the >= 5 s traversal cap");
+  public final CompoundParameter speed =
+    new CompoundParameter("Speed", 0.35)
+    .setDescription("Breathe/drift rate (beat-relative, continuous): patient <-> quicker, always within the >= 5 s cap");
 
   public final CompoundParameter size =
     new CompoundParameter("Size", 0.4)
@@ -163,6 +173,10 @@ public class PulseOrb extends ApotheneumPattern {
   public final CompoundParameter drift =
     new CompoundParameter("Drift", 1, 0.5, 2)
     .setDescription("Wall-field drift-speed multiplier (kept slower than the orb so the two systems decorrelate)");
+
+  public final CompoundParameter smooth =
+    new CompoundParameter("Smooth", 1.0)
+    .setDescription("Motion blending + antialiasing: 1 = smooth continuous gradients (default), 0 = posterized/banded steppy field");
 
   public final CompoundParameter audioDepth =
     new CompoundParameter("Audio", 0)
@@ -200,16 +214,17 @@ public class PulseOrb extends ApotheneumPattern {
     super(lx);
     this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
 
-    // Registration order: triggers, Energy, pattern params, Audio.
+    // Registration order: triggers, Speed, pattern params, Smooth, Audio.
     addParameter("pulse", this.pulse);
     addParameter("ripple", this.ripple);
     addParameter("fold", this.fold);
-    addParameter("energy", this.energy);
+    addParameter("speed", this.speed);
     addParameter("size", this.size);
     addParameter("warmth", this.warmth);
     addParameter("morph", this.morph);
     addParameter("warp", this.warp);
     addParameter("drift", this.drift);
+    addParameter("smooth", this.smooth);
     addParameter("audio", this.audioDepth);
   }
 
@@ -258,6 +273,7 @@ public class PulseOrb extends ApotheneumPattern {
     final double warmthVal = this.warmth.getValue();
     final double morphVal = this.morph.getValue();
     final double warpVal = this.warp.getValue();
+    final double smoothV = this.smooth.getValue();
 
     // Breathe shape 0..1 and the derived orb radius / brightness
     final double breathe01 = 0.5 + 0.5 * Math.sin(this.orbPhase);
@@ -270,8 +286,8 @@ public class PulseOrb extends ApotheneumPattern {
 
     final double levelLift = 1 + 0.3 * this.audio.level; // gentle glow with the mix
 
-    renderRing(radiusPx, orbBright, morphVal, warpVal, warmthVal, levelLift);
-    renderCylinder(radiusPx, orbBright, morphVal, warpVal, warmthVal, levelLift);
+    renderRing(radiusPx, orbBright, morphVal, warpVal, warmthVal, levelLift, smoothV);
+    renderCylinder(radiusPx, orbBright, morphVal, warpVal, warmthVal, levelLift, smoothV);
 
     // Cube: interior (home) and exterior (world) rendered independently
     this.ringExt.copyTo(Apotheneum.cube.exterior, this.colors);
@@ -285,16 +301,20 @@ public class PulseOrb extends ApotheneumPattern {
   }
 
   /** Advance the breathe + wall-drift phases, the fold lerp, and the pulse /
-   *  ripple envelopes. Both periods free-run at their energy-derived values. */
+   *  ripple envelopes. Both periods are beat-relative (Speed-mapped beat counts
+   *  times the live beat period), continuous and clamped to >= MIN_PERIOD_MS. */
   private void advanceClocks(double deltaMs) {
-    final double e = this.energy.getValue();
+    final double s = this.speed.getValue();
+    final double beatMs = Math.max(this.lx.engine.tempo.period.getValue(), MIN_BEAT_MS);
 
-    final double orbPeriod = Ranges.lin(e, BREATHE_MS_AMBIENT, BREATHE_MS_PEAK);
+    final double orbPeriod = Math.max(
+      Ranges.lin(s, BREATHE_BEATS_AMBIENT, BREATHE_BEATS_PEAK) * beatMs, MIN_PERIOD_MS);
     final double orbRate = TWO_PI / orbPeriod;
     this.orbPhase = wrapTwoPi(this.orbPhase + orbRate * deltaMs);
 
-    final double wallPeriod =
-      Ranges.lin(e, WALL_MS_AMBIENT, WALL_MS_PEAK) / this.drift.getValue();
+    final double wallPeriod = Math.max(
+      Ranges.lin(s, WALL_BEATS_AMBIENT, WALL_BEATS_PEAK) * beatMs / this.drift.getValue(),
+      MIN_PERIOD_MS);
     final double wallRate = TWO_PI / wallPeriod;
     this.wallPhase = wrapTwoPi(this.wallPhase + wallRate * deltaMs);
 
@@ -320,7 +340,8 @@ public class PulseOrb extends ApotheneumPattern {
    *  pass; the wall field and orb glow are computed once per pixel and weighted
    *  differently into each canvas. */
   private void renderRing(double radiusPx, double orbBright, double morphVal,
-                          double warpVal, double warmthVal, double levelLift) {
+                          double warpVal, double warmthVal, double levelLift,
+                          double smoothV) {
     for (int y = 0; y < RING_H; ++y) {
       final double yn = y / (double) RING_H;
       final double dy = y - RING_CY;
@@ -347,14 +368,14 @@ public class PulseOrb extends ApotheneumPattern {
         ext = addScaled(ext, this.haloColor, haloL * ORB_EXT_WEIGHT);
         ext = addScaled(ext, this.coreColor, coreL * ORB_EXT_WEIGHT);
         ext = addScaled(ext, this.coreColor, rippleL);
-        this.ringExt.set(x, y, ext);
+        this.ringExt.set(x, y, posterize(ext, smoothV));
 
         int in = 0xff000000;
         in = addScaled(in, fc, wallLevel * WALL_INT_WEIGHT);
         in = addScaled(in, this.haloColor, haloL * ORB_INT_WEIGHT);
         in = addScaled(in, this.coreColor, coreL * ORB_INT_WEIGHT);
         in = addScaled(in, this.coreColor, rippleL);
-        this.ringInt.set(x, y, in);
+        this.ringInt.set(x, y, posterize(in, smoothV));
       }
     }
   }
@@ -363,7 +384,8 @@ public class PulseOrb extends ApotheneumPattern {
    *  cylinder has no cube interior to anchor a point-orb, so the orb reads as a
    *  breathing band of the sanctuary light bleeding onto the outer ring). */
   private void renderCylinder(double radiusPx, double orbBright, double morphVal,
-                              double warpVal, double warmthVal, double levelLift) {
+                              double warpVal, double warmthVal, double levelLift,
+                              double smoothV) {
     for (int y = 0; y < CYL_H; ++y) {
       final double yn = y / (double) CYL_H;
       final double dy = Math.abs(y - CYL_CY);
@@ -381,7 +403,7 @@ public class PulseOrb extends ApotheneumPattern {
         c = addScaled(c, this.haloColor, haloL);
         c = addScaled(c, this.coreColor, coreL);
         c = addScaled(c, this.coreColor, rippleL);
-        this.cyl.set(x, y, c);
+        this.cyl.set(x, y, posterize(c, smoothV));
       }
     }
   }
@@ -525,6 +547,29 @@ public class PulseOrb extends ApotheneumPattern {
     final int g = Math.min(255, ((base >> 8) & 0xff) + (int) (((argb >> 8) & 0xff) * level));
     final int b = Math.min(255, (base & 0xff) + (int) ((argb & 0xff) * level));
     return 0xff000000 | (r << 16) | (g << 8) | b;
+  }
+
+  /** Posterize an ARGB toward fewer brightness levels as Smooth -> 0. PulseOrb's
+   *  field is continuous (no hard edges to antialias), so Smooth instead controls
+   *  gradient banding: 1 = identity (smooth gradients, the default look), 0 = a
+   *  harsh 2-level banded/steppy field. This is the pattern's motion-blending +
+   *  antialiasing lever expressed for a soft volumetric field. CURATE: Jeff may
+   *  prefer a different Smooth mapping here (e.g. a temporal motion low-pass). */
+  private static int posterize(int argb, double smooth) {
+    if (smooth >= 0.999) {
+      return argb;
+    }
+    final int levels = 2 + (int) Math.round(clamp(smooth, 0, 1) * 253); // 2..255
+    return 0xff000000
+      | (quant((argb >> 16) & 0xff, levels) << 16)
+      | (quant((argb >> 8) & 0xff, levels) << 8)
+      | quant(argb & 0xff, levels);
+  }
+
+  /** Snap a 0..255 channel to one of {@code levels} evenly-spaced values. */
+  private static int quant(int v, int levels) {
+    final int step = levels - 1;
+    return Math.round(v * step / 255f) * 255 / step;
   }
 
   private static double wrapTwoPi(double v) {
