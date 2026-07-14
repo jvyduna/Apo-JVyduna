@@ -7,14 +7,20 @@ import java.util.Random;
 import apotheneum.Apotheneum;
 import apotheneum.ApotheneumPattern;
 import apotheneum.jvyduna.util.AudioReactive;
-import apotheneum.jvyduna.util.Ranges;
+import apotheneum.jvyduna.util.PerceptualHue;
 import apotheneum.jvyduna.util.SurfaceCanvas;
+import apotheneum.jvyduna.util.TempoLock;
+import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
 import heronarts.lx.color.LXColor;
 import heronarts.lx.color.LXDynamicColor;
+import heronarts.lx.model.LXModel;
+import heronarts.lx.model.LXPoint;
+import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundParameter;
+import heronarts.lx.parameter.DiscreteParameter;
 import heronarts.lx.parameter.EnumParameter;
 import heronarts.lx.parameter.TriggerParameter;
 import heronarts.lx.utils.LXUtils;
@@ -25,19 +31,30 @@ import heronarts.lx.utils.LXUtils;
  * The terrain is a ring-shaped heightfield surrounding the viewer: DEPTH_ROWS
  * concentric ranges, each a 1D midpoint-displacement ridge wrapped seamlessly
  * around the surface (cube: all four faces as one 200-column strip; cylinder:
- * its full ring), blended with its neighbor for cross-range coherence. Ranges
- * reveal one at a time back-to-front via a wipe traveling around the ring,
- * stepping down the surface like the original screensaver; when all ranges
- * are revealed the field fades to black and the sequence restarts.
+ * its full ring), blended with its neighbor for cross-range coherence.
+ *
+ * A draw head phase-locked to the transport sweeps the ring continuously: one
+ * full ring (all four cube sides) per SpdDiv period, so it crosses one cube
+ * corner each quarter-period and, at RotY 0, the cube corners are always
+ * crossed exactly on the tempo grid, regardless of when
+ * drawing started (pattern init or a wipe). Ranges reveal back-to-front; once
+ * the field is full the head keeps drawing, redrawing the oldest range with
+ * fresh terrain as it goes — the field never auto-wipes. The Wipe trigger is
+ * manual-only: the old scene fades to black over exactly one beat while
+ * drawing restarts immediately underneath.
  *
  * The scene is re-projected every frame, so the camera controls are live:
- * RotX/RotZ tilt the terrain ring about the two horizontal axes (ranges rise
- * on one side of the building and dip on the other), RotY orbits it about the
- * vertical axis, Zoom scales it, and Persp compresses far ranges toward the
- * horizon. Elevation band colors come from the project palette swatch; the
- * Planet parameter selects an After Dark planet terrain scheme (band spacing,
- * snowline, water plane, roughness) without touching color. Style switches
- * between solid banded fills and the After Dark "Frame" wireframe grid.
+ * RotX/RotZ tilt the terrain ring about the two horizontal axes, RotY orbits
+ * it about the vertical axis, Zoom scales it, and Persp compresses far ranges
+ * toward the horizon. Elevation color comes from Bands equal color bands
+ * (base to peak) drawn from the project palette swatch and perceptually
+ * spaced when the swatch is short — no fixed water/forest/rock/snow ladder —
+ * with a circular BndPhase shift and an optional white Snow cap. Style is a
+ * continuous ladder: solid banded fills (0), the After Dark "Frame" wireframe
+ * grid (1), glowing topo dots at the grid intersections (2) — neighbors
+ * crossfade via per-channel max, so the mix stays as saturated as its sources.
+ * The Audio knob sets the amount by which audio level makes the drawing
+ * rougher (baked per range at spawn) and taller (live).
  *
  * See Mountains.md (beside this file) for the full design note.
  */
@@ -48,65 +65,38 @@ public class Mountains extends ApotheneumPattern {
 
   // ---- Timing constants (physical intent) -----------------------------------
 
-  /**
-   * Seconds for a new range's reveal wipe to travel the full ring. Sustained
-   * motion on the 40-foot sculpture must take >= 5 s to traverse it, at every
-   * energy, so even the peak endpoint sits at the cap.
-   */
-  private static final double REVEAL_SECONDS_AMBIENT = 8;
-  private static final double REVEAL_SECONDS_PEAK = 5;
-
-  /**
-   * Idle seconds between one range finishing its reveal and the next spawning.
-   * Ambient: a new range every ~22 s (14 idle + 8 reveal) reads as slow
-   * geologic accumulation; peak: ranges chain nearly back-to-back.
-   */
-  private static final double SPAWN_IDLE_SECONDS_AMBIENT = 14;
-  private static final double SPAWN_IDLE_SECONDS_PEAK = 2.5;
-
-  /**
-   * Seconds for the restart wipe (full field fades to black). Event-like: it
-   * happens once per multi-minute cycle and has 2 s of visual life (>= 1.5 s
-   * event minimum).
-   */
-  private static final double FADE_SECONDS = 2;
-
-  /** Residual brightness fraction targeted at the end of the restart fade */
+  /** Residual brightness fraction targeted at the end of the one-beat wipe fade */
   private static final double FADE_FLOOR = 0.004;
-
-  /**
-   * Seconds for the Glint trigger's brightness swell to settle back to the
-   * baseline lift. Event-like, no spatial motion; 2 s >= 1.5 s event minimum.
-   */
-  private static final double GLINT_SECONDS = 2;
 
   // ---- Geography constants ---------------------------------------------------
 
-  /** Concentric terrain ranges per cycle (one reveals per spawn, then restart) */
+  /** Concentric terrain ranges in the ring (field is "full" at this many) */
   private static final int DEPTH_ROWS = 8;
 
   /**
-   * Cross-range coherence: each new range blends this fraction of the previous
-   * range's heightfield into its own, so successive ranges read as one terrain
-   * rather than unrelated ridgelines. CURATE: 0.35 picked blind — raise for
-   * rolling continuity, lower for independent After Dark style ranges.
+   * Cross-range coherence: each new range blends this fraction of its
+   * reference range's heightfield into its own, so successive ranges read as
+   * one terrain rather than unrelated ridgelines. CURATE: 0.35 picked blind —
+   * raise for rolling continuity, lower for independent After Dark ranges.
    */
   private static final float ROW_BLEND = 0.35f;
 
+  /** Maximum number of equal elevation color bands the Bands knob selects */
+  private static final int MAX_BANDS = 5;
+
   /**
-   * Rows between elevation band thresholds. 6 rows comfortably exceeds the
-   * 4-row minimum for a band to read as a solid stripe at LED pitch.
+   * Normalized elevation is clamped just below 1 before the circular band map,
+   * so a range's tallest column (normalizeRidge pins the max to exactly 1) lands
+   * in the top band (m-1) at BndPhase 0 instead of wrapping back to band 0.
    */
-  private static final int BAND_SPACING_ROWS = 6;
+  private static final double BAND_U_MAX = 0.999999;
 
-  /** Max rows the Bands parameter shifts all thresholds up/down */
-  private static final int BAND_OFFSET_RANGE_ROWS = 4;
-
-  /** Lowest threshold is clamped here so the base band never becomes a sliver */
-  private static final int MIN_BASE_BAND_ROWS = 4;
-
-  /** Snow band is dropped entirely if fewer than this many rows would show */
-  private static final int MIN_SNOW_ROWS = 4;
+  /**
+   * Smooth = 1 anti-aliases the elevation band boundaries in the solid fill
+   * over +/- this many screen rows (mirrors Terraform's band AA). 0 = hard
+   * band steps.
+   */
+  private static final double BAND_AA_MAX_ROWS = 1.25;
 
   /** Screen rows between successive range baselines at Zoom 1, Persp 0 */
   private static final int ROW_SPACING_ROWS = 6;
@@ -138,101 +128,68 @@ public class Mountains extends ApotheneumPattern {
   private static final int WIRE_COL_STEP = 5;
 
   /**
+   * Dot style: halo brightness fraction splatted around each topo dot's core
+   * pixel (cross-shaped, lighten-blended) so a dot reads as a glow at LED
+   * pitch. CURATE: 0.35 picked blind — raise if dots read as bare pixels,
+   * lower if the field smears together.
+   */
+  private static final double DOT_HALO = 0.35;
+
+  /**
    * Midpoint-displacement amplitude falloff per octave, mapped from effective
    * roughness: 0.40 yields smooth rolling hills, 0.75 jagged alpine ridges.
    */
   private static final double FALLOFF_SMOOTH = 0.40;
   private static final double FALLOFF_ROUGH = 0.75;
 
-  /** How much recent treble adds to the roughness of a newly spawned range */
-  private static final double TREBLE_TO_ROUGHNESS = 0.6;
+  /**
+   * Water plane level as a fraction of normalized terrain height: valleys
+   * below it flatten to a flat sea at generation time.
+   */
+  private static final float WATER_LEVEL = 0.18f;
 
-  // ---- Fallback band palette (used only when the project swatch is empty) ---
-  // CURATE: hues/sats/brightness picked blind; verify band contrast on hardware.
+  // ---- Audio constants ---------------------------------------------------------
 
-  private static final double BASE_HUE = 225, BASE_SAT = 85, BASE_BRI = 35;   // deep water/valley blue
-  private static final double FOREST_HUE = 130, FOREST_SAT = 75, FOREST_BRI = 48;
-  private static final double ROCK_HUE = 30, ROCK_SAT = 45, ROCK_BRI = 62;
-  private static final double SNOW_HUE = 0, SNOW_SAT = 10, SNOW_BRI = 100;
+  /** Roughness added to newly spawned ranges at full audio level (Audio = 1) */
+  private static final double AUDIO_ROUGH_GAIN = 0.6;
 
   /**
-   * Sparse-swatch legibility ladder: with 1-3 swatch colors the four bands are
-   * lerped from too few anchors to guarantee contrast, so each band is also
-   * stepped in brightness (base darkest, snow brightest). CURATE: verify the
-   * single-color-swatch case still reads as distinct elevation bands.
+   * Live height lift at full audio level (Audio = 1): range heights scale by
+   * 1 + gain * level. CURATE: 0.4 picked blind — at max Relief plus full
+   * audio, peaks can clip against the canvas top; drop the gain if that
+   * reads badly on hardware.
    */
-  private static final double[] SPARSE_BAND_LIFT = { 0.55, 0.75, 0.90, 1.0 };
+  private static final double AUDIO_HEIGHT_GAIN = 0.4;
+
+  // ---- Speed divisions ---------------------------------------------------------
 
   /**
-   * Audio level lift: pixels are baked at full band brightness and displayed at
-   * LIFT_BASE..LIFT_BASE+LIFT_SPAN of it, so loud passages gently glow without
-   * clipping. Silence sits steady at 80%.
+   * Tempo division per full turn of drawing: the draw head sweeps a complete
+   * ring (all four cube sides) in exactly one period of this division, so it
+   * crosses one cube corner (90 degrees about Y) each quarter-period. Labeled
+   * like Tempo.Division ("1" = one bar of 4 beats); Tempo.Division itself tops
+   * out at 16 bars, so this pattern-local enum extends the ladder to 32.
    */
-  private static final double LIFT_BASE = 0.80;
-  private static final double LIFT_SPAN = 0.20;
-  private static final double LIFT_GAIN = 1.25;
-
-  // ---- Planets ----------------------------------------------------------------
-
-  /**
-   * After Dark planet terrain schemes — the module's original popup was
-   * Mercury..Pluto plus Random. Schemes shape terrain only (colors always come
-   * from the project palette): band threshold spacing multiplier, snowline
-   * offset in rows (positive raises it away), water plane level as a fraction
-   * of normalized terrain height (< 0 = no water plane), roughness bias,
-   * relief multiplier, and range spacing multiplier.
-   * CURATE: all scheme values picked blind (no authoritative source records
-   * the original planet data) — tune each on hardware.
-   */
-  public enum Planet {
-    MERCURY("Mercury", 0.9, 6, -1, 0.20, 0.75, 0.85),   // airless cratered hills
-    VENUS("Venus", 1.1, 8, -1, -0.15, 0.70, 1.10),      // smooth volcanic plains
-    EARTH("Earth", 1.0, 0, 0.18, 0, 1.0, 1.0),          // the neutral reference
-    MARS("Mars", 1.0, 1, -1, 0.05, 1.30, 1.0),          // dry, Olympus-scale relief
-    JUPITER("Jupiter", 1.3, 9, 0.40, -0.30, 1.35, 1.30),// vast smooth cloud swells
-    SATURN("Saturn", 1.4, 9, 0.35, -0.25, 1.20, 1.40),
-    URANUS("Uranus", 1.0, -2, 0.30, -0.10, 0.90, 1.0),  // icy, low snowline
-    NEPTUNE("Neptune", 1.1, -1, 0.30, 0.10, 1.10, 1.10),
-    PLUTO("Pluto", 0.8, -3, -1, 0.25, 0.90, 0.80),      // jagged ice mountains
-    RANDOM("Random", 1.0, 0, 0.18, 0, 1.0, 1.0);        // re-rolled each cycle
-
-    private final String label;
-    private final double bandMult;
-    private final int snowOffsetRows;
-    private final double waterLevel;
-    private final double roughBias;
-    private final double reliefMult;
-    private final double spacingMult;
-
-    private Planet(String label, double bandMult, int snowOffsetRows,
-      double waterLevel, double roughBias, double reliefMult, double spacingMult) {
-      this.label = label;
-      this.bandMult = bandMult;
-      this.snowOffsetRows = snowOffsetRows;
-      this.waterLevel = waterLevel;
-      this.roughBias = roughBias;
-      this.reliefMult = reliefMult;
-      this.spacingMult = spacingMult;
-    }
-
-    @Override
-    public String toString() {
-      return this.label;
-    }
-  }
-
-  /** Cached Planet.values() so RANDOM resolution never allocates (RANDOM is last) */
-  private static final Planet[] PLANETS = Planet.values();
-
-  /** Render style: solid banded fills, or the After Dark "Frame" wireframe grid */
-  public enum Style {
-    SOLID("Solid"),
-    WIRE("Wire");
+  public enum SpeedDiv {
+    SIXTEENTH("1/16", 0.25),
+    EIGHTH("1/8", 0.5),
+    QUARTER("1/4", 1),
+    HALF("1/2", 2),
+    BAR("1", 4),
+    TWO("2", 8),
+    FOUR("4", 16),
+    EIGHT("8", 32),
+    SIXTEEN("16", 64),
+    THIRTYTWO("32", 128);
 
     private final String label;
 
-    private Style(String label) {
+    /** Quarter-note beats per full ring of drawing */
+    public final double beats;
+
+    private SpeedDiv(String label, double beats) {
       this.label = label;
+      this.beats = beats;
     }
 
     @Override
@@ -243,45 +200,53 @@ public class Mountains extends ApotheneumPattern {
 
   // ---- Parameters -------------------------------------------------------------
 
+  private final TriggerBag bag = new TriggerBag("Mountains");
+
+  // Deliberately NOT registered in the meta bag: the wipe must never fire
+  // without manual intervention (a full field recycles instead of wiping)
   public final TriggerParameter wipe =
     new TriggerParameter("Wipe", this::wipeNow)
-    .setDescription("Fade the whole field to black over 2s and restart the sequence");
+    .setDescription("Fade the scene to black over exactly one beat; drawing restarts immediately underneath (manual only)");
 
-  public final TriggerParameter newRidge =
+  public final TriggerParameter newRidge = bag.register(
     new TriggerParameter("NewRidge", this::forceRidge)
-    .setDescription("Reveal the next range now (ignored while one is revealing or fading)");
+    .setDescription("Finish the current range instantly and start drawing the next"));
 
-  public final TriggerParameter invert =
+  public final TriggerParameter invert = bag.register(
     new TriggerParameter("Invert", this::toggleInvert)
-    .setDescription("Toggle cave mode: flip the whole render so ranges hang from the top");
+    .setDescription("Toggle cave mode: flip the whole render so ranges hang from the top"));
 
-  public final TriggerParameter glint =
-    new TriggerParameter("Glint", this::glintNow)
-    .setDescription("Brightness swell: the whole field glows to full and settles back over 2s");
+  public final TriggerParameter rndTrig =
+    new TriggerParameter("RndTrig", bag::fire)
+    .setDescription("Randomly fire a trigger or jump a parameter");
 
-  public final CompoundParameter energy =
-    new CompoundParameter("Energy", 0.35)
-    .setDescription("Master energy: 0-0.4 slow ambient accumulation, 0.6-1.0 beat-locked 160 BPM regime");
+  public final EnumParameter<SpeedDiv> spdDiv =
+    new EnumParameter<SpeedDiv>("SpdDiv", SpeedDiv.BAR)
+    .setDescription("Tempo division per full turn of drawing (all four cube sides); the draw head crosses one cube corner each quarter-period, on this grid");
 
   public final CompoundParameter roughness =
     new CompoundParameter("Rough", 0.5)
-    .setDescription("Base jaggedness of newly spawned ranges (planet bias and recent treble add on top)");
+    .setDescription("Base jaggedness of newly spawned ranges (audio adds on top)");
 
   public final CompoundParameter relief =
     new CompoundParameter("Relief", 0.55, 0.2, 0.75)
-    .setDescription("Peak height of each range as a fraction of surface height (live; planet multiplies)");
+    .setDescription("Peak height of each range as a fraction of surface height (live; audio adds on top)");
 
-  public final CompoundParameter bandOffset =
-    new CompoundParameter("Bands", 0, -1, 1)
-    .setDescription("Shifts all elevation band thresholds down/up (+1 raises the snowline ~4 rows)");
+  public final DiscreteParameter bands =
+    new DiscreteParameter("Bands", 4, 1, MAX_BANDS + 1)
+    .setDescription("Number of equal elevation color bands from valley to peak; colors come from the palette swatch, perceptually spaced when the swatch is short (1 = monochrome)");
+
+  public final CompoundParameter bandPhase =
+    new CompoundParameter("BndPhase", 0)
+    .setDescription("Circular phase shift of the elevation color bands up each range (0 = base band at the valley floor)");
+
+  public final BooleanParameter snowCap =
+    new BooleanParameter("Snow", false)
+    .setDescription("Force the highest elevation band pure white (snow caps)");
 
   public final CompoundParameter hueShift =
     new CompoundParameter("Hue", 0, 0, 360)
-    .setDescription("Rotates the palette-sampled band hues (0 = pure project palette)");
-
-  public final CompoundParameter spawnRate =
-    new CompoundParameter("Spawn", 1, 0.25, 4)
-    .setDescription("Multiplier on range spawn rate (>1 = shorter gaps between ranges)");
+    .setDescription("Rotates the palette-derived band hues (0 = pure project palette)");
 
   public final CompoundParameter rotX =
     new CompoundParameter("RotX", 0, -45, 45)
@@ -296,41 +261,55 @@ public class Mountains extends ApotheneumPattern {
     .setDescription("Tilt (degrees) of the terrain ring about the Z axis, 90 degrees around the ring from RotX");
 
   public final CompoundParameter zoom =
-    new CompoundParameter("Zoom", 1, 0.5, 2.5)
+    new CompoundParameter("Zoom", 1, 0, 2.5)
     .setDescription("Scales range heights and spacing about the horizon (After Dark's Zoom slider)");
 
   public final CompoundParameter persp =
     new CompoundParameter("Persp", 0.35, 0, 1)
     .setDescription("Perspective: 0 = flat isometric spacing, 1 = far ranges compress hard toward the horizon");
 
-  public final EnumParameter<Planet> planet =
-    new EnumParameter<Planet>("Planet", Planet.EARTH)
-    .setDescription("After Dark planet terrain scheme (spacing, snowline, water, roughness) — colors always come from the project palette; applies at the next cycle");
+  public final CompoundParameter style =
+    new CompoundParameter("Style", 0, 0, 2)
+    .setDescription("Render style ladder: 0 = solid banded fills, 1 = After Dark Frame wireframe, 2 = glowing topo dots; fades continuously between neighbors");
 
-  public final EnumParameter<Style> style =
-    new EnumParameter<Style>("Style", Style.SOLID)
-    .setDescription("Solid banded fills, or the After Dark Frame-style wireframe grid");
+  public final CompoundParameter smooth =
+    new CompoundParameter("Smooth", 1.0)
+    .setDescription("Subpixel crests + antialiasing of forms: 0 = hard pixel-snapped edges, 1 = smooth crests and antialiased wire/dots");
 
   public final CompoundParameter audioDepth =
     new CompoundParameter("Audio", 0)
-    .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
+    .setDescription("Amount by which audio level makes the drawing rougher (per new range) and taller (live); 0 = pure screensaver");
 
   // ---- State ------------------------------------------------------------------
 
   private final AudioReactive audio;
+  private final TempoLock tempoLock;
 
   /** Cave mode: mirror the render vertically so ranges hang from the top */
   private boolean inverted = false;
 
-  /** Glint trigger envelope: set to 1 on trigger, decays linearly to 0 */
-  private double glintLevel = 0;
-
   // Per-frame shared values computed once in render(), always before the
-  // fields' advance() reads them. Initialized to their e=0 values so a
-  // trigger-fired spawn() (e.g. MIDI NewRidge) landing pre-render still sees
-  // real durations.
-  private double frameRevealMs = 1000 * REVEAL_SECONDS_AMBIENT;
-  private double frameSpawnIdleMs = 1000 * SPAWN_IDLE_SECONDS_AMBIENT;
+  // fields' advance()/repaint() read them
+
+  /** Draw-head position around the ring this frame, in [0, 1) */
+  private double frameRingFrac;
+
+  /** Rings advanced since the previous frame (guarded against jumps) */
+  private double frameDeltaRing;
+
+  /** Previous frame's absolute ring phase (NaN = no frame rendered yet) */
+  private double lastRingPhase = Double.NaN;
+
+  /** Style-ladder brightness gains for the three render passes */
+  private double frameSolidGain = 1;
+  private double frameWireGain = 0;
+  private double frameDotGain = 0;
+
+  /** Antialiasing / subpixel-crest amount this frame (0 = hard, 1 = smooth) */
+  private double frameSmooth = 1;
+
+  /** Circular band phase shift this frame (BndPhase), read once per frame */
+  private double frameBandPhase = 0;
 
   // Per-frame camera values (render() computes; repaint() reads)
   private double frameSinX;
@@ -338,14 +317,22 @@ public class Mountains extends ApotheneumPattern {
   private double frameYawNorm;
   private double frameZoom;
   private double framePersp;
-  private boolean frameWire;
 
-  // Palette-sampled band base colors (water/forest/rock/snow), full brightness,
-  // hue-shifted; rebuilt only when the swatch or Hue actually changes
-  private final int[] bandBase = new int[4];
-  private final int[] sampledSwatch = new int[4];
-  private int cachedSwatchCount = -1;
-  private double cachedHueShift = Double.NaN;
+  // Elevation band colors (up to MAX_BANDS): the first min(Bands, swatch)
+  // come straight from the palette swatch, any remainder are perceptually
+  // spaced into the gaps (Rubik/Terraform fillCircle idiom), then Hue-shifted.
+  // Recomputed every frame (zero-alloc); mBands is the active count (>= 1).
+  private final int[] bandColor = new int[MAX_BANDS];
+  private final float[] hueWork = new float[MAX_BANDS];
+  private final float[] hueOut = new float[MAX_BANDS];
+  private int mBands = 1;
+
+  // Pattern-level view support: the renderer writes fixed Apotheneum geometry
+  // into the full-model colors buffer, so when this device has a restricted
+  // view (this.model), out-of-view points are cleared each frame; the mask is
+  // rebuilt only when the view model changes (rare; allocation acceptable)
+  private LXModel viewModel = null;
+  private boolean[] viewMask = null;
 
   private final Field cubeField = new Field("cube", 4 * Apotheneum.GRID_WIDTH, Apotheneum.GRID_HEIGHT);
   private final Field cylinderField = new Field("cylinder", Apotheneum.RING_LENGTH, Apotheneum.CYLINDER_HEIGHT);
@@ -353,87 +340,83 @@ public class Mountains extends ApotheneumPattern {
   public Mountains(LX lx) {
     super(lx);
     this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
+    this.tempoLock = new TempoLock(lx);
 
     addParameter("wipe", this.wipe);
     addParameter("newRidge", this.newRidge);
     addParameter("invert", this.invert);
-    addParameter("glint", this.glint);
-    addParameter("energy", this.energy);
+    addParameter("rndTrig", this.rndTrig);
+    addParameter("spdDiv", this.spdDiv);
     addParameter("roughness", this.roughness);
     addParameter("relief", this.relief);
-    addParameter("bandOffset", this.bandOffset);
+    addParameter("bands", this.bands);
+    addParameter("bandPhase", this.bandPhase);
+    addParameter("snowCap", this.snowCap);
     addParameter("hueShift", this.hueShift);
-    addParameter("spawnRate", this.spawnRate);
     addParameter("rotX", this.rotX);
     addParameter("rotY", this.rotY);
     addParameter("rotZ", this.rotZ);
     addParameter("zoom", this.zoom);
     addParameter("persp", this.persp);
-    addParameter("planet", this.planet);
     addParameter("style", this.style);
+    addParameter("smooth", this.smooth);
     addParameter("audio", this.audioDepth);
+
+    // Jump candidates — mirrored 1:1 in the Mountains.md table
+    bag.jumpable(this.roughness, 0.2, 0.9);
+    bag.jumpable(this.bands);
+    bag.jumpable(this.bandPhase);
+    bag.jumpable(this.hueShift);
+    bag.jumpable(this.rotY);
+    bag.jumpable(this.zoom, 0.8, 1.6);
   }
 
   // ---- Palette-driven band colors ----------------------------------------------
 
   /**
-   * Sample the four elevation band colors (water/forest/rock/snow) from the
-   * project palette swatch: first four colors when the swatch has >= 4,
-   * four evenly spaced lerp samples (plus a brightness ladder for legibility)
-   * when it has 1-3, and the fixed fallback landscape constants when empty.
-   * Rebuilds only when the sampled inputs or Hue actually change.
+   * Elevation band colors from the current palette swatch: M = Bands equal
+   * bands valley->peak. The first min(M, swatch) colors come straight from the
+   * swatch (anchored at their perceptual hue positions); any remaining bands
+   * are generated perceptually (Rubik/Terraform fillCircle idiom), so a short
+   * swatch still yields M legible, well-separated hues rather than a fixed
+   * water/forest/rock/snow ladder. Hue rotates the whole set; Snow forces the
+   * highest band (M-1) pure white without shifting the others. M = 1 is
+   * monochrome bandColor[0]. Recomputed each frame (zero allocation).
    */
-  private void updateBandColors() {
-    final double hs = this.hueShift.getValue();
+  private void computeBandColors() {
     final List<LXDynamicColor> swatch = this.lx.engine.palette.swatch.colors;
-    final int n = Math.min(swatch.size(), 4);
+    final int m = LXUtils.max(1, this.bands.getValuei());
+    this.mBands = m;
+    final double hs = this.hueShift.getValue();
 
-    if (n == 0) {
-      if ((this.cachedSwatchCount != 0) || (hs != this.cachedHueShift)) {
-        this.cachedSwatchCount = 0;
-        this.cachedHueShift = hs;
-        this.bandBase[0] = LXColor.hsb((BASE_HUE + hs) % 360, BASE_SAT, BASE_BRI);
-        this.bandBase[1] = LXColor.hsb((FOREST_HUE + hs) % 360, FOREST_SAT, FOREST_BRI);
-        this.bandBase[2] = LXColor.hsb((ROCK_HUE + hs) % 360, ROCK_SAT, ROCK_BRI);
-        this.bandBase[3] = LXColor.hsb((SNOW_HUE + hs) % 360, SNOW_SAT, SNOW_BRI);
-      }
-      return;
+    final int defined = Math.min(m, swatch.size());
+    for (int i = 0; i < defined; ++i) {
+      final int c = swatch.get(i).getColor();
+      this.bandColor[i] = c;
+      this.hueWork[i] = PerceptualHue.toPerceptualPosition(LXColor.h(c));
     }
+    final int generate = m - defined;
+    if (generate > 0) {
+      PerceptualHue.fillCircle(this.hueWork, defined, generate, this.hueOut);
+      for (int j = 0; j < generate; ++j) {
+        this.bandColor[defined + j] = PerceptualHue.color(this.hueOut[j]);
+      }
+    }
+    if (hs != 0) {
+      for (int i = 0; i < m; ++i) {
+        final int c = this.bandColor[i];
+        this.bandColor[i] = LXColor.hsb((LXColor.h(c) + hs) % 360, LXColor.s(c), LXColor.b(c));
+      }
+    }
+    if (this.snowCap.isOn()) {
+      this.bandColor[m - 1] = LXColor.WHITE; // snow cap on the highest band
+    }
+  }
 
-    boolean changed = (n != this.cachedSwatchCount) || (hs != this.cachedHueShift);
-    if (n >= 4) {
-      for (int i = 0; i < 4; ++i) {
-        final int c = swatch.get(i).getColor();
-        if (c != this.sampledSwatch[i]) {
-          changed = true;
-          this.sampledSwatch[i] = c;
-        }
-      }
-    } else {
-      // 1-3 colors: four even samples along the lerp chain, brightness-stepped
-      for (int i = 0; i < 4; ++i) {
-        final double p = i * (n - 1) / 3.0;
-        final int i0 = (int) p;
-        final int i1 = Math.min(i0 + 1, n - 1);
-        final int c = scaleRgb(LXColor.lerp(
-          swatch.get(i0).getColor(), swatch.get(i1).getColor(), (float) (p - i0)),
-          SPARSE_BAND_LIFT[i]);
-        if (c != this.sampledSwatch[i]) {
-          changed = true;
-          this.sampledSwatch[i] = c;
-        }
-      }
-    }
-    if (!changed) {
-      return;
-    }
-    this.cachedSwatchCount = n;
-    this.cachedHueShift = hs;
-    for (int i = 0; i < 4; ++i) {
-      final int c = this.sampledSwatch[i];
-      this.bandBase[i] = (hs == 0) ? c :
-        LXColor.hsb((LXColor.h(c) + hs) % 360, LXColor.s(c), LXColor.b(c));
-    }
+  /** Smoothstep of a value clamped to [0,1]: 0 at 0, 1 at 1, zero slope at both ends */
+  private static double smoothstep(double t) {
+    t = LXUtils.constrain(t, 0, 1);
+    return t * t * (3 - 2 * t);
   }
 
   /** Multiply an ARGB color's RGB channels by mult (<= 0 renders black) */
@@ -449,10 +432,6 @@ public class Mountains extends ApotheneumPattern {
 
   // ---- One mountain field per surface ----------------------------------------
 
-  private static final int IDLE = 0;
-  private static final int REVEALING = 1;
-  private static final int FADING = 2;
-
   private final class Field {
 
     private final String name;
@@ -460,12 +439,18 @@ public class Mountains extends ApotheneumPattern {
     private final int height;
     private final SurfaceCanvas canvas;
 
+    /** Snapshot of the scene at the moment of a Wipe, faded out over one beat */
+    private final SurfaceCanvas snapshot;
+
     /**
      * Normalized (0..1) heightfield per range, wrapped in x. Each range is
-     * generated at its own spawn (so per-range roughness/treble still applies)
-     * and blended with its predecessor for cross-range coherence.
+     * generated at its own spawn (so per-range roughness/audio still applies)
+     * and blended with a reference range for cross-range coherence.
      */
     private final float[][] terrain;
+
+    /** Heightfield of the range currently being revealed by the draw head */
+    private final float[] pending;
 
     /** Midpoint-displacement scratch; [width] mirrors [0] for the wrap */
     private final float[] ridge;
@@ -477,7 +462,7 @@ public class Mountains extends ApotheneumPattern {
     // Per-repaint scratch (preallocated; zero-alloc render)
     private final float[] rowBase = new float[DEPTH_ROWS];
     private final float[] rowScale = new float[DEPTH_ROWS];
-    private final int[] rowBand = new int[4];
+    private final int[] rowBand = new int[MAX_BANDS];
     private final int[] colFloor;
     private float[] crestRow;
     private float[] crestPrev;
@@ -485,33 +470,35 @@ public class Mountains extends ApotheneumPattern {
 
     private final Random random = new Random();
 
-    private int state = IDLE;
-
-    /** Fully revealed ranges this cycle; DEPTH_ROWS = field full */
+    /** Fully revealed ranges; DEPTH_ROWS = field full (then rows recycle) */
     private int revealedRows = 0;
 
-    /** Terrain scheme resolved at cycle start (RANDOM re-rolls here) */
-    private Planet scheme = Planet.EARTH;
+    /** Terrain row the current reveal is drawing into */
+    private int revealRow = 0;
 
-    /** Time spent idle since the last reveal finished (starts huge: spawn on frame 1) */
-    private double idleMs = 1e12;
+    /** Fraction (0..1) of the ring the current range has revealed */
+    private double progress = 0;
 
-    private double fadeMs = 0;
+    /** First spawn happens lazily on the first advance() */
+    private boolean spawned = false;
 
-    /** Restart-fade brightness multiplier, folded into the copyTo lift */
-    private double fadeMult = 1;
+    // Wipe overlay fade (one beat, measured at trigger time)
+    private boolean fading = false;
+    private double fadeTotalMs = 1;
+    private double fadeElapsedMs = 0;
 
-    // Current revealing range
-    private double front = 0;   // wipe front in terrain columns traveled
-    private int painted = 0;    // terrain columns revealed so far
-    private int wipeStart = 0;  // terrain column where this range's wipe began
+    // Reveal arc for this repaint, in canvas columns (head + trailing length)
+    private int arcHead = 0;
+    private int arcLen = 0;
 
     private Field(String name, int width, int height) {
       this.name = name;
       this.width = width;
       this.height = height;
       this.canvas = new SurfaceCanvas(width, height);
+      this.snapshot = new SurfaceCanvas(width, height);
       this.terrain = new float[DEPTH_ROWS][width];
+      this.pending = new float[width];
       this.ridge = new float[width + 1];
       this.cosAz = new float[width];
       this.sinAz = new float[width];
@@ -526,83 +513,69 @@ public class Mountains extends ApotheneumPattern {
       }
     }
 
-    private void advance(double deltaMs) {
-      switch (this.state) {
-
-      case FADING:
-        this.fadeMs += deltaMs;
-        this.fadeMult = Math.pow(FADE_FLOOR, this.fadeMs / (FADE_SECONDS * 1000));
-        if (this.fadeMs >= FADE_SECONDS * 1000) {
-          this.revealedRows = 0;
-          this.fadeMult = 1;
-          this.state = IDLE;
-          this.idleMs = 1e12; // restart immediately
-        }
-        break;
-
-      case REVEALING:
-        this.front += this.width * deltaMs / frameRevealMs;
-        this.painted = (int) Math.min(this.front, this.width);
-        if (this.painted >= this.width) {
-          this.revealedRows++;
-          this.state = IDLE;
-          this.idleMs = 0;
-        }
-        break;
-
-      default: // IDLE
-        this.idleMs = Math.min(this.idleMs + deltaMs, 1e12);
-        if (this.idleMs >= frameSpawnIdleMs) {
-          if (isFull()) {
-            startFade("field full");
-          } else {
-            spawn();
-          }
-        }
-        break;
-      }
-    }
-
+    /** True once every terrain row holds a revealed range (rows now recycle) */
     private boolean isFull() {
       return this.revealedRows >= DEPTH_ROWS;
     }
 
-    private void spawn() {
-      final int row = this.revealedRows;
-      if (row == 0) {
-        // Cycle start: resolve the terrain scheme (RANDOM re-rolls a planet)
-        final Planet selected = planet.getEnum();
-        this.scheme = (selected == Planet.RANDOM)
-          ? PLANETS[this.random.nextInt(PLANETS.length - 1)] : selected;
+    private void advance(double deltaMs) {
+      if (!this.spawned) {
+        this.spawned = true;
+        spawn();
       }
+      // Drawing is continuous: ranges chain back-to-back at the head's
+      // grid-locked rate, one full ring each
+      this.progress += frameDeltaRing;
+      while (this.progress >= 1) {
+        this.progress -= 1;
+        commit();
+        spawn();
+      }
+      if (this.fading) {
+        this.fadeElapsedMs += deltaMs;
+        if (this.fadeElapsedMs >= this.fadeTotalMs) {
+          this.fading = false;
+        }
+      }
+    }
 
-      // Heightfield: wrap-matched endpoints, midpoint displacement, then
-      // normalized to [0, 1]; Relief/Zoom scale it live at projection time.
+    /** Complete the current reveal: bake pending into its terrain row */
+    private void commit() {
+      System.arraycopy(this.pending, 0, this.terrain[this.revealRow], 0, this.width);
+      if (this.revealedRows < DEPTH_ROWS) {
+        this.revealedRows++;
+      }
+      // Next target: march nearer while filling; once full, recycle rows in
+      // reveal order so new terrain always replaces the stalest range
+      this.revealRow = (this.revealedRows < DEPTH_ROWS)
+        ? this.revealedRows : (this.revealRow + 1) % DEPTH_ROWS;
+    }
+
+    /** Generate the pending heightfield for the current revealRow */
+    private void spawn() {
+      // Wrap-matched endpoints, midpoint displacement, then normalize to
+      // [0, 1]; Relief/Zoom/audio scale it live at projection time, but
+      // roughness (plus the audio amount) is baked per range here
       final double effRoughness = LXUtils.constrain(
-        roughness.getValue() + this.scheme.roughBias + TREBLE_TO_ROUGHNESS * audio.treble, 0, 1);
+        roughness.getValue() + AUDIO_ROUGH_GAIN * audio.level, 0, 1);
       final float falloff = (float) (FALLOFF_SMOOTH + (FALLOFF_ROUGH - FALLOFF_SMOOTH) * effRoughness);
       this.ridge[0] = 0;
       this.ridge[this.width] = 0;
       displace(0, this.width, 1f, falloff);
       normalizeRidge();
 
-      final float[] range = this.terrain[row];
-      final float wl = (float) this.scheme.waterLevel;
+      // Cross-range coherence: blend with the neighbor row while filling,
+      // or with the row being replaced while recycling
+      final float[] blendRef = isFull() ? this.terrain[this.revealRow]
+        : (this.revealRow > 0) ? this.terrain[this.revealRow - 1] : null;
       for (int x = 0; x < this.width; ++x) {
-        float h = (row == 0) ? this.ridge[x]
-          : ROW_BLEND * this.terrain[row - 1][x] + (1 - ROW_BLEND) * this.ridge[x];
-        if (wl >= 0 && h < wl) {
-          h = wl; // water plane: valleys flatten to a flat sea
+        float h = (blendRef == null) ? this.ridge[x]
+          : ROW_BLEND * blendRef[x] + (1 - ROW_BLEND) * this.ridge[x];
+        if (h < WATER_LEVEL) {
+          h = WATER_LEVEL; // water plane: valleys flatten to a flat sea
         }
-        range[x] = h;
+        this.pending[x] = h;
       }
-
-      this.wipeStart = this.random.nextInt(this.width);
-      this.front = 0;
-      this.painted = 0;
-      this.state = REVEALING;
-      LX.log("Mountains[" + this.name + "]: range " + row + "/" + DEPTH_ROWS
-        + " planet=" + this.scheme + " roughness=" + String.format("%.2f", effRoughness));
     }
 
     /** Recursive 1D midpoint displacement over ridge[lo..hi] (spawn-time only) */
@@ -633,30 +606,53 @@ public class Mountains extends ApotheneumPattern {
       }
     }
 
-    /** True if terrain column j is inside the current reveal wipe arc */
-    private boolean inArc(int j) {
-      return ((j - this.wipeStart + this.width) % this.width) < this.painted;
+    /** True if canvas column x is inside the current reveal arc */
+    private boolean covered(int x) {
+      return ((this.arcHead - x + this.width) % this.width) <= this.arcLen;
+    }
+
+    /**
+     * Heightfield to sample for range d at canvas column x, honoring the
+     * reveal arc: the revealing row reads pending inside the arc; outside it
+     * reads the old row while recycling, or nothing (null) while filling.
+     */
+    private float[] rowSource(int d, int x) {
+      if (d == this.revealRow) {
+        if (covered(x)) {
+          return this.pending;
+        }
+        if (!isFull()) {
+          return null; // still unrevealed while filling
+        }
+      }
+      return this.terrain[d];
     }
 
     /**
      * Re-project and redraw the whole revealed scene for this frame. The
      * canvas is cleared and rebuilt every frame so the camera parameters
-     * (RotX/RotY/RotZ/Zoom/Persp) are live; the reveal wipe and restart fade
-     * remain pure state (painted count / fadeMult) rather than baked pixels.
+     * (RotX/RotY/RotZ/Zoom/Persp) are live; the reveal arc and wipe fade
+     * remain pure state (head/progress, snapshot fade) rather than baked
+     * pixels.
      */
     private void repaint() {
       this.canvas.fill(LXColor.BLACK);
 
-      final int maxRow = (this.state == REVEALING) ? this.revealedRows : this.revealedRows - 1;
-      if (maxRow < 0) {
-        return;
-      }
+      // Reveal arc in canvas columns: the head position is a pure function
+      // of the transport phase, so (at RotY 0) cube corners are crossed
+      // exactly on SpdDiv boundaries no matter when drawing started;
+      // progress determines how much of the ring trails behind the head
+      this.arcHead = (int) (frameRingFrac * this.width) % this.width;
+      this.arcLen = (int) (Math.min(1, this.progress) * this.width);
+
+      final int maxRow = isFull() ? DEPTH_ROWS - 1 : this.revealedRows;
 
       // Camera layout for this frame: nearest range has scale ~zoom; farther
       // ranges compress by Persp. Row baselines accumulate downward from the
       // horizon so the farthest range's peaks just clear the top margin.
-      final double reliefRows = relief.getValue() * this.height * this.scheme.reliefMult;
-      final double spacing = ROW_SPACING_ROWS * this.scheme.spacingMult;
+      // Audio makes the whole terrain taller, live.
+      final double reliefRows = relief.getValue() * this.height
+        * (1 + AUDIO_HEIGHT_GAIN * audio.level);
       for (int d = 0; d < DEPTH_ROWS; ++d) {
         final double compress = (DEPTH_ROWS > 1)
           ? (DEPTH_ROWS - 1 - d) / (double) (DEPTH_ROWS - 1) : 0;
@@ -664,30 +660,35 @@ public class Mountains extends ApotheneumPattern {
       }
       this.rowBase[0] = (float) (TOP_MARGIN_ROWS + reliefRows * this.rowScale[0]);
       for (int d = 1; d < DEPTH_ROWS; ++d) {
-        this.rowBase[d] = this.rowBase[d - 1] + (float) (spacing * this.rowScale[d]);
-      }
-
-      // Elevation band thresholds (rows above a range's baseline, pre-scale)
-      final int off = (int) Math.round(bandOffset.getValue() * BAND_OFFSET_RANGE_ROWS);
-      final int sp = Math.max(1, (int) Math.round(BAND_SPACING_ROWS * this.scheme.bandMult));
-      final double t1 = Math.max(MIN_BASE_BAND_ROWS, sp + off);
-      final double t2 = 2 * sp + off;
-      double t3 = 3 * sp + off + this.scheme.snowOffsetRows;
-      if (reliefRows < t3 + MIN_SNOW_ROWS) {
-        t3 = 1e9; // snow would be a sliver; drop it entirely
+        this.rowBase[d] = this.rowBase[d - 1] + (float) (ROW_SPACING_ROWS * this.rowScale[d]);
       }
 
       final double yawOffset = frameYawNorm * this.width;
 
-      if (frameWire) {
-        for (int d = 0; d <= maxRow; ++d) {
-          paintWireRow(d, reliefRows, yawOffset, t1, t2, t3);
-        }
-      } else {
+      // Style mix: dimmed solid fills first (painter's algorithm), then the
+      // wireframe grid lightened over them — per-channel max keeps the mix
+      // as saturated as its sources (no additive pastel washout)
+      if (frameSolidGain > 0) {
         Arrays.fill(this.colFloor, this.height);
         for (int d = maxRow; d >= 0; --d) {
-          paintSolidRow(d, reliefRows, yawOffset, t1, t2, t3);
+          paintSolidRow(d, reliefRows, yawOffset);
         }
+      }
+      if (frameWireGain > 0) {
+        for (int d = 0; d <= maxRow; ++d) {
+          paintWireRow(d, reliefRows, yawOffset);
+        }
+      }
+      if (frameDotGain > 0) {
+        for (int d = 0; d <= maxRow; ++d) {
+          paintDotRow(d, reliefRows, yawOffset);
+        }
+      }
+
+      // Wipe overlay: the old scene fades to black under the fresh drawing
+      if (this.fading) {
+        this.canvas.maxFrom(this.snapshot,
+          Math.pow(FADE_FLOOR, this.fadeElapsedMs / this.fadeTotalMs));
       }
     }
 
@@ -703,13 +704,60 @@ public class Mountains extends ApotheneumPattern {
         * (frameSinX * this.sinAz[x] - frameSinZ * this.cosAz[x]);
     }
 
-    /** Terrain height of range d at fractional terrain column xs (wrap + lerp) */
-    private double sampleHeight(int d, double xs) {
+    /** Terrain height of a range at fractional terrain column xs (wrap + lerp) */
+    private double sampleHeight(float[] range, double xs) {
       final int j0 = ((int) Math.floor(xs)) % this.width;
       final int j1 = (j0 + 1 == this.width) ? 0 : j0 + 1;
       final double f = xs - Math.floor(xs);
-      final float[] range = this.terrain[d];
       return range[j0] * (1 - f) + range[j1] * f;
+    }
+
+    /**
+     * Depth-hazed color of the band containing normalized elevation u in [0,1]
+     * (crest bands for wire/dots — no AA, since a crest sits at one elevation).
+     * mBands equal bands with a circular BndPhase shift.
+     */
+    private int crestBandColor(double u) {
+      double pos = Math.min(u, BAND_U_MAX) + frameBandPhase;
+      pos -= Math.floor(pos);
+      int idx = (int) (pos * mBands);
+      if (idx >= mBands) {
+        idx = mBands - 1;
+      }
+      return this.rowBand[idx];
+    }
+
+    /**
+     * Depth-hazed color for a solid-fill pixel at normalized elevation u in
+     * [0,1], with the band boundaries anti-aliased over frameSmooth screen rows
+     * (Terraform's band-AA idiom). hAmpRows is the range's relief in screen
+     * rows, so one band spans hAmpRows / mBands rows.
+     */
+    private int bandColorAt(double u, double hAmpRows) {
+      final int m = mBands;
+      double pos = Math.min(u, BAND_U_MAX) + frameBandPhase;
+      pos -= Math.floor(pos);
+      final double b = pos * m;
+      int idx = (int) b;
+      if (idx >= m) {
+        idx = m - 1;
+      }
+      final int base = this.rowBand[idx];
+      final double hw = frameSmooth * BAND_AA_MAX_ROWS;
+      if ((hw <= 0) || (m <= 1)) {
+        return base;
+      }
+      // Blend toward the nearer band boundary, measured in screen rows
+      final double fb = b - idx;
+      final double rowsPerBand = hAmpRows / m;
+      final double dUp = (1 - fb) * rowsPerBand;
+      final double dDown = fb * rowsPerBand;
+      if (dUp <= dDown) {
+        final double w = 0.5 * (1 - smoothstep(dUp / hw));
+        return LXColor.lerp(base, this.rowBand[(idx + 1) % m], (float) w);
+      }
+      final double w = 0.5 * (1 - smoothstep(dDown / hw));
+      return LXColor.lerp(base, this.rowBand[(idx - 1 + m) % m], (float) w);
     }
 
     /**
@@ -718,38 +766,44 @@ public class Mountains extends ApotheneumPattern {
      * with zero overdraw — the painter's-algorithm equivalent of the old
      * permanent column commits.
      */
-    private void paintSolidRow(int d, double reliefRows, double yawOffset,
-      double t1, double t2, double t3) {
-      final boolean revealing = (this.state == REVEALING) && (d == this.revealedRows);
+    private void paintSolidRow(int d, double reliefRows, double yawOffset) {
       final double s = this.rowScale[d];
       final double hAmp = reliefRows * s;
-      final double bright = rowBrightness(d);
-      for (int i = 0; i < 4; ++i) {
-        this.rowBand[i] = scaleRgb(bandBase[i], bright);
+      final double bright = rowBrightness(d) * frameSolidGain;
+      for (int i = 0; i < mBands; ++i) {
+        this.rowBand[i] = scaleRgb(bandColor[i], bright);
       }
-      final double yOff1 = t1 * s, yOff2 = t2 * s, yOff3 = t3 * s;
+      final double invAmp = (hAmp > 1e-6) ? 1.0 / hAmp : 0;
 
       for (int x = 0; x < this.width; ++x) {
-        final double xs = x + yawOffset;
-        if (revealing && !inArc(((int) Math.floor(xs)) % this.width)) {
+        final float[] src = rowSource(d, x);
+        if (src == null) {
           continue;
         }
+        final double xs = x + yawOffset;
         final double baseY = this.rowBase[d] + tilt(d, x);
-        final int crest = (int) Math.round(baseY - sampleHeight(d, xs) * hAmp);
+        final double crestF = baseY - sampleHeight(src, xs) * hAmp;
+        final int crest = (int) Math.round(crestF);
         final int top = Math.max(0, crest);
         final int floorY = this.colFloor[x];
         if (top < floorY) {
-          final double ySnow = baseY - yOff3;
-          final double yRock = baseY - yOff2;
-          final double yForest = baseY - yOff1;
           for (int y = top; y < floorY; ++y) {
-            final int color = (y <= ySnow) ? this.rowBand[3]
-              : (y <= yRock) ? this.rowBand[2]
-              : (y <= yForest) ? this.rowBand[1]
-              : this.rowBand[0];
-            this.canvas.set(x, y, color);
+            // Normalized elevation of this pixel within the range's relief,
+            // colored by equal band (base at the valley, peak at the crest)
+            final double u = LXUtils.constrain((baseY - y) * invAmp, 0, 1);
+            this.canvas.set(x, y, bandColorAt(u, hAmp));
           }
           this.colFloor[x] = top;
+          // Subpixel crest feather (Smooth): when the true edge sits above the
+          // rounded top, brighten the pixel just above by the uncovered
+          // fraction, so vertical crest motion reads smooth against the sky.
+          // setMax only ever lightens, so an even-nearer range drawn earlier
+          // is never darkened by a farther range's fringe.
+          final double above = crest - crestF;
+          if ((frameSmooth > 0) && (above > 0) && (top > 0)) {
+            final double u = LXUtils.constrain((baseY - top) * invAmp, 0, 1);
+            this.canvas.setMax(x, top - 1, scaleRgb(bandColorAt(u, hAmp), above * frameSmooth));
+          }
         }
       }
     }
@@ -757,31 +811,27 @@ public class Mountains extends ApotheneumPattern {
     /**
      * Wire style (After Dark "Frame"): crest polyline per range plus radial
      * connectors to the previous range every WIRE_COL_STEP columns — the dry
-     * generating grid, no hidden-line removal, colored by crest band.
+     * generating grid, no hidden-line removal, colored by crest band. Drawn
+     * with lighten blending so mixed-style grids glow over the solid fills.
      */
-    private void paintWireRow(int d, double reliefRows, double yawOffset,
-      double t1, double t2, double t3) {
-      final boolean revealing = (this.state == REVEALING) && (d == this.revealedRows);
+    private void paintWireRow(int d, double reliefRows, double yawOffset) {
       final double s = this.rowScale[d];
       final double hAmp = reliefRows * s;
-      final double bright = rowBrightness(d);
-      for (int i = 0; i < 4; ++i) {
-        this.rowBand[i] = scaleRgb(bandBase[i], bright);
+      final double bright = rowBrightness(d) * frameWireGain;
+      for (int i = 0; i < mBands; ++i) {
+        this.rowBand[i] = scaleRgb(bandColor[i], bright);
       }
 
       for (int x = 0; x < this.width; ++x) {
-        final double xs = x + yawOffset;
-        if (revealing && !inArc(((int) Math.floor(xs)) % this.width)) {
+        final float[] src = rowSource(d, x);
+        if (src == null) {
           this.crestRow[x] = Float.NaN;
           continue;
         }
-        final double hN = sampleHeight(d, xs);
+        final double xs = x + yawOffset;
+        final double hN = sampleHeight(src, xs);
         this.crestRow[x] = (float) (this.rowBase[d] + tilt(d, x) - hN * hAmp);
-        final double elev = hN * reliefRows;
-        this.wireColor[x] = (elev >= t3) ? this.rowBand[3]
-          : (elev >= t2) ? this.rowBand[2]
-          : (elev >= t1) ? this.rowBand[1]
-          : this.rowBand[0];
+        this.wireColor[x] = crestBandColor(hN);
       }
 
       for (int x = 0; x < this.width; ++x) {
@@ -789,16 +839,19 @@ public class Mountains extends ApotheneumPattern {
         if (Float.isNaN(cur)) {
           continue;
         }
-        // Ring polyline segment to the next column (wraps at the seam)
+        // Ring polyline segment to the next column (wraps at the seam).
+        // Wu antialiasing with the Smooth dial: at Smooth 1 the fractional
+        // crests draw as soft subpixel strokes, at Smooth 0 the coverage
+        // hardens back to aliased full-brightness pixels.
         final float next = this.crestRow[(x + 1 == this.width) ? 0 : x + 1];
         if (!Float.isNaN(next)) {
-          this.canvas.line(x, Math.round(cur), x + 1, Math.round(next), this.wireColor[x]);
+          this.canvas.lineWu(x, cur, x + 1, next, this.wireColor[x], true, frameSmooth);
         }
         // Radial connector to the previous (farther) range's crest
         if ((d > 0) && (x % WIRE_COL_STEP == 0)) {
           final float prev = this.crestPrev[x];
           if (!Float.isNaN(prev)) {
-            this.canvas.line(x, Math.round(prev), x, Math.round(cur), this.wireColor[x]);
+            this.canvas.lineWu(x, prev, x, cur, this.wireColor[x], true, frameSmooth);
           }
         }
       }
@@ -809,34 +862,90 @@ public class Mountains extends ApotheneumPattern {
       this.crestRow = swap;
     }
 
-    private void startFade(String why) {
-      if (this.state == FADING) {
-        return;
+    /**
+     * Dot style: a dot at each topo grid intersection — the crest of each range
+     * at every WIRE_COL_STEP-th column, exactly where the wire grid's ring
+     * polylines cross its radial connectors — colored by crest band, no
+     * hidden-point removal (matching Wire).
+     *
+     * <p>The core is ALWAYS subpixel-split across the two straddling rows,
+     * independent of Smooth, so the dot glides continuously as the ridge moves
+     * (RotX/RotZ, drawing) rather than snapping to the pixel grid. Smooth
+     * controls only the glow: at Smooth 0 the dot is a crisp point with no
+     * bleed into neighboring pixels, and the DOT_HALO cross fades in with
+     * Smooth up to a full lighten-blended bloom at Smooth 1 (variable glow).
+     */
+    private void paintDotRow(int d, double reliefRows, double yawOffset) {
+      final double s = this.rowScale[d];
+      final double hAmp = reliefRows * s;
+      final double bright = rowBrightness(d) * frameDotGain;
+      for (int i = 0; i < mBands; ++i) {
+        this.rowBand[i] = scaleRgb(bandColor[i], bright);
       }
-      this.state = FADING;
-      this.fadeMs = 0;
-      LX.log("Mountains[" + this.name + "]: fade to restart (" + why + ")");
+
+      for (int x = 0; x < this.width; x += WIRE_COL_STEP) {
+        final float[] src = rowSource(d, x);
+        if (src == null) {
+          continue;
+        }
+        final double xs = x + yawOffset;
+        final double hN = sampleHeight(src, xs);
+        final double yf = this.rowBase[d] + tilt(d, x) - hN * hAmp;
+        final int yLo = (int) Math.floor(yf);
+        final double frac = yf - yLo;
+        final int color = crestBandColor(hN);
+        // Core: subpixel position interpolation, always on (independent of
+        // Smooth) so ridge motion reads continuous, not pixel-quantized.
+        final double covLo = 1 - frac;
+        final double covHi = frac;
+        this.canvas.setMax(x, yLo, scaleRgb(color, covLo));
+        this.canvas.setMax(x, yLo + 1, scaleRgb(color, covHi));
+        // Glow halo: variable with Smooth. Smooth 0 = none (no glare into
+        // neighbors); Smooth 1 = full DOT_HALO cross around the brighter core.
+        if (frameSmooth > 0) {
+          final int yc = (covHi >= covLo) ? yLo + 1 : yLo;
+          final int halo = scaleRgb(color, DOT_HALO * frameSmooth);
+          this.canvas.setMax(x - 1, yc, halo);
+          this.canvas.setMax(x + 1, yc, halo);
+          this.canvas.setMax(x, yc - 1, halo);
+          this.canvas.setMax(x, yc + 1, halo);
+        }
+      }
     }
 
-    /** NewRidge trigger: reveal the next range if idle; full field fades instead */
+    /** Manual wipe: snapshot the scene to fade over one beat, restart drawing now */
+    private void wipe(double fadeMs) {
+      this.snapshot.copyFrom(this.canvas);
+      this.fading = true;
+      this.fadeTotalMs = Math.max(1, fadeMs);
+      this.fadeElapsedMs = 0;
+      this.revealedRows = 0;
+      this.revealRow = 0;
+      this.progress = 0;
+      this.spawned = true;
+      spawn();
+      LX.log("Mountains[" + this.name + "]: wipe — one-beat fade, drawing restarted");
+    }
+
+    /** NewRidge: complete the current range instantly, start the next at the head */
     private void force() {
-      if (this.state != IDLE) {
-        LX.log("Mountains[" + this.name + "]: NewRidge ignored (busy)");
+      if (!this.spawned) {
         return;
       }
-      if (isFull()) {
-        startFade("field full (forced)");
-      } else {
-        spawn();
-      }
+      commit();
+      spawn();
+      this.progress = 0;
     }
   }
 
   // ---- Trigger handlers --------------------------------------------------------
 
   private void wipeNow() {
-    this.cubeField.startFade("wipe trigger");
-    this.cylinderField.startFade("wipe trigger");
+    // Exactly one beat, measured at trigger time (a later BPM change does
+    // not retime a fade already in flight)
+    final double beatMs = this.tempoLock.beatPeriodMs();
+    this.cubeField.wipe(beatMs);
+    this.cylinderField.wipe(beatMs);
   }
 
   private void forceRidge() {
@@ -849,30 +958,43 @@ public class Mountains extends ApotheneumPattern {
     LX.log("Mountains: invert -> " + (this.inverted ? "cave (hanging)" : "normal (rising)"));
   }
 
-  private void glintNow() {
-    this.glintLevel = 1;
-  }
-
   // ---- Render --------------------------------------------------------------------
 
   @Override
   protected void render(double deltaMs) {
     this.audio.tick(deltaMs);
 
-    final double e = this.energy.getValue();
-    this.frameRevealMs = 1000 * Ranges.lin(e, REVEAL_SECONDS_AMBIENT, REVEAL_SECONDS_PEAK);
-    this.frameSpawnIdleMs =
-      1000 * Ranges.exp(e, SPAWN_IDLE_SECONDS_AMBIENT, SPAWN_IDLE_SECONDS_PEAK)
-      / this.spawnRate.getValue();
+    // Draw-head phase: one full ring per SpdDiv period (a cube side each
+    // quarter-period), phase-locked to the transport's absolute beat position
+    // — corners land on the grid. The per-frame delta is guarded so a
+    // transport restart or a SpdDiv change cannot instantly complete (or
+    // rewind) reveals; the head itself simply jumps to its new grid-true
+    // position.
+    final double ringPhase = this.tempoLock.beatPosition() / this.spdDiv.getEnum().beats;
+    double delta = ringPhase - this.lastRingPhase;
+    if (!(delta >= 0) || (delta > 0.5)) {
+      delta = 0; // first frame, transport restart, or division jump
+    }
+    this.lastRingPhase = ringPhase;
+    this.frameDeltaRing = delta;
+    this.frameRingFrac = ringPhase - Math.floor(ringPhase);
+
+    // Style ladder: solid fades out over 0..1, wire peaks at 1 and fades
+    // toward both neighbors, dots fade in over 1..2 — all lighten-composited
+    final double mix = LXUtils.constrain(this.style.getValue(), 0, 2);
+    this.frameSolidGain = Math.max(0, 1 - mix);
+    this.frameWireGain = 1 - Math.min(1, Math.abs(mix - 1));
+    this.frameDotGain = Math.max(0, mix - 1);
 
     this.frameSinX = Math.sin(Math.toRadians(this.rotX.getValue()));
     this.frameSinZ = Math.sin(Math.toRadians(this.rotZ.getValue()));
     this.frameYawNorm = this.rotY.getValue() / 360;
     this.frameZoom = this.zoom.getValue();
     this.framePersp = this.persp.getValue();
-    this.frameWire = (this.style.getEnum() == Style.WIRE);
+    this.frameSmooth = LXUtils.constrain(this.smooth.getValue(), 0, 1);
+    this.frameBandPhase = this.bandPhase.getValue();
 
-    updateBandColors();
+    computeBandColors();
 
     this.cubeField.advance(deltaMs);
     this.cylinderField.advance(deltaMs);
@@ -880,17 +1002,48 @@ public class Mountains extends ApotheneumPattern {
     this.cubeField.repaint();
     this.cylinderField.repaint();
 
-    // Glint trigger: linear settle from full lift back to the baseline
-    this.glintLevel = Math.max(0, this.glintLevel - deltaMs / (GLINT_SECONDS * 1000));
-
-    final double audioLift = Math.min(1, this.audio.level * LIFT_GAIN);
-    final double lift = LIFT_BASE + LIFT_SPAN * Math.max(audioLift, this.glintLevel);
-    this.cubeField.canvas.copyTo(Apotheneum.cube.exterior, this.colors,
-      lift * this.cubeField.fadeMult, this.inverted);
-    this.cylinderField.canvas.copyTo(Apotheneum.cylinder.exterior, this.colors,
-      lift * this.cylinderField.fadeMult, this.inverted);
+    this.cubeField.canvas.copyTo(Apotheneum.cube.exterior, this.colors, 1, this.inverted);
+    this.cylinderField.canvas.copyTo(Apotheneum.cylinder.exterior, this.colors, 1, this.inverted);
 
     copyCubeExterior();
     copyCylinderExterior();
+
+    applyViewMask();
+  }
+
+  /**
+   * Respect a pattern-level view. The renderer writes fixed Apotheneum
+   * geometry into the full-model colors buffer, so a restricted device view
+   * (this.model, set by the engine before run()) would otherwise be ignored:
+   * channel-level views are clipped by the mixer when the channel blends,
+   * but nothing clips a pattern's own writes in playlist compositing.
+   * Clearing out-of-view points to transparent (not black) lets lower layers
+   * show through, matching how view-aware patterns behave.
+   */
+  private void applyViewMask() {
+    final LXModel m = this.model;
+    if (m != this.viewModel) {
+      this.viewModel = m;
+      if (m.size >= this.colors.length) {
+        this.viewMask = null; // full model: no masking needed
+      } else {
+        if ((this.viewMask == null) || (this.viewMask.length != this.colors.length)) {
+          this.viewMask = new boolean[this.colors.length];
+        } else {
+          Arrays.fill(this.viewMask, false);
+        }
+        // View models clone points but preserve their master-buffer indices
+        for (LXPoint p : m.points) {
+          this.viewMask[p.index] = true;
+        }
+      }
+    }
+    if (this.viewMask != null) {
+      for (int i = 0; i < this.colors.length; ++i) {
+        if (!this.viewMask[i]) {
+          this.colors[i] = 0;
+        }
+      }
+    }
   }
 }

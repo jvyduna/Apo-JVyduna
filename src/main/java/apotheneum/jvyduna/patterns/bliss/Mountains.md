@@ -20,22 +20,23 @@ established, from the module's own About box and help text:
   random distances" — fractal midpoint displacement on a triangle mesh, drawn
   **progressively in stages** on an angled grid ("Mountains: Experiencing
   geological processes. Please stand by.").
-- Settings included **Planet** (Mercury, Venus, Earth, Mars, Jupiter, Saturn,
-  Uranus, Neptune, Pluto, Random — each a different landscape scheme), **View**
-  (Boundaries/Webs/Mountains/Constructions/Highlands), **Image** (render style
-  from wireframe "Frame" through "Solid", with an optional flat water plane),
-  **Complexity** (subdivision depth), and a **Zoom** slider.
-- No authoritative record of each planet's colors exists (the palettes are
-  binary data); planet schemes here are therefore terrain-structure only and
-  color always comes from the project palette (decided with Jeff, 2026-07-06).
+- Settings included **View** (Boundaries/Webs/Mountains/Constructions/
+  Highlands), **Image** (render style from wireframe "Frame" through "Solid",
+  with an optional flat water plane), **Complexity** (subdivision depth), and a
+  **Zoom** slider. (A **Planet** popup existed too; a Planet parameter was
+  tried in v2 and removed in v3 — its terrain-structure schemes had no visible
+  effect worth a knob on the sculpture.)
 
-The visual signature preserved from v1 of this pattern: 1D midpoint-displacement
-ridgelines, hard altitude-banded fills (water/forest/rock/snow), back-to-front
-accumulation of ranges stepping down the surface, and a full-field restart when
-the field is full. New in v2: the ranges form one coherent **terrain ring**
-around the viewer, re-projected every frame through live camera controls
-(RotX/RotY/RotZ/Zoom/Persp), a wireframe Style, planets, and palette-driven
-band colors.
+The visual signature preserved from v1/v2: 1D midpoint-displacement ridgelines,
+hard altitude-banded fills (the original water/forest/rock/snow ladder was
+replaced 2026-07-13 by a palette-driven equal-band count — see the band-color
+section), back-to-front accumulation of ranges stepping down the surface. New
+in v3 (Jeff's feedback round,
+2026-07-07): drawing is **continuous and transport-locked** (SpdDiv), a full
+field **recycles** its oldest range instead of auto-wiping, the Wipe trigger is
+manual-only and takes exactly one beat with drawing restarting instantly,
+Style is a continuous Solid↔Wire mix, and Audio simply makes the drawing
+rougher and taller.
 
 The Apotheneum-specific move: a range is a **closed loop**. On the cube it wraps
 continuously around all four faces (one 200-column strip); on the cylinder it
@@ -60,26 +61,28 @@ RotY orbit position.
 The world model is a ring of `DEPTH_ROWS = 8` concentric mountain ranges
 surrounding the viewer (who stands at the sculpture's center). Each range is a
 normalized (0..1) 1D midpoint-displacement heightfield wrapped in x, generated
-**at its own spawn** (so per-range roughness/treble still applies) and blended
-35% (`ROW_BLEND`, CURATE) with its predecessor so successive ranges read as one
-terrain. The planet scheme's water level flattens valleys into a sea at
+**at its own spawn** (so per-range roughness/audio still applies) and blended
+35% (`ROW_BLEND`, CURATE) with a reference range so successive ranges read as
+one terrain (the neighbor row while filling; the row being replaced while
+recycling). Valleys below `WATER_LEVEL = 0.18` flatten into a sea at
 generation time.
 
 The scene is **cleared and re-projected every frame**, which is what makes the
-camera parameters live. Committed-pixel accumulation is gone; the reveal wipe
-and restart fade are pure state (`painted` count, `fadeMult` scalar) instead of
-baked pixels. Projection per range `d` (0 = farthest) and canvas column `x`:
+camera parameters live. The reveal arc and wipe fade are pure state (head
+position/progress, snapshot fade) instead of baked pixels. Projection per
+range `d` (0 = farthest) and canvas column `x`:
 
 - `rowScale[d] = Zoom / (1 + Persp × PERSP_GAIN × (D−1−d)/(D−1))` — Persp = 0
   gives flat isometric spacing (exactly the v1 layout), Persp = 1 compresses
   the farthest range to 1/3 scale near the horizon. CURATE: `PERSP_GAIN = 2.0`.
 - Baselines accumulate downward from the horizon:
   `rowBase[0] = TOP_MARGIN + reliefRows × rowScale[0]`,
-  `rowBase[d] = rowBase[d−1] + ROW_SPACING × planet.spacing × rowScale[d]`.
+  `rowBase[d] = rowBase[d−1] + ROW_SPACING × rowScale[d]`.
 - **RotY (orbit)** is an azimuthal offset into the terrain (fractional, lerped
-  between columns) — the landscape spins seamlessly around the ring, and the
-  reveal arc is tracked in terrain columns so a mid-reveal orbit carries the
-  revealed arc with it.
+  between columns) — the landscape spins seamlessly around the ring. The
+  reveal arc is tracked in **canvas columns** (fixed to the building), so a
+  mid-reveal orbit slides the terrain under the arc window; this is what keeps
+  the draw head's corner crossings on the tempo grid (see Tempo mapping).
 - **RotX / RotZ (ring tilt)**: rotating a ring-shaped world about a horizontal
   axis displaces each point vertically by `sin(angle) × radius × sin(azimuth)`
   (RotZ uses `−cos(azimuth)`, 90° around the ring). Radius grows with nearness:
@@ -88,203 +91,301 @@ baked pixels. Projection per range `d` (0 = farthest) and canvas column `x`:
   rigidly tilted plane. Defaults are 0 → the default look matches v1.
 - Crest of range d at column x:
   `y = rowBase[d] + tilt(d,x) − height(d, x+yaw) × reliefRows × rowScale[d]`,
-  where `reliefRows = Relief × surfaceHeight × planet.relief` — Relief and all
-  camera params are now **live** (v1 baked them per ridge at spawn).
+  where `reliefRows = Relief × surfaceHeight × (1 + 0.4 × audioLevel)` —
+  Relief, the audio lift, and all camera params are live.
 
-### Drawing styles
+### Continuous drawing, filling, and recycling (v3 lifecycle)
 
-- **Solid** (default): each range fills from its crest down, front-to-back with
-  a per-column watermark (`colFloor`) — nearer ranges occlude farther ones with
-  zero overdraw, the painter's-algorithm equivalent of v1's permanent commits.
-  Elevation banding compares y against per-column band boundary lines
-  (`baseY − t_n × rowScale[d]`), so bands follow the tilt.
-- **Wire** (After Dark "Frame"): no fills — each range draws its crest polyline
-  around the ring plus radial connectors to the previous range's crest every
-  `WIRE_COL_STEP = 5` columns (CURATE), colored by crest band, no hidden-line
-  removal. This is the "dry grid where you can see the mountains being
-  generated" look.
+A single **draw head** sweeps the ring perpetually at the SpdDiv rate (one
+full ring per division period, a cube side each quarter-period). Ranges chain
+back-to-back, each taking exactly one full ring (one division period): while
+the field is **filling**, the
+revealing row shows terrain only inside the arc behind the head (back-to-front
+accumulation, as always); once all 8 rows are revealed the field is **full**
+and the head starts **recycling** — each new range redraws the oldest row in
+reveal order (0, 1, 2, …), showing fresh terrain inside the arc and the old
+ridge outside it. The old range is thus progressively erased exactly where the
+new one is drawn. Nothing ever auto-wipes; a full field just keeps slowly
+renewing itself. CURATE: verify the recycle boundary (new ridge meets old
+ridge at the head) reads as intentional redrawing rather than a glitch.
+
+### Drawing styles (continuous ladder)
+
+`Style` is a continuous 0..2 ladder; neighbors crossfade:
+
+- **0 — Solid** (default): each range fills from its crest down, front-to-back
+  with a per-column watermark (`colFloor`) — nearer ranges occlude farther
+  ones with zero overdraw. Each pixel's normalized elevation within the range's
+  relief, `u = (baseY − y) / hAmp`, picks its `Bands` band (base at the valley,
+  peak at the crest); the band boundaries follow the tilt and are AA-blended
+  over `frameSmooth × BAND_AA_MAX_ROWS` screen rows.
+- **1 — Wire** (After Dark "Frame"): no fills — each range draws its crest
+  polyline around the ring plus radial connectors to the previous range's
+  crest every `WIRE_COL_STEP = 5` columns (CURATE), colored by the band at the
+  crest's normalized height, no hidden-line removal.
+- **2 — Dots** (point-cloud topo): a dot at each topo grid intersection — the
+  crest of each range at every `WIRE_COL_STEP`-th column, exactly where the
+  wire grid's rings cross its radial connectors — colored by the crest's band,
+  no hidden-point removal. The core is **always** subpixel-split across the two
+  straddling rows (so the dot glides continuously as the ridge moves —
+  RotX/RotZ, drawing — never snapping to the pixel grid), and a `DOT_HALO =
+  0.35` cross bloom fades in with `Smooth` (variable glow): at Smooth 0 the dot
+  is a crisp point with no bleed into neighbors, at Smooth 1 the full halo.
+- **Between**: pass gains are `solid = max(0, 1−mix)`, `wire = 1−|mix−1|`,
+  `dots = max(0, mix−1)`, all composited with **per-channel max** (lighten)
+  blending — chosen over additive so overlapping bands never wash toward
+  pastel; every output pixel is one of the band colors at some brightness,
+  never a hue blend. Fading Wire→Dots dims the lines while their
+  intersection points stay lit. CURATE: sweep Style 0→2 slowly on hardware —
+  grid emerges from fills, then dissolves to its glowing intersections.
 
 ### Buffers (all preallocated in the constructor, zero-alloc render)
 
-- `SurfaceCanvas` per surface — cleared and redrawn each frame.
-- `float[DEPTH_ROWS][width]` terrain + `float[width+1]` displacement scratch.
+- `SurfaceCanvas` per surface — cleared and redrawn each frame — plus a
+  same-size `snapshot` canvas used only by the wipe fade.
+- `float[DEPTH_ROWS][width]` terrain + `float[width]` pending (the revealing
+  range) + `float[width+1]` displacement scratch.
 - Per-column azimuth trig tables (`cosAz`/`sinAz`), per-row `rowBase`/`rowScale`,
   watermark `colFloor[width]`, wire crest double-buffer (pointer-swapped) and
-  `wireColor[width]`, per-row `rowBand[4]`.
-- Pattern-level `bandBase[4]` palette samples with a Satori-style
-  change-detection cache.
+  `wireColor[width]`, per-row `rowBand[MAX_BANDS]` (the depth-hazed band colors).
+- Pattern-level `bandColor[MAX_BANDS]` plus `hueWork`/`hueOut` perceptual-hue
+  scratch (recomputed each frame, zero-alloc), and the view mask (below).
 
-## Palette-driven band colors
+## Pattern-level view support
 
-The four elevation bands sample the **project palette swatch**
-(`lx.engine.palette.swatch.colors`), rebuilt only when the sampled colors or
-Hue actually change (Satori's cache idiom):
+The renderer writes fixed Apotheneum geometry into the full-model `colors`
+buffer, so pattern-level views (the device View selector) were silently
+ignored — channel-level views worked only because the mixer clips the whole
+channel when blending. v3 adds `applyViewMask()`: when `this.model` (set by
+the engine to the device's view before `run()`) is a restricted model, every
+out-of-view point is cleared to **transparent** at the end of each frame, so
+lower layers show through exactly as with a view-aware pattern. The boolean
+mask is rebuilt only when the view model instance changes (LX view models
+clone points but preserve master-buffer indices).
 
-- **≥ 4 swatch colors** → bands water/forest/rock/snow = the first four swatch
-  colors, in order. Band 4 is whatever the palette says — "snow" is only
-  near-white if the swatch puts white fourth.
-- **1–3 colors** → four evenly spaced samples along the lerp chain of the
-  available colors, each stepped by the `SPARSE_BAND_LIFT` brightness ladder
-  (0.55/0.75/0.90/1.0) so elevation stays legible. CURATE: verify the
-  single-color-swatch case reads as distinct bands.
-- **Empty swatch** → the v1 fixed landscape constants (water-blue 225/85/35,
-  forest 130/75/48, rock 30/45/62, snow 0/10/100). CURATE: picked blind.
+## Band-count color model (Terraform-style)
 
-`Hue` now rotates the *sampled* colors (0 = pure project palette) — kept for
-live tweaking. The per-range depth haze (`FAR_BRIGHTNESS`
-0.55 → 1.0, nearest boldest) multiplies on top per frame.
+There is **no fixed water/forest/rock/snow ladder** (and no enforced green
+band). Elevation color is `Bands` (1..`MAX_BANDS` = 5) equal bands from valley
+to peak, filled the same way Terraform does (`computeBandColors`, recomputed
+each frame, zero-alloc):
 
-## Planet schemes (terrain structure only — no colors)
+- The first `min(Bands, swatch)` bands are the **project palette swatch**
+  colors in order (`lx.engine.palette.swatch.colors`), anchored at their
+  perceptual-hue positions.
+- Any remaining bands are generated by `PerceptualHue.fillCircle` — perceptually
+  even hues dropped into the largest gaps — so a short (or empty) swatch still
+  yields `Bands` legible, well-separated colors instead of a lerp mush.
+- `BndPhase` shifts the bands circularly up each range (phase 0 = base band at
+  the valley floor; the bands wrap, so band `M−1` meets band 0).
+- `Snow` (BooleanParameter) forces the highest band (`M−1`) pure white for snow
+  caps, without shifting the others.
+- `Hue` rotates the whole derived set (0 = pure project palette) — kept for live
+  tweaking and RndTrig jumps.
 
-The After Dark planet list, resolved at **cycle start** (mid-cycle changes to
-the knob apply to the next landscape; Random re-rolls a planet each cycle,
-logged). CURATE: every value below picked blind — no source records the
-original planet data; tune on hardware.
-
-| Planet | band spacing × | snowline offset (rows) | water level | rough bias | relief × | range spacing × |
-|---|---|---|---|---|---|---|
-| Mercury | 0.9 | +6 | — | +0.20 | 0.75 | 0.85 |
-| Venus | 1.1 | +8 | — | −0.15 | 0.70 | 1.10 |
-| Earth | 1.0 | 0 | 0.18 | 0 | 1.0 | 1.0 |
-| Mars | 1.0 | +1 | — | +0.05 | 1.30 | 1.0 |
-| Jupiter | 1.3 | +9 | 0.40 | −0.30 | 1.35 | 1.30 |
-| Saturn | 1.4 | +9 | 0.35 | −0.25 | 1.20 | 1.40 |
-| Uranus | 1.0 | −2 | 0.30 | −0.10 | 0.90 | 1.0 |
-| Neptune | 1.1 | −1 | 0.30 | +0.10 | 1.10 | 1.10 |
-| Pluto | 0.8 | −3 | — | +0.25 | 0.90 | 0.80 |
-| Random | re-rolled from the nine above at each cycle start | | | | | |
-
-Water level is a fraction of normalized terrain height ("—" = no water plane);
-valleys below it flatten to a sea at generation time. Snowline offset adds to
-the third band threshold (positive pushes snow away). Roughness bias adds to
-the Rough knob; relief and spacing multiply Relief and `ROW_SPACING_ROWS`.
+`Bands = 1` is monochrome (`bandColor[0]`). Bands are equal fractions of each
+range's relief, so — relief being uniform across ranges — boundaries read as
+consistent elevation contours; every range's tallest column reaches the top
+band. Solid fills AA the band edges with `Smooth`; Wire/Dots take the single
+band at the crest's normalized height (no AA — a crest sits at one elevation).
+The per-range depth haze (`FAR_BRIGHTNESS` 0.55 → 1.0, nearest boldest)
+multiplies on top per frame into `rowBand[]`.
 
 ## Audio mapping
 
-`AudioReactive`, ticked first line of `render()`, gated by the **Audio depth
-knob** (`audio.setDepth(audioDepth)`):
+`AudioReactive`, ticked first line of `render()`, gated by the **Audio knob**
+(`audio.setDepth(audioDepth)`). One tap, two couplings — the knob is literally
+"the amount by which the current drawing is made rougher and higher":
 
-- **treble** (smoothed) — added to base Rough (plus planet bias) at range spawn
-  time (`+0.6 × treble`, clamped to 1): bright/hissy passages spawn more jagged
-  ranges.
-- **level** — global brightness lift: pixels are drawn at full band brightness
-  and displayed at `80% + 20% × min(1, 1.25 × level)`. Gentle glow with the
-  music, never clips.
+- **rougher** — `level × 0.6` (`AUDIO_ROUGH_GAIN`) adds to the Rough knob at
+  each range's spawn (baked per range; with ranges chaining continuously,
+  response latency is at most one ring).
+- **higher** — range heights scale live by `1 + 0.4 × level`
+  (`AUDIO_HEIGHT_GAIN`, CURATE: at max Relief plus full audio, peaks can clip
+  the canvas top).
 
-(The v1 bass-hit spawn gate was removed in the series RndTrig/Sync cleanup.)
+**Silence behavior**: `Audio` defaults to 0 = pure screensaver. At 0 (or in
+true silence) ranges use the Rough knob unmodified and heights are exactly
+`Relief`. The v2 brightness-lift and treble couplings were removed with the
+Energy machinery.
 
-**Depth knob / silence behavior**: `Audio` defaults to 0 = pure screensaver.
-At depth 0 (or with all taps at 0 in true silence), spawns run purely on the
-idle timer, ranges use the Rough knob + planet bias unmodified,
-and the field sits at a steady 80% brightness. The full accumulate–fill–fade
-cycle runs identically without audio. Raising the knob continuously restores
-the two mappings above. Nothing in the pattern re-gates audio locally — the
-knob is the single master gate.
+## Tempo mapping (SpdDiv)
 
-## Tempo mapping
+v3 replaces the Energy/idle-timer/retime machinery with one hard transport
+lock. `SpdDiv` is a pattern-local division ladder (1/16, 1/8, 1/4, 1/2, 1, 2,
+4, 8, 16, 32 — `Tempo.Division` itself tops out at 16 bars, hence the local
+enum) selecting the period over which **a full turn of drawing about Y**
+happens: one complete ring (one range) per period, so the head sweeps one
+full cube side (90°) each quarter-period.
 
-No tempo gating — all timing free-runs (Sync/TempoDiv/Meta convention retired
-2026-07-08): spawns fire as soon as the idle interval elapses and reveal wipes
-run at the live Energy-set duration.
+The draw head's position is a *pure function* of the transport —
+`ringPhase = beatPosition / (SpdDiv beats)`, head column =
+`frac(ringPhase) × width` — so **at RotY 0 the cube corners are crossed
+exactly on the SpdDiv grid** (one corner per quarter-period), no matter when
+drawing started (pattern init or a mid-bar wipe): output may begin mid-side,
+but the head reaches the next corner precisely on the next quarter-period
+boundary and stays locked forever. Reveal *completion* is tracked as
+accumulated phase (`progress`), guarded per-frame so a transport restart or
+SpdDiv change can't instantly complete or rewind a reveal; on such a jump the
+head simply teleports to its new grid-true position (reads as a cut).
+Default SpdDiv = 1 bar → one range per bar (~2 s at 120 BPM).
 
-## Energy mapping
-
-| Quantity | Ambient (e=0) | Peak (e=1) | Curve (lin/exp) |
-|---|---|---|---|
-| Reveal wipe duration (full ring) | 8 s | 5 s | lin |
-| Idle gap between ranges | 14 s | 2.5 s | exp (÷ Spawn param) |
-
-Sustained motion respects the ≥5 s full-traversal cap even at e=1 (see
-compliance section).
+**2026-07-12 (Jeff's feedback): the effective draw speed was quadrupled** —
+a full ring now takes one SpdDiv period instead of four (`ringPhase` divisor
+dropped from `4 × beats` to `beats`). Every SpdDiv label keeps its name but
+draws 4× faster; the default drops from one range per 4 bars (~8 s) to one
+range per bar (~2 s).
 
 ## Parameters
 
-UI order: triggers, Energy, pattern parameters, camera parameters,
-Planet/Style, Audio. Existing keys/labels are never renamed (saved `.lxp`
-files reference them); v2 added seven new keys.
+UI order: triggers (RndTrig last of them), SpdDiv, pattern parameters, camera
+parameters, Style, Smooth, Audio. v3 removed `energy`, `spawnRate`, `glint`, `planet`,
+and `tempoDiv` (Jeff's feedback: reliability over adaptivity), added `spdDiv`,
+and converted `style` from an enum to a continuous mix (same key; old
+projects' 0/1 values land on the matching pure style).
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
-| `wipe` | Wipe | TriggerParameter | — | — | fade both fields to black over 2 s, restart |
-| `newRidge` | NewRidge | TriggerParameter | — | — | reveal the next range now (idle fields only; full field fades instead) |
+| `wipe` | Wipe | TriggerParameter | — | — | one-beat fade to black; drawing restarts immediately (manual only, never in the RndTrig pool) |
+| `newRidge` | NewRidge | TriggerParameter | — | — | finish the current range instantly, start the next at the head |
 | `invert` | Invert | TriggerParameter | — | — | toggle cave mode (whole render flips vertically) |
-| `glint` | Glint | TriggerParameter | — | — | brightness swell to 100% settling back over 2 s |
-| `energy` | Energy | CompoundParameter | 0.35 | 0..1 | master energy (ambient ↔ 160 BPM regime) |
-| `roughness` | Rough | CompoundParameter | 0.5 | 0..1 | base jaggedness of new ranges (planet bias + treble add) |
-| `relief` | Relief | CompoundParameter | 0.55 | 0.2..0.75 | range peak height as fraction of surface height (live) |
-| `bandOffset` | Bands | CompoundParameter | 0 | −1..1 | shifts all band thresholds ±4 rows (+ raises snowline) |
-| `hueShift` | Hue | CompoundParameter | 0 | 0..360 | rotates the palette-sampled band hues (0 = pure palette) |
-| `spawnRate` | Spawn | CompoundParameter | 1 | 0.25..4 | multiplier on range spawn rate |
+| `rndTrig` | RndTrig | TriggerParameter | — | — | randomly fire a trigger or jump a parameter |
+| `spdDiv` | SpdDiv | EnumParameter | 1 | 1/16..32 | tempo division per full turn of drawing; one cube corner crossed each quarter-period (on this grid) |
+| `roughness` | Rough | CompoundParameter | 0.5 | 0..1 | base jaggedness of new ranges (audio adds) |
+| `relief` | Relief | CompoundParameter | 0.55 | 0.2..0.75 | range peak height as fraction of surface height (live; audio adds) |
+| `bands` | Bands | DiscreteParameter | 4 | 1..5 | number of equal elevation color bands valley→peak (1 = monochrome) |
+| `bandPhase` | BndPhase | CompoundParameter | 0 | 0..1 | circular phase shift of the color bands up each range |
+| `snowCap` | Snow | BooleanParameter | off | on/off | force the highest band pure white (snow caps) |
+| `hueShift` | Hue | CompoundParameter | 0 | 0..360 | rotates the palette-derived band hues (0 = pure palette) |
 | `rotX` | RotX | CompoundParameter | 0 | −45..45° | terrain ring tilt about the X axis (live) |
 | `rotY` | RotY | CompoundParameter | 0 | 0..360° | terrain orbit about the vertical axis (live, seamless) |
 | `rotZ` | RotZ | CompoundParameter | 0 | −45..45° | terrain ring tilt about the Z axis (live) |
-| `zoom` | Zoom | CompoundParameter | 1 | 0.5..2.5 | scales heights + range spacing (live) |
+| `zoom` | Zoom | CompoundParameter | 1 | 0..2.5 | scales heights + range spacing (live); 0 collapses all ridges to the top horizon |
 | `persp` | Persp | CompoundParameter | 0.35 | 0..1 | far-range compression toward the horizon (live) |
-| `planet` | Planet | EnumParameter | Earth | 10 planets | terrain scheme; applies at next cycle |
-| `style` | Style | EnumParameter | Solid | Solid/Wire | banded fills vs After Dark Frame wireframe |
-| `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth (0 = pure screensaver) |
+| `style` | Style | CompoundParameter | 0 | 0..2 | style ladder: solid fills ↔ Frame wireframe ↔ glowing topo dots (max-blend, saturation-preserving) |
+| `smooth` | Smooth | CompoundParameter | 1.0 | 0..1 | subpixel crests + antialiasing of forms: 0 = hard pixel-snapped, 1 = smooth (see below) |
+| `audio` | Audio | CompoundParameter | 0 | 0..1 | amount audio makes the drawing rougher + taller (0 = pure screensaver) |
 
-Rough/Bands/Hue changes apply live (banding and colors are re-evaluated every
-frame in v2); roughness and the planet scheme are baked per range at its spawn.
+Rough/Bands/BndPhase/Snow/Hue changes apply live (banding and colors
+re-evaluate every frame); roughness is baked per range at its spawn.
 CURATE: `persp` default 0.35 (mild perspective, closer to the After Dark look
 than v1's flat 0) — pull back to 0 if curation prefers the original flat layout.
 
+### Smooth (subpixel crests + antialiasing)
+
+`Smooth` (default 1.0, the series-standard knob) dials the whole render from
+hard pixel-snapped edges (0) to soft subpixel forms (1). Crest heights are
+already fractional every frame; Smooth controls whether that fraction is
+rounded away or feathered into the neighboring pixel, so it is simultaneously
+**position blending** (vertical crest motion reads smooth as the head sweeps
+and audio lifts) and **antialiasing of forms**, applied per style:
+
+- **Solid** — the hard filled silhouette is unchanged; when the true crest
+  edge sits above the rounded top row, the pixel just above is brightened by
+  the uncovered fraction × Smooth (via `setMax`, so it only ever lightens and
+  a farther range's fringe never darkens a nearer range drawn earlier). The
+  feather shows exactly where a crest meets the sky — the most visible edge.
+- **Wire** — the crest ring polylines and radial connectors draw with
+  `SurfaceCanvas.lineWu(..., smoothness)` (Xiaolin Wu) instead of integer
+  `lineMax`. At Smooth 1 the fractional crests are soft AA strokes; at Smooth
+  0 the Wu coverage hardens back to aliased full-brightness pixels, matching
+  the old look.
+- **Dots** — the dot core is split across the two straddling rows by raw Wu
+  coverage (`covLo = 1 − frac`, `covHi = frac`) **regardless of Smooth**, so
+  the dot always glides continuously between rows as the ridge moves (RotX/RotZ,
+  the sweep) rather than snapping to the pixel grid. Smooth drives only the
+  glow: the `DOT_HALO` cross is scaled by `DOT_HALO × Smooth`, so at Smooth 0
+  there is **no** glare/bleed into neighboring pixels (a crisp interpolated
+  point) and at Smooth 1 the full halo bloom. This decouples position
+  interpolation (always on) from glow (variable) — the 2026-07-13 fix. The
+  halo tracks the brighter core row.
+
+CURATE: sweep Smooth 0→1 on hardware in each style — confirm Dots at 0 is a
+clean interpolated point with no neighbor glare while still gliding under
+RotX/RotZ, Solid/Wire at 0 reproduce the crisp look, and 1 removes the
+per-frame crest shimmer without smearing the bands.
+
 ## Triggers
 
-Four triggers, small → large:
+Three non-RndTrig triggers:
 
-- `glint` (small) — the whole field's display lift swells from the 80%
-  baseline to 100% and settles back linearly over 2 s. No spatial motion;
-  reads as moonlight glinting off the ranges. CURATE: verify a 80→100%
-  whole-field swell is visible but subtle on hardware.
-- `newRidge` (medium) — an idle surface reveals its next range immediately
-  (skipping the idle timer); the range then takes its normal 5–8 s wipe.
-  Ignored while that surface is revealing or fading (logged); on a full field
-  it starts the restart fade instead.
+- `newRidge` (medium) — the current range completes instantly (its remaining
+  arc pops in) and the next begins at the draw head. Reads as a cut.
 - `invert` (large) — instant whole-render vertical flip into/out of cave mode
   (mountains become stalactites hanging from the top). Event-like state change;
   the resulting image persists indefinitely.
-- `wipe` (large) — both surfaces fade to black over 2 s, then the accumulation
-  restarts from the first (farthest) range. Reads immediately, resolves in 2 s.
+- `wipe` (large, **manual only** — deliberately excluded from the RndTrig
+  pool, and never fired by the pattern itself) — the scene is snapshotted and
+  fades to black over **exactly one beat** (measured at trigger time) while
+  fresh drawing restarts immediately underneath, composited with per-channel
+  max so the fade never darkens the new terrain.
+
+(v3 removed `glint`; the brightness-lift machinery it rode on went with the
+Energy system.)
+
+## Jump candidates
+
+Rows mirror the `bag.jumpable(...)` lines in the constructor 1:1. Status is
+updated during curation. NewRidge and Invert are also registered in the bag;
+Wipe is not (manual only).
+
+| Param | Jump range | Status | Notes |
+|---|---|---|---|
+| `roughness` | [0.2, 0.9] | candidate | extremes excluded: 0 too flat, 1 + audio saturates |
+| `bands` | [1, 5] (full) | candidate | band-count jump: instant recolor across the whole terrain |
+| `bandPhase` | [0, 1] (full) | candidate | circular band-phase jump: shifts the color contours up each range |
+| `hueShift` | [0, 360] (full) | candidate | any rotation is safe |
+| `rotY` | [0, 360] (full) | candidate | orbit jump: instant new vantage, seamless at any value |
+| `zoom` | [0.8, 1.6] | candidate | extremes excluded: <0.8 shrinks scene, >1.6 crops peaks |
+
+Status values: `candidate` (initial) / `confirmed` / `dropped` / `re-ranged to [a,b]`.
 
 ## Simulation-principles compliance
 
-- **Reveal wipe (sustained motion)** — 200 cube columns per full traversal.
-  Ambient (e=0.35 → ~7 s; e=0 → 8 s): ≥ 25 col/s. Peak (e=1): 200 col / 5 s =
-  40 col/s → **5.0 s full traversal, exactly at the ≥5 s cap**. The cylinder
-  wipes its ring in the same 5–8 s, slower still. `REVEAL_SECONDS_PEAK` is a
-  named constant; nothing rescales the wipe, so the cap holds at every energy.
+- **Draw head (sustained motion)** — traversal time is operator-selected:
+  one SpdDiv period per full ring (quadrupled 2026-07-12). The default
+  (1 bar/ring ≈ 2 s at 120 BPM) sits **below** the ≥ 5 s full-traversal cap;
+  Jeff asked for the faster sweep explicitly, so the default now trades the
+  cap for liveliness, and any SpdDiv ≤ 2 bars is below it. **Fast SpdDiv
+  settings still exist for manual performance moments; the operator owns the
+  cap.** CURATE: pick a comfortable default SpdDiv on hardware — bump to
+  `2` (≈ 4 s) or `4` if 1 bar reads as too busy; consider whether 1/16 at
+  high BPM ever reads as strobing.
 - **Camera parameters are static by default** — RotX/RotY/RotZ/Zoom/Persp
-  default to a motionless scene identical in cadence to v1. They move only
-  when the operator (or a modulator) moves them; a *continuously modulated*
-  RotY should keep one full orbit ≥ 5 s (the operator's domain — same
-  convention as Lorre's rotation cap).
-- **Restart fade (event-like)** — 2 s from full field to black, auto-triggered
-  roughly once per cycle (~3 min ambient: 8 ranges × (reveal + idle)). 2 s ≥
-  1.5 s event minimum, preceded by a full idle interval of hold.
-- **Glint (event-like)** — 2 s brightness settle, ≥ 1.5 s event minimum, no
-  spatial motion.
+  default to a motionless scene. They move only when the operator (or a
+  modulator/RndTrig jump) moves them; a *continuously modulated* RotY should
+  keep one full orbit ≥ 5 s (the operator's domain — same convention as
+  Lorre's rotation cap). CURATE: confirm a RndTrig rotY/zoom jump (instant
+  re-projection of a static scene) reads as a cut, not motion.
+- **Wipe fade (event-like)** — exactly one beat; at typical musical BPMs
+  (60–174) that is 0.34–1 s, **below the 1.5 s event minimum at fast tempos**,
+  accepted deliberately: Jeff specified one beat, it is manual-only, and the
+  new drawing appearing underneath carries the moment.
+- **Recycling (sustained motion)** — the redraw of an old range moves at the
+  same head rate as all drawing; no extra motion is introduced when full.
 - **Everything else is static** — revealed ranges do not move at fixed camera;
-  the only other temporal change is the global brightness lift (80–100%, no
-  spatial motion) and the ~once-per-cycle invert/wipe triggers.
-- **Bold forms / contrast** — hard-edged elevation bands with ≥ 4-row minimum
-  band thickness, no gradients. With ≥ 4 swatch colors band contrast is the
-  curator's palette choice; the sparse-swatch brightness ladder and the
-  empty-swatch fallback keep adjacent bands separated in brightness. Depth is
-  a single brightness step per range, not a gradient. CURATE: verify the
-  dimmest combination (farthest range base band at silence ≈ 55% × 80% of a
-  palette color) still reads on hardware; raise `FAR_BRIGHTNESS` if it vanishes.
+  the only temporal changes are the head, the live audio height lift (no
+  spatial motion of its own), and the manual triggers.
+- **Bold forms / contrast** — equal elevation bands, hard-edged at Smooth 0
+  (AA'd toward the neighbor band as Smooth rises). Band contrast is the
+  curator's palette choice; a short swatch is filled out perceptually
+  (`PerceptualHue.fillCircle`) so adjacent bands stay separated in hue. Depth is
+  a single brightness step per range, not a gradient. The Style mix uses
+  lighten blending precisely to preserve this saturation. CURATE: verify the
+  dimmest combination (farthest range base band ≈ 55% of a palette color)
+  still reads on hardware; raise `FAR_BRIGHTNESS` if it vanishes.
 - CURATE: `DEPTH_ROWS = 8` with 6-row spacing ≈ v1's layering density —
   confirm distinct ranges, not stripes; Persp 0.35 compresses far rows, check
   they don't merge at LED pitch.
-- CURATE: per-frame full repaint replaces v1's incremental column commits —
-  same choreography grammar, slightly different pixel-level feel during the
-  wipe (the revealed arc is re-derived each frame). Confirm no shimmer at
-  fractional yaw offsets (crest positions round per frame).
+- CURATE: per-frame full repaint — confirm no shimmer at fractional yaw
+  offsets. Crest positions round per frame at Smooth 0; raise Smooth toward 1
+  to feather the crest fraction (see the Smooth section) if the rounding reads
+  as shimmer on hardware.
 - CURATE: Wire style line density (crest polyline + connectors every 5
   columns) — verify it reads as a generating grid, not noise, on hardware.
-- CURATE: random wipe start column per range — confirm it reads as intentional
-  variety rather than inconsistency.
+- CURATE: the reveal arc is fixed to the building (canvas space) rather than
+  carried with RotY — confirm a mid-reveal orbit reads as terrain sliding
+  under the draw window, not as a tearing artifact.
 
 ## Curation log
 
@@ -292,7 +393,10 @@ Four triggers, small → large:
 |---|---|---|
 | 2026-07-04 | Initial implementation | — |
 | 2026-07-05 | Review + upgrade session: added Audio depth knob (`audio`, default 0) gating all reactivity through `AudioReactive.setDepth`; added `sync`/`tempoDiv` — spawns/restart-fade land on grid crossings, reveal completion retimed onto the grid with a stretch-only clamp [0.7, 1.0]; added `glint` small trigger (4th non-meta); initialized per-frame timing fields at declaration; corrected stale doc claim about a local `copyLifted` helper | Series-wide audio-depth/tempo-sync conventions; bug hunt |
-| 2026-07-05 | Adversarial review fix: `crossed()` now ticks every frame regardless of Sync (`crossed(div) && frameSyncOn`) — previously, toggling Sync off then on made the first `crossed()` call compare a stale cycle count and fire a due spawn immediately, up to one full division off-grid | Grid gate must stay synchronized while dormant (matches Zot/Lorre usage) |
-| 2026-07-06 | v2 (Jeff's feedback): band colors are palette-driven (swatch first-4 / lerp-sampled / fixed fallback, Satori-style cache); renderer re-architected from baked column commits to a per-frame projected terrain ring so new live camera params work — RotX/RotZ ring tilt, RotY seamless orbit, Zoom, Persp; added Planet enum (the module's original Mercury..Pluto + Random list, recovered from the `MOUNTAIN.AD` binary) as terrain-structure schemes; added Style Solid/Wire (After Dark "Frame" grid); ranges are one coherent terrain (35% cross-range blend) with optional planet water plane; lifecycle/tempo/audio/trigger machinery unchanged, all existing parameter keys preserved | Palette-driven color + XYZ rotation + After Dark planet fidelity |
-| 2026-07-06 | Merge adaptation: applied the series RndTrig/Sync cleanup (from the parallel Lorre curation pass on main) onto v2 — removed the `sync` toggle (grid locking always on), removed the bass-hit spawn gate (`BASS_GATE_*`, `bassWaitMs`), renamed `meta` → `rndTrig` (registered after `glint`); doc sections updated to match | v2 was developed remotely from a pre-cleanup base; local main had already applied the cleanup series-wide |
-| 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path). Dropped `tempoDiv` and `rndTrig` params, the spawn/restart grid gate (`TempoLock.crossed`), the reveal-completion retime (`TempoLock.retime`, `REVEAL_RETIME_MAX`, `syncedRevealMs`) and the TriggerBag jump machinery — spawns now fire when the idle interval elapses and reveals run at the live Energy duration; `.lxp` values on `tempoDiv`/`rndTrig` are dropped on load | Jeff retired the project-wide Sync/TempoDiv + Meta pattern-control convention |
+| 2026-07-05 | Adversarial review fix: `crossed()` now ticks every frame regardless of Sync — previously, toggling Sync off then on made the first `crossed()` call compare a stale cycle count and fire a due spawn immediately, up to one full division off-grid | Grid gate must stay synchronized while dormant (matches Zot/Lorre usage) |
+| 2026-07-06 | v2 (Jeff's feedback): band colors are palette-driven (swatch first-4 / lerp-sampled / fixed fallback, Satori-style cache); renderer re-architected from baked column commits to a per-frame projected terrain ring so new live camera params work — RotX/RotZ ring tilt, RotY seamless orbit, Zoom, Persp; added Planet enum as terrain-structure schemes; added Style Solid/Wire (After Dark "Frame" grid); ranges are one coherent terrain (35% cross-range blend) with optional water plane; lifecycle/tempo/audio/trigger machinery unchanged | Palette-driven color + XYZ rotation + After Dark planet fidelity |
+| 2026-07-06 | Merge adaptation: applied the series RndTrig/Sync cleanup onto v2 — removed the `sync` toggle (grid locking always on), removed the bass-hit spawn gate, renamed `meta` → `rndTrig`; doc sections updated to match | v2 was developed remotely from a pre-cleanup base; local main had already applied the cleanup series-wide |
+| 2026-07-07 | v3 (Jeff's feedback): replaced Energy/idle/retime timing with **SpdDiv** — a transport-locked draw head sweeping one cube side per division (1/16..32, pattern-local enum), corners always on the grid; drawing is continuous, ranges chain back-to-back and a **full field recycles** its oldest row (new terrain erases old under the head) instead of auto-wiping; **Wipe is manual-only** (removed from the RndTrig pool), takes exactly one beat via a max-composited snapshot fade while drawing restarts instantly; **Style is a continuous mix** (dimmed fills under lighten-blended grid, saturation preserved); **Audio** reduced to one amount making drawing rougher (spawn) + taller (live), brightness lift removed; removed `glint`, `spawnRate` (rate is fixed at one range per ring), and `planet` (no visible effect worth a knob); added `applyViewMask()` so **pattern-level views** are respected (out-of-view points cleared to transparent); wire lines now draw with lighten blending; `SurfaceCanvas.maxFrom(other, mult)` added for the wipe overlay | Feedback round: reliable speed control, manual-only wipe, saturated style mixing, simpler audio |
+| 2026-07-07 | Style extended to a 0..2 ladder with a third **Dots** mode (Jeff's point-cloud topo reference image): a glowing dot at each topo grid intersection (range crest at every `WIRE_COL_STEP`-th column, i.e. the wire grid's ring×connector crossings), band-colored, core pixel + 0.35-halo cross, lighten-blended; wire gain now peaks at 1 and crossfades to dots over 1..2 | Feedback: dot-cloud render mode, fadeable on Style |
+| 2026-07-12 | Jeff's feedback: **quadrupled the effective draw speed** — a full ring is one SpdDiv period instead of four (`ringPhase` divisor `4 × beats` → `beats`), so every SpdDiv label draws 4× faster (default 1 bar/ring ≈ 2 s), corners now cross one per quarter-period; added the series-standard **`Smooth`** knob (default 1.0) driving subpixel crests + antialiasing per style — Solid crest-against-sky feather via `setMax`, Wire polylines/connectors switched from integer `lineMax` to `SurfaceCanvas.lineWu(…, smoothness)`, Dots split across the two straddling rows by Wu coverage; Smooth 0 reproduces the old crisp/`round` look | Feedback: faster sweep + standard Smooth AA/position-blending knob |
+| 2026-07-13 | Jeff's feedback, two changes. (1) **Dots Smooth decoupled**: the dot core now *always* subpixel-splits across the two straddling rows (removed the `sharpen(frac, Smooth)` hardening) so the ridge position interpolates continuously under RotX/RotZ/sweep instead of snapping to the pixel grid at Smooth 0; the `DOT_HALO` glow cross is now scaled by `DOT_HALO × Smooth`, so Smooth 0 = crisp point with **no** neighbor glare and Smooth 1 = full bloom (variable glow). (2) **Eliminated the enforced water/forest/rock/snow (green) band ladder**; adopted Terraform's band-count model — `Bands` (1..5) equal bands valley→peak from the swatch, perceptually filled (`PerceptualHue.fillCircle`) when short, `BndPhase` circular shift, optional `Snow` white cap; `bandOffset` replaced by `bands`, band edges AA'd in the solid fill via `BAND_AA_MAX_ROWS`; `Hue` retained as a post-rotation | Feedback: dots glow should be Smooth-variable with continuous ridge position; no forced green band |
