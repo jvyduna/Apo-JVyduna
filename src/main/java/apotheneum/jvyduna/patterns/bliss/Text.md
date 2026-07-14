@@ -45,30 +45,59 @@ A surface's exterior and interior are physically **distinct LED layers** that fa
 opposite ways (interior column *i* is co-located with exterior column *i* but
 points inward), so identical content reads **mirror-reversed** from the far side.
 
-**Guiding principle: the opposite faces of any given surface are ALWAYS reversed
-from each other**, so text is L-to-R legible from the majority of viewpoints both
-inside and outside each boundary.
+The pattern derives each LED's **emission normal** from the model (cube-face planes
++ cylinder column radials via `Apotheneum.cube/cylinder`, built once, no render-loop
+cost). World-planar text is legible only from one side of its plane (`N = up × h`);
+a layer whose emission faces away from `N` ("back-facing") shows mirror-reversed text
+to its viewers and gets **one horizontal mirror** to fix it. That single H-mirror is
+the *only* correction ever needed — a transform-algebra check shows it makes text
+read correctly for horizontal **and both** 90° vertical directions; a vertical mirror
+is never the right fix (so there is no "flip verts" control — vertical reading
+direction is chosen with the **Rotate** knob, 90 vs 270). The reflection is taken
+**about the text anchor**, not the model center, so off-center text
+(`xOffset`/`yOffset` ≠ 0.5) registers identically on both layers.
 
-- **`Auto`** (`autoProj`, on by default) — derives each LED's **emission normal**
-  from the model (cube-face planes + cylinder column radials via
-  `Apotheneum.cube/cylinder`, built once, no render-loop cost). World-planar text
-  is legible only from one side of its plane (`N = up × h`); any LED layer facing
-  away from `N` gets one corrective reflection. Consequences: front-wall exterior
-  and back-wall *interior* render unmirrored while their opposite layers mirror;
-  the cylinder splits at the tangent columns so the half facing each audience
-  reads. The text block stays in the **same bounding box** on every layer. Works
-  on exterior-only, interior-only, and both-layer views.
-- **`FlipProj`** (`flipProj`) — with Auto on, inverts the auto decision everywhere
-  (global sign swap). With Auto off, it manually mirrors the whole projection.
-- **`FlipRead`** (`flipRead`) — reflects on the **vertical** axis instead of the
-  horizontal. For 90°-rotated text (a word climbing bottom-to-top) the two axis
-  choices differ by a 180° rotation, so this picks whether the facing projection
-  reads bottom-to-top or top-to-bottom.
-- **`Flip`** (`flip`) — the original manual whole-view horizontal mirror
-  (per-face calibration); composes with the above.
+### `Orient` (Orientation column) — which layers get the fix
 
-Reflections are taken **about the text anchor**, not the model center, so
-off-center text (`xOffset`/`yOffset` ≠ 0.5) registers identically on both layers.
+A single dropdown (replaces the old Auto/FlipProj/FlipVerts booleans). Opposite faces
+of a surface always have opposite normals, so whichever layers are corrected, the two
+sides of a surface stay mutually reversed.
+
+- **`Auto`** (default) — correct every back-facing layer. Highest readership; serves
+  outside and inside audiences at once, horizontal or vertical.
+- **`Exterior`** — correct only the **outward-emitting** layers (cube/cylinder
+  exteriors); interior layers are left as literal projection (appear mirrored). These
+  outward layers carry the large majority of viewers, so this keeps most readership
+  while freeing the interior for a mirror-script effect.
+- **`Interior`** — correct only the **inward-emitting** layers; serves the inside
+  (cylinder / cube-interior) audience.
+- **`Raw`** — no correction; literal projection (back-facing layers appear mirrored).
+  For symmetric/abstract content, a deliberate mirror effect, or visually confirming
+  which side is naturally readable.
+
+### Why these modes (legibility simulation)
+
+A Monte-Carlo sim (10 m cube, 6 m cylinder; text projected surface-normal through one
+cube face → the 8 layers the normal line crosses; viewers 70% outside / 20% in-cube /
+10% in-cylinder, facing center, 90° FOV, ≥2 m, line-of-sight occluded by walls +
+cylinder, nearest surface weighted 0.6) gives weighted readership: **Auto ≈ 82%**
+(outside 94% / in-cube 40% / in-cyl 82%), **Exterior ≈ 73%**, **Interior ≈ 9%**,
+**Raw ≈ 41%**. Outward layers draw ~89% of all eyeballs (the two cube exteriors alone
+~40% each), which is why `Auto` and `Exterior` dominate and `Auto` is the default. The
+inside-cube / outside-cylinder region tops out ~40% under *any* mode — a geometry
+limit (the cylinder occludes cross-cube sightlines and the ≥2 m rule blanks LEDs near
+the walls), not something orientation can fix.
+
+## Side selection
+
+- **`OtherSides`** (`otherSides`, under **Place**) — flips the auto-detected
+  horizontal axis (X↔Z). By default the text lands on the wall-pair whose surface
+  lies in the XY plane (front/back of a cube view); turning this on writes on the
+  other pair (left/right) instead, and on a cylinder view rotates the legible band
+  90° around Y. The `Orient` correction tracks the selected axis, so far-side
+  mirroring stays correct on whichever pair is chosen. (On a single-face view the
+  off-axis range is ~zero, so `OtherSides` blanks the text — it's a
+  cube/cylinder-spanning-view tool.)
 
 **Usage note:** the world-planar layout is not per-face axis-corrected across a
 *whole-cube* view (different faces use X vs Z as their in-plane axis). Place `Text`
@@ -78,6 +107,7 @@ cylinder) for correct results — which is also where dual-layer legibility matt
 ## Parameters
 
 `text`, `scale`, `rotation`, `xOffset`/`yOffset`, `lineSpacing`/`charSpacing`,
-`hue`/`saturation`/`brightness`, plus `fontSel`, `fontFile`, `flip`, `autoProj`,
-`flipProj`, `flipRead`. UI columns: Text (+ font + file picker) · Layout · Place ·
-Proj · Color.
+`hue`/`saturation`/`brightness`, plus `fontSel`, `fontFile`, `otherSides`, `orient`.
+UI columns: Text (+ font + file picker) · Layout · Place (X/Y/OtherSides + `Orient`
+dropdown) · Color. Vertical (90°) reading direction is the `Rotate` knob (90 =
+bottom→top, 270 = top→bottom).

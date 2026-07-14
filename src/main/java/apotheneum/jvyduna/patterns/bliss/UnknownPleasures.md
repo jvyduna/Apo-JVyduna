@@ -120,10 +120,22 @@ live per frame, so no ring invalidation is needed.
 
 ## Audio mapping (live per-frame mix)
 
-The pattern owns its **own `GraphicMeter`** on `lx.engine.audio.input.mix`
-(registered via `startModulator`), so the **Decay** knob can own the band
-release time (propagated to `meter.release` each frame; the meter's parameter
-is parented to the meter and can't be registered on the pattern).
+The pattern owns its **own `GraphicMeter`** (registered via `startModulator`),
+so the **Decay** knob can own the band release time (propagated to
+`meter.release` each frame; the meter's parameter is parented to the meter and
+can't be registered on the pattern).
+
+**Meter source follows the engine mode.** The engine rebinds the *shared*
+`lx.engine.audio.meter` to whichever buffer `lx.engine.audio.mode` selects —
+`input`, `output`, or the **composition `timeline`** — and stops the others.
+A pattern-owned meter does **not** get that for free: hardcoding
+`lx.engine.audio.input.mix` reads a **stopped** buffer during composition
+(timeline) or output-mode playback, so every band decays to 0 and Audio = 1
+collapses to flat baselines *even while the global FFT is visibly pumping*.
+So `render()` rebinds our meter each frame to `AudioReactive.activeSource(lx)`
+(the mode-selected component), calling `setBuffer` only when the source
+changes. (Fixed 2026-07-12; this was the "no audio reactivity during playback"
+bug.)
 
 - **Audio depth is a live mix into every displayed line, every frame**:
   `h(x) = lerp(shape[x], fftShape[x], depth)`. 0 = pure synthesized/simplex
@@ -225,3 +237,4 @@ reseed (full scene reset).
 | 2026-07-06 | Curation rework: unclamped peaks (removed [0,1] shape clamp and `MAX_RIDGE_ROWS`; overlap via painter's fill); removed Tint/TintAmt/Energy/Sync; Spacing max 2→16; division-locked absolute positioning (TempoDiv is the speed, Spacing is zoom, ring-buffer line store replaces the pool, TempoLock dropped); new WavMode (Dup/Shift/Simplex/Helix) + CylWavs with 45° cylinder rotation; Audio reworked to live per-frame mirrored-FFT mix with pattern-owned GraphicMeter + Decay knob, Jag doubling as bin smoothing | User curation session: restore the cover's overlapping-peak look, make walls distinct, make audio dramatic and tempo the timebase |
 | 2026-07-06 | Series RndTrig ordering: `meta` → `rndTrig` (label RndTrig), moved from last to 4th, immediately after the triggers; `.lxp` values on the old `meta` path are dropped on load | Series convention: TriggerBag meta trigger sits right after the other trigger params |
 | 2026-07-08 | Curation follow-up: (1) true connected-curve rasterizer (`drawCurve` spans neighbor-midpoints per column) so ridges no longer break apart at high Amp/Jag; (2) fully functional/live shapes — profiles recomputed each frame from a salted per-line seed + current params instead of baked at birth, so Simplex/Jag/mode changes affect already-visible lines; ring now holds only pulse metadata; (3) Amp reframed to 0–2 in units of Spacing (signal normalized to [0,1]; peak = signal × Amp × Spacing), so Amp 0 = flat and Amp 2 = peaks two spacings tall in every mode | User: fix high-amplitude line breaks, make all controls live, and make amplitude a predictable spacing-relative overlap control |
+| 2026-07-12 | Audio-source fix: the pattern-owned `GraphicMeter` was hardcoded to `lx.engine.audio.input.mix`, so it went silent during composition/timeline (and output-mode) playback while the shared meter kept pumping. `render()` now rebinds it each frame to `AudioReactive.activeSource(lx)` (the `lx.engine.audio.mode`-selected component), `setBuffer` only on change; added the shared `AudioReactive.activeSource` helper | User: no audio reactivity at Audio = 1 during composition playback |

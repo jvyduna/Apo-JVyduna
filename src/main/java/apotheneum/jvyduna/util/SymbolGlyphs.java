@@ -182,7 +182,7 @@ public final class SymbolGlyphs {
       case SUN:      return sun();
       case FISH:     return fish();
       case CRESCENT: return rotate(crescent(), Math.toRadians(45));
-      case OM:       return rotate(om(), Math.toRadians(-90));
+      case OM:       return om();
       case ANKH:     return ankh();
       case STAR:     return rotate(star(), Math.toRadians(-90));
       case TREE:     return tree();
@@ -190,26 +190,29 @@ public final class SymbolGlyphs {
     }
   }
 
-  /** Latin cross <i>pommée</i>: vertical + upper crossbeam bars with a filled
-   *  disc (bulb) at each of the four arm ends. */
+  /** Greek cross <i>pommée</i>: equal vertical + horizontal bars crossing at
+   *  their shared center, with a filled disc (bulb) at each of the four arm
+   *  ends. Symmetric (not a Latin cross) so all four arms read identical. */
   private static Shape cross() {
     final double barW = 0.16;
-    final double crossY = 0.34;   // crossbeam center (upper third = Latin cross)
-    final double top = 0.10, bottom = 0.92, left = 0.14, right = 0.86;
-    final double bulb = 0.10;
-    final Area a = new Area(rect(0.5, (top + bottom) / 2, barW, bottom - top));
-    a.add(new Area(rect((left + right) / 2, crossY, right - left, barW)));
-    a.add(new Area(disc(0.5, top, bulb)));
-    a.add(new Area(disc(0.5, bottom, bulb)));
-    a.add(new Area(disc(left, crossY, bulb)));
-    a.add(new Area(disc(right, crossY, bulb)));
+    final double arm = 0.38;              // arm-end offset from center → ends at 0.12 / 0.88
+    final double lo = 0.5 - arm, hi = 0.5 + arm;
+    final double bulb = 0.15;             // ~50% larger than the old 0.10
+    final Area a = new Area(rect(0.5, 0.5, barW, hi - lo));  // vertical   bar (len 0.76)
+    a.add(new Area(rect(0.5, 0.5, hi - lo, barW)));          // horizontal bar (len 0.76)
+    a.add(new Area(disc(0.5, lo, bulb)));   // top
+    a.add(new Area(disc(0.5, hi, bulb)));   // bottom
+    a.add(new Area(disc(lo, 0.5, bulb)));   // left
+    a.add(new Area(disc(hi, 0.5, bulb)));   // right
     return a;
   }
 
-  /** Eye of providence: an almond (vesica) outline ring with a filled pupil. */
+  /** Eye of providence: a pointed almond outline ring with a filled pupil. Built
+   *  from an explicit two-Bézier lens so the left/right corners meet at sharp
+   *  points (a subtracted-circle vesica clipped its cusps to rounded stubs). */
   private static Shape eye() {
-    final Area outer = vesica(0.5, 0.5, 0.62, 0.34);
-    final Area inner = vesica(0.5, 0.5, 0.62 * 0.62, 0.34 * 0.55);
+    final Area outer = almond(0.5, 0.5, 0.44, 0.30);        // points at 0.06/0.94
+    final Area inner = almond(0.5, 0.5, 0.44 * 0.60, 0.30 * 0.52);
     final Area ring = new Area(outer);
     ring.subtract(inner);
     ring.add(new Area(disc(0.5, 0.5, 0.10))); // pupil
@@ -235,38 +238,61 @@ public final class SymbolGlyphs {
     return a;
   }
 
-  /** Ichthys: two crossing arcs, body pointing left, open crossed tail right. */
+  /** Fish: two body arcs meeting at the head (left point); a rounded paddle tail
+   *  fin on the right. The tail is a SINGLE arc that meets the body's two right
+   *  endpoints exactly and bows out past them — an open, "open-backed" fin with
+   *  no straight chord closing it (not an ichthys crossover). */
   private static Shape fish() {
-    final Path2D p = new Path2D.Double();
-    p.moveTo(0.86, 0.34);
-    p.quadTo(0.36, 0.08, 0.10, 0.50); // upper curve, tail(right) -> head(left)
-    p.moveTo(0.86, 0.66);
-    p.quadTo(0.36, 0.92, 0.10, 0.50); // lower curve
-    return stroke(p, 0.09);
-  }
-
-  /** Waxing crescent: an outer disc with an offset disc subtracted (opens
-   *  right); rotated +45° by the caller. */
-  private static Area crescent() {
-    final Area a = new Area(disc(0.44, 0.5, 0.42));
-    a.subtract(new Area(disc(0.62, 0.5, 0.40)));
+    final Path2D body = new Path2D.Double();
+    body.moveTo(0.86, 0.34);
+    body.quadTo(0.36, 0.08, 0.10, 0.50); // upper curve, tail(right) -> head(left)
+    body.moveTo(0.86, 0.66);
+    body.quadTo(0.36, 0.92, 0.10, 0.50); // lower curve
+    final Area a = new Area(stroke(body, 0.09));
+    // Rounded paddle tail: one arc from the upper endpoint, bowing rightward past
+    // the endpoints, back to the lower endpoint. No line closes the arc.
+    final Path2D tail = new Path2D.Double();
+    tail.moveTo(0.86, 0.34);
+    tail.quadTo(1.10, 0.50, 0.86, 0.66);
+    a.add(new Area(stroke(tail, 0.09)));
     return a;
   }
 
-  /** Abstract Om (ॐ): a large open curl with an upper hook, plus a crescent and
-   *  bindu dot above; rotated -90° by the caller. CURATE: the weakest glyph at
-   *  LED pitch (as with the old bitmap). */
+  /** Waxing crescent: an outer disc with an EQUAL-radius offset disc subtracted
+   *  (opens right); rotated +45° by the caller. Equal radii put the two circle
+   *  intersections symmetric about the mid-height, so both horns taper to sharp,
+   *  matching points (unequal radii gave one blunt and one sharp horn). */
+  private static Area crescent() {
+    final double r = 0.44;
+    final Area a = new Area(disc(0.42, 0.5, r));
+    a.subtract(new Area(disc(0.60, 0.5, r)));
+    return a;
+  }
+
+  /** Om (ॐ): a bold Devanagari-style body (two right-bulging bumps — the "3"
+   *  form most viewers read as Om), a flag curling off the top-right, and a
+   *  chandra (up-opening crescent) with a bindu dot floating above. Authored
+   *  upright from explicit Béziers so it reads at LED pitch; no caller rotation. */
   private static Shape om() {
-    // Lower loop: a near-full open circle (opening upper-right).
-    final Area a = new Area(stroke(arc(0.42, 0.60, 0.60, 0.60, -30, 300), 0.10));
-    // Upper hook curling off the top-right of the loop.
-    final Path2D hook = new Path2D.Double();
-    hook.moveTo(0.66, 0.34);
-    hook.quadTo(0.86, 0.30, 0.80, 0.14);
-    a.add(new Area(stroke(hook, 0.09)));
-    // Crescent + bindu dot floating above.
-    a.add(new Area(stroke(arc(0.50, 0.02, 0.26, 0.16, 200, 140), 0.06)));
-    a.add(new Area(disc(0.50, 0.09, 0.05)));
+    final double sw = 0.085;
+    // One continuous body stroke: the flag tail sweeps in from the upper right,
+    // flows down into the "3"/ओ form (two right-bulging bumps sharing a waist),
+    // and ends in a short lower-left tail — the canonical Om silhouette.
+    final Path2D body = new Path2D.Double();
+    body.moveTo(0.84, 0.30);                  // flag tip (upper right)
+    body.quadTo(0.60, 0.22, 0.38, 0.34);      // flag sweeps down-left to body top
+    body.quadTo(0.66, 0.40, 0.46, 0.53);      // upper bump -> waist
+    body.quadTo(0.74, 0.58, 0.56, 0.74);      // lower bump (larger)
+    body.quadTo(0.42, 0.88, 0.24, 0.80);      // down to lower-left tail
+    final Area a = new Area(stroke(body, sw));
+
+    // Chandra: an up-opening crescent (bowl) with the bindu dot above, floating
+    // clear above the flag tip.
+    final Path2D moon = new Path2D.Double();
+    moon.moveTo(0.62, 0.14);
+    moon.quadTo(0.76, 0.22, 0.90, 0.14);      // control below endpoints -> opens up
+    a.add(new Area(stroke(moon, 0.045)));
+    a.add(new Area(disc(0.76, 0.05, 0.04)));
     return a;
   }
 
@@ -280,10 +306,14 @@ public final class SymbolGlyphs {
   }
 
   /** Star of David / hexagram: two interlocking triangles as an OUTLINE (the
-   *  woven look), rotated -90° by the caller. */
+   *  woven look), rotated -90° by the caller. The triangle corners are geometrically
+   *  rounded so every one of the six points reads as a soft, well-rounded lobe. */
   private static Shape star() {
-    final Path2D up = triangle(0.5, 0.08, 0.90, 0.72, 0.10, 0.72);
-    final Path2D down = triangle(0.5, 0.92, 0.90, 0.28, 0.10, 0.28);
+    final double round = 0.18; // corner cut distance in unit-box units
+    final Path2D up = roundedTriangle(
+      new double[] {0.5, 0.90, 0.10}, new double[] {0.08, 0.72, 0.72}, round);
+    final Path2D down = roundedTriangle(
+      new double[] {0.5, 0.90, 0.10}, new double[] {0.92, 0.28, 0.28}, round);
     final Area a = new Area(stroke(up, 0.08));
     a.add(new Area(stroke(down, 0.08)));
     return a;
@@ -318,15 +348,17 @@ public final class SymbolGlyphs {
     return new Ellipse2D.Double(cx - rx, cy - ry, 2 * rx, 2 * ry);
   }
 
-  /** Horizontal vesica (almond): intersection of two vertically-offset circles,
-   *  half-width rx, half-height ry. */
-  private static Area vesica(double cx, double cy, double rx, double ry) {
-    // Circle radius/offset chosen so the lens spans 2*rx wide, 2*ry tall.
-    final double r = (rx * rx + ry * ry) / (2 * ry);
-    final double off = r - ry;
-    final Area a = new Area(disc(cx, cy - off, r));
-    a.intersect(new Area(disc(cx, cy + off, r)));
-    return a;
+  /** Pointed almond (vesica-like lens): two quadratic arcs from the left point to
+   *  the right point, meeting at SHARP corners. Spans 2*halfW wide, 2*halfH tall;
+   *  the corner angle is 2·atan(halfH/halfW), so a thinner lens = sharper point. */
+  private static Area almond(double cx, double cy, double halfW, double halfH) {
+    final double lx = cx - halfW, rx = cx + halfW;
+    final Path2D p = new Path2D.Double();
+    p.moveTo(lx, cy);
+    p.quadTo(cx, cy - halfH, rx, cy); // top arc, left point -> right point
+    p.quadTo(cx, cy + halfH, lx, cy); // bottom arc back to the left point
+    p.closePath();
+    return new Area(p);
   }
 
   private static Path2D triangle(double x0, double y0, double x1, double y1, double x2, double y2) {
@@ -334,6 +366,31 @@ public final class SymbolGlyphs {
     p.moveTo(x0, y0);
     p.lineTo(x1, y1);
     p.lineTo(x2, y2);
+    p.closePath();
+    return p;
+  }
+
+  /** Closed polygon with each corner rounded: at every vertex the path stops
+   *  {@code r} short of the corner along both edges and sweeps through the corner
+   *  with a quadratic (the vertex as control point), giving soft rounded points. */
+  private static Path2D roundedTriangle(double[] xs, double[] ys, double r) {
+    final int n = xs.length;
+    final Path2D p = new Path2D.Double();
+    for (int i = 0; i < n; ++i) {
+      final double vx = xs[i], vy = ys[i];
+      final double ax = xs[(i + n - 1) % n], ay = ys[(i + n - 1) % n];
+      final double bx = xs[(i + 1) % n], by = ys[(i + 1) % n];
+      final double la = Math.hypot(ax - vx, ay - vy);
+      final double lb = Math.hypot(bx - vx, by - vy);
+      final double p1x = vx + (ax - vx) / la * r, p1y = vy + (ay - vy) / la * r;
+      final double p2x = vx + (bx - vx) / lb * r, p2y = vy + (by - vy) / lb * r;
+      if (i == 0) {
+        p.moveTo(p1x, p1y);
+      } else {
+        p.lineTo(p1x, p1y);
+      }
+      p.quadTo(vx, vy, p2x, p2y);
+    }
     p.closePath();
     return p;
   }

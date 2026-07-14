@@ -108,8 +108,9 @@ gains below are unverified at the new levels):
   Silence/depth-0 → exactly 1× (the `Speed` knob alone owns the base rate;
   the old bipolar ±50% mapping with its 0.5× silence floor is gone), loud
   music at full depth → up to 4×.
-- `bassHit()` raises the pulse envelope to `depth()`; the envelope decays
-  linearly over 2s. While active, each point's LUT phase is offset by
+- `bassHit()` fires the pulse at strength `depth()` on the shared `TrigDiv`
+  attack/decay envelope (smoothstep up over the first 1/8, down over the last
+  7/8 — see Tempo mapping). While active, each point's LUT phase is offset by
   `env · PULSE_DEPTH · pulseDist[i]` (precomputed normalized distance from a
   seeded center) — a radial wavefront that warps the bands outward from the
   center, then relaxes. `PULSE_DEPTH = 1.3` LUT cycles (was 0.15–0.35
@@ -127,12 +128,29 @@ gains below are unverified at the new levels):
 
 ## Tempo mapping
 
-Sustained color rotation is free-running (wall-clock `phase`). The **only**
-tempo coupling is the transition morph (2026-07-07): changing `Field` or `Bands`
-kicks off a **one-beat, decelerating (ease-out cubic) morph** rather than a
-snap. Beat length comes from `lx.engine.tempo.period.getValue()` (ms/beat,
-floored at `MIN_MORPH_MS = 250` CURATE so extreme tempi don't strobe). No
-`Sync`/`TempoDiv` params, no `TempoLock` — the morph just times a one-shot ease.
+Sustained color rotation is free-running (wall-clock `phase`). Every discrete
+**trigger** effect instead runs over a single shared duration set by **`TrigDiv`**
+(2026-07-14) — a musical division (`1/16` … `8 bar`) converted to ms at the
+**live** BPM via `trigDivMs()` (`beats × tempo.period`, bar entries honoring
+`tempo.beatsPerBar`). It is read **at trigger time** and drives that effect's
+one-shot to completion; it is **not** locked to the tempo grid (no snapping, no
+`Sync`/`TempoDiv`, no `TempoLock`) — it just sets *how long* the next ReSeed
+blend, Reverse ease, or Pulse envelope takes.
+
+- **ReSeed / Field / Bands morph** — changing `Field`/`Bands`, or firing
+  `ReSeed`, kicks off a **decelerating (ease-out cubic) morph** over `TrigDiv`
+  rather than a snap (was one beat pre-2026-07-14). Duration is captured when
+  the morph starts (`morphDurMs = max(trigDivMs, MIN_MORPH_MS)`, floored at
+  `MIN_MORPH_MS = 250` CURATE so short divisions / fast tempi don't strobe).
+- **Reverse ease** — the cycle direction eases from its current value to the
+  flipped sign over `TrigDiv` with a smoothstep, decelerating **through a
+  momentary pause** at the midpoint (was an instantaneous sign flip).
+- **Pulse envelope** — the radial pulse's strength follows a fixed
+  `TrigDiv`-long attack/decay: **smoothstep up to max over the first 1/8**
+  (`PULSE_ATTACK_FRAC = 0.125`), then **smoothstep back to 0 over the remaining
+  7/8**. Peak depth is unchanged (`PULSE_DEPTH = 1.3` LUT cycles). Manual
+  `Pulse` and bass hits share this envelope; a new fire restarts it at the
+  duration captured that frame.
 
 - **Field change:** `fieldOld` snapshots the pre-change field before rebuild;
   each frame the effective field is `lerp(fieldOld, field, e)` per pixel, so the
@@ -164,20 +182,22 @@ inline).
 
 ## Parameters
 
-UI order: triggers first, then pattern parameters, Audio last.
+UI order: triggers first, then `TrigDiv` (the shared trigger duration),
+then pattern parameters, Audio last.
 
-| Param | Label | Type | Default | Range | Meaning |
-|---|---|---|---|---|---|
-| `newField` | NewField | TriggerParameter | — | — | reseed centers/seeds, keep the current variant |
-| `reverse` | Reverse | TriggerParameter | — | — | flip the color-cycle direction |
-| `pulse` | Pulse | TriggerParameter | — | — | launch the radial phase pulse manually (full strength) |
-| `fieldMode` | Field | EnumParameter&lt;FieldMode&gt; | INTERFERENCE | 4 variants | static phase-field variant |
-| `speed` | Speed | CompoundParameter (%) | 1 (100%) | 0..2 | cycle rate: 0% pauses, 100% = 8s/cycle, 200% = 4s |
-| `width` | Width | CompoundParameter | 5 | 1..6 | band width: higher = wider bands, fewer repeats (`cycles = 7 − width`) |
-| `posterize` | Bands | CompoundDiscreteParameter | 6 | 2..16 | quantize into N bold bands; ≤ palette count → first N palette colors exactly, > count → all palette colors + interpolated fillers |
-| `rnbwSm` | RnbwSm | CompoundParameter | 0 | 0..1 | rainbow band-edge smoothing: smoothstep along the LUT (hue path) between band colors; 0 = hard edges (the old `smooth`) |
-| `smooth` | Smooth | CompoundParameter | 0 | 0..1 | soften motion/transitions: temporal color low-pass (τ ≤ 300 ms) + linear-RGB (low hue-shift) edge anti-alias; 0 = as-is |
-| `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth: 0 = pure screensaver, 1 = full |
+| Param       | Label   | Type | Default | Range | Meaning |
+|-------------|---------|---|---|---|---|
+| `reseed`    | ReSeed  | TriggerParameter | — | — | reseed centers/seeds, keep the current variant |
+| `reverse`   | Reverse | TriggerParameter | — | — | flip the color-cycle direction |
+| `pulse`     | Pulse   | TriggerParameter | — | — | launch the radial phase pulse manually (full strength) |
+| `trigDiv`   | TrigDiv | DiscreteParameter | `1 bar` | 1/16 … 8 bar | duration for the next ReSeed blend / Reverse ease / Pulse envelope; musical division read at the live BPM, **not** grid-locked |
+| `fieldMode` | Field   | EnumParameter&lt;FieldMode&gt; | INTERFERENCE | 4 variants | static phase-field variant |
+| `speed`     | Speed   | CompoundParameter (%) | 1 (100%) | 0..2 | cycle rate: 0% pauses, 100% = 8s/cycle, 200% = 4s |
+| `width`     | Width   | CompoundParameter | 5 | 1..6 | band width: higher = wider bands, fewer repeats (`cycles = 7 − width`) |
+| `posterize` | Bands   | CompoundDiscreteParameter | 6 | 2..16 | quantize into N bold bands; ≤ palette count → first N palette colors exactly, > count → all palette colors + interpolated fillers |
+| `rnbwSm`    | RnbwSm  | CompoundParameter | 0 | 0..1 | rainbow band-edge smoothing: smoothstep along the LUT (hue path) between band colors; 0 = hard edges (the old `smooth`) |
+| `smooth`    | Smooth  | CompoundParameter | 0 | 0..1 | soften motion/transitions: temporal color low-pass (τ ≤ 300 ms) + linear-RGB (low hue-shift) edge anti-alias; 0 = as-is |
+| `audio`     | Audio   | CompoundParameter | 0 | 0..1 | audio reactivity depth: 0 = pure screensaver, 1 = full |
 
 Renames/removals (2026-07-06): `energy`, `sync`, `tempoDiv` removed;
 `spread` → `width` (action reversed); `meta` → `rndTrig`. Removal (2026-07-08):
@@ -190,20 +210,22 @@ modulation/automation bound to the old keys must be re-bound.
 
 ## Triggers
 
-Three triggers spanning small → large:
+Three triggers spanning small → large, all timed by the shared **`TrigDiv`**
+duration (see Tempo mapping):
 
-- `reverse` (small) — band motion direction flips. Takes a few seconds to
-  read at ambient rates (bands visibly change travel direction);
-  instantaneous state change, no discontinuity in the image itself.
+- `reverse` (small) — band motion direction eases to its flip over `TrigDiv`
+  with a smoothstep, decelerating through a momentary pause at the midpoint
+  (was an instantaneous sign flip). No discontinuity in the image itself.
 - `pulse` (medium) — the radial phase pulse fires at full strength regardless
-  of Audio depth: bands warp outward from the seeded center and relax over
-  2s (≥ 1.5s event life). Same envelope as bass hits. CURATE: at the new
-  `PULSE_DEPTH = 1.3` the warp is ~4× deeper than before — verify it reads
-  as a wave, not a scene change.
-- `newField` (large) — the whole field snaps to a new random layout (new
-  centers, wavelengths, arms, folds) in the current variant. Reads instantly
-  as a scene change; the ongoing color rotation resumes over the new
-  geometry, so it settles within one perceptual beat.
+  of Audio depth on the `TrigDiv` attack/decay envelope: strength smoothsteps
+  up to max over the first 1/8 of `TrigDiv`, then back down over the remaining
+  7/8. Same envelope as bass hits. CURATE: at the new `PULSE_DEPTH = 1.3` the
+  warp is ~4× deeper than before — verify it reads as a wave, not a scene
+  change.
+- `reseed` (large) — reseeds the field to a new random layout (new centers,
+  wavelengths, arms, folds) in the current variant and **blends** into it over
+  `TrigDiv` (the same decelerating morph as a `Field` change), so the old
+  color regions flow to the new geometry rather than snapping.
 
 ## Simulation-principles compliance
 
@@ -222,10 +244,13 @@ where `cycles = 7 − width`.
   machinery went away with tempo locking.
 
 **Event motion.** The radial pulse (bass hit or manual `Pulse` trigger) is
-event-like: an instantaneous radial warp relaxing over 2.0s — above the 1.5s
-minimum visual life. At `PULSE_DEPTH = 1.3` it offsets phase by up to 1.3
-cycles (CURATE: verify it still reads as a wave through the bands, not a
-strobe — see Triggers).
+event-like: a radial warp on a `TrigDiv`-long attack/decay envelope (1/8 up,
+7/8 down). At the default `TrigDiv = 1 bar` its life is ~2s at 120 BPM — above
+the 1.5s minimum visual life — but a short `TrigDiv` (e.g. `1/16`) drops well
+under that (CURATE: the ≥1.5s event-life budget is now the user's choice via
+`TrigDiv`; the reverse ease and reseed blend share the same duration). At
+`PULSE_DEPTH = 1.3` it offsets phase by up to 1.3 cycles (CURATE: verify it
+still reads as a wave through the bands, not a strobe — see Triggers).
 
 **Bold forms.** The posterize default of 6 bands over 2 cycles (`width = 5`)
 gives ≈17 columns per band on the cube ring (200 / 12) — large,
@@ -254,4 +279,5 @@ trim on the physical LEDs is still unverified.
 | 2026-07-06 | Series RndTrig ordering: `rndTrig` moved from last to 4th, immediately after the three triggers (no rename needed — already RndTrig) | Jeff 2026-07-06: TriggerBag meta trigger sits right after the other trigger params in every pattern |
 | 2026-07-06 | Series RndTrig ordering: `rndTrig` moved from last to 4th, immediately after the three triggers (already named RndTrig) | Series convention: TriggerBag meta trigger sits right after the other trigger params |
 | 2026-07-07 | Revision pass (R1–R4): (R1) old `smooth`/"Smooth" → `rnbwSm`/"RnbwSm" (rainbow/hue-path band-edge smoothstep, behavior unchanged); (R2) new `smooth`/"Smooth" (default 0) softens motion/transitions via a per-pixel temporal color low-pass (`prevColor` EMA, `TAU_MS = 300` CURATE) plus a linear-RGB low-hue-shift edge anti-alias; (R3) `Field`/`Bands` changes now **morph over one beat** with an ease-out-cubic (decelerating) curve — `fieldOld` snapshot lerps per pixel, band count eases, beat length from `tempo.period` floored at `MIN_MORPH_MS = 250` CURATE, color-count mismatch handled as in-place nucleation along field iso-lines; (R4) band→LUT-position table makes bands land on **exact palette colors** (`Bands ≤ n` → first N palette colors; `Bands > n` → all palette colors anchored + interpolated fillers), fixing the bug where e.g. `Bands = 2` at max `Width` showed palette midtones instead of `palette[0]`/`palette[1]`. CURATE: `TAU_MS`, `MIN_MORPH_MS`, the ease-out exponent, and the bands-morph settle-pop (ship option 1) unverified on sculpture; R4 changes the shipped default look at `Bands = 6` (now exact palette anchors) | Jeff's revision notes: free "Smooth" for a motion/transition smoother, morph field/bands transitions on the beat, and make low band counts use the palette's first colors exactly |
+| 2026-07-14 | Added `TrigDiv` (DiscreteParameter, `1/16`…`8 bar`, default `1 bar`) right after the three triggers — a single shared duration for the discrete trigger effects, read at trigger time via `trigDivMs()` (musical division at the live BPM, **not** grid-locked). Rewired all three: `ReSeed` now **blends** into the new field over `TrigDiv` (was a snap — `reseed()` sets `morphPending`, reusing the Field-morph path); the Field/Bands morph duration is now `TrigDiv` (was one beat); `Reverse` **eases** the cycle direction to its flip over `TrigDiv` via smoothstep, through a momentary pause (was an instant sign flip — `cycleDirection` is now a continuous double); `Pulse`/bass hits use a fixed `TrigDiv`-long **attack/decay envelope** — smoothstep up to max over the first 1/8 (`PULSE_ATTACK_FRAC = 0.125`), down over the last 7/8 (replaces the 2s linear relax; `PULSE_RELAX_MS` removed, peak `PULSE_DEPTH = 1.3` kept). CURATE: default `1 bar` and the 1/8:7/8 attack split unverified on sculpture; short divisions can drop pulse life under the 1.5s event-life budget (now user's choice) | Jeff: give the trigger effects one shared, tempo-following (non-grid-locked) duration knob; ReSeed should crossfade, and the pulse should ramp in over 1/8 and fall over 7/8 |
 | 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path). For Satori this meant dropping `rndTrig` (the renamed Meta) and its TriggerBag/jump-candidate machinery — `sync`/`tempoDiv`/TempoLock were already removed 2026-07-06; the one-beat Field/Bands morph (plain `tempo.period` read) is unaffected | Jeff retired the project-wide Sync/TempoDiv + Meta pattern-control convention |

@@ -35,11 +35,11 @@ Nine abstracted, deliberately **non-denominational** spiritual glyphs (enum
 
 | Symbol     | Motif                              | Notes |
 |------------|------------------------------------|-------|
-| `CROSS`    | Latin **cross pommée** (bulbed arm ends) | bars + a disc at each of the 4 ends |
-| `EYE`      | Eye of providence (almond ring + pupil) | vesica outline via circle intersection |
+| `CROSS`    | Symmetric **Greek cross pommée** (equal arms, bulbed ends) | equal bars crossing at their shared center + a disc at each of the 4 ends |
+| `EYE`      | Eye of providence (pointed almond ring + pupil) | two-Bézier lens with SHARP left/right corners (`almond()`) |
 | `SUN`      | Sun / halo, disc + 8 tapered rays  | doubles as a halo behind other glyphs |
 | `FISH`     | Ichthys, two crossing stroked arcs | body left, open crossed tail right |
-| `CRESCENT` | Waxing moon, **rotated +45°**      | outer disc minus an offset disc |
+| `CRESCENT` | Waxing moon, **rotated +45°**      | outer disc minus an EQUAL-radius offset disc (symmetric sharp horns) |
 | `OM`       | ॐ — open curl + hook + crescent/bindu, **rotated −90°** | most abstract; top CURATE candidate |
 | `ANKH`     | Loop (ring) + crossbar + stem      | |
 | `STAR`     | Star of David / hexagram **outline**, **rotated −90°** | two stroked interlocking triangles |
@@ -48,7 +48,12 @@ Nine abstracted, deliberately **non-denominational** spiritual glyphs (enum
 Rotations are baked in via an `AffineTransform` about the glyph center before
 rasterization, so they stay crisp at any size. Per Jeff's 2026-07-08 feedback:
 Star −90°, Om −90°, Crescent +45°, and Cross switched from a plain Latin cross to
-the pommée form.
+the pommée form (made **symmetric** — equal-length arms crossing at their shared
+center — with the four end bulbs enlarged ~50% per Jeff's 2026-07-09 feedback).
+2026-07-10: `EYE` rebuilt from a subtracted-circle vesica (whose cusps clipped to
+rounded stubs) to an explicit two-Bézier `almond()` so the eye corners meet at
+sharp points; `CRESCENT` switched to **equal-radius** discs so both horns taper
+symmetrically to sharp points (unequal radii gave one blunt horn).
 
 ## Size
 

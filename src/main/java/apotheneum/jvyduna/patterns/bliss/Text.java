@@ -40,21 +40,23 @@ import heronarts.lx.studio.ui.device.UIDeviceControls;
  * reads left-to-right with lines stacked downward; at 90° each line becomes a
  * column reading upward with successive lines to the right (bars, left to
  * right). Horizontal axis is auto-detected (X on Front/Back faces, Z on
- * Left/Right); {@code flip} mirrors it for faces viewed from the far side.
+ * Left/Right); {@code otherSides} flips that choice to write on the opposite
+ * cube wall-pair (and rotate the cylinder projection 90° around Y).
  *
  * A surface's interior and exterior are physically distinct LED layers that face
  * opposite ways, so identical content reads mirror-reversed from the far side.
- * {@code autoProj} (on by default) derives each LED's emission normal from the
- * model ({@link Apotheneum} cube-face planes and cylinder column radials) and
- * mirrors the sampling for any LED whose layer faces away from the text plane's
- * readable side. Guiding principle: the opposite faces of any given surface are
- * ALWAYS reversed from each other, so text reads L-to-R from the majority of
- * viewpoints both inside and outside each boundary (both cube-wall layers, both
- * cylinder layers, near and far halves alike). {@code flipProj} inverts the
- * auto decision (or, with auto off, mirrors everything), and {@code flipRead}
- * swaps the corrective mirror to the vertical axis so 90°-rotated text reads
- * the intended direction. Bitmap font selectable via {@code fontSel}; an OTF/TTF
- * file can be loaded from disk ({@code fontFile}) for kerned, antialiased text.
+ * The {@code orient} mode derives each LED's emission normal from the model
+ * ({@link Apotheneum} cube-face planes and cylinder column radials) and applies
+ * one horizontal mirror to any back-facing layer so its text reads L-to-R for
+ * viewers on its emission side. That single H-mirror is the only correction ever
+ * needed — it fixes horizontal and both 90° vertical reading directions alike
+ * (vertical direction is set by {@code rotation}); a vertical mirror never helps
+ * legibility. {@code orient} = AUTO corrects every layer (default, max readership
+ * per the legibility simulation in Text.md); EXTERIOR / INTERIOR correct only the
+ * outward- or inward-emitting layers to serve one audience; RAW applies no
+ * correction (literal projection). Bitmap font selectable via {@code fontSel};
+ * an OTF/TTF file can be loaded from disk ({@code fontFile}) for kerned,
+ * antialiased text.
  */
 @LXCategory("Apotheneum/jvyduna")
 @LXComponent.Name("Text")
@@ -75,6 +77,32 @@ public class Text extends LXPattern implements UIDeviceControls<Text> {
     private Font(String label, GlyphFont font) {
       this.label = label;
       this.font = font;
+    }
+
+    @Override
+    public String toString() {
+      return this.label;
+    }
+  }
+
+  /**
+   * Projection legibility mode: which LED layers get the readability H-mirror so
+   * text reads correctly for viewers on that layer's emission side. A back-facing
+   * layer reads mirror-reversed without correction; the only correction ever
+   * needed is a horizontal mirror (verified across horizontal and both 90°
+   * reading directions — vertical direction is owned by the Rotate knob).
+   * Constant NAMES are the .lxp serialization key — keep stable.
+   */
+  public enum Orient {
+    AUTO("Auto"),          // correct every layer (max readership) — default
+    EXTERIOR("Exterior"),  // correct only outward-emitting layers (the majority audience)
+    INTERIOR("Interior"),  // correct only inward-emitting layers (inside audience)
+    RAW("Raw");            // no correction; literal projection (back-facing appear mirrored)
+
+    public final String label;
+
+    private Orient(String label) {
+      this.label = label;
     }
 
     @Override
@@ -124,9 +152,9 @@ public class Text extends LXPattern implements UIDeviceControls<Text> {
     new CompoundParameter("Bright", 100, 0, 100)
     .setDescription("Text brightness");
 
-  public final BooleanParameter flip =
-    new BooleanParameter("Flip", false)
-    .setDescription("Mirror the horizontal axis (per-face calibration)");
+  public final BooleanParameter otherSides =
+    new BooleanParameter("OtherSides", false)
+    .setDescription("Write on the other wall-pair (rotate the cylinder projection 90° around Y)");
 
   public final EnumParameter<Font> fontSel =
     new EnumParameter<Font>("Font", Font.FIVE)
@@ -136,25 +164,19 @@ public class Text extends LXPattern implements UIDeviceControls<Text> {
     new StringParameter("FontFile", "")
     .setDescription("Absolute path to an .otf/.ttf font file (used when Font = File)");
 
-  public final BooleanParameter autoProj =
-    new BooleanParameter("Auto", true)
-    .setDescription("Mirror back-facing LED layers so text reads L-to-R from every viewpoint");
-
-  public final BooleanParameter flipProj =
-    new BooleanParameter("FlipProj", false)
-    .setDescription("Swap which layer is front (Auto on) / mirror the whole projection (Auto off)");
-
-  public final BooleanParameter flipRead =
-    new BooleanParameter("FlipRead", false)
-    .setDescription("Mirror vertically instead of horizontally (reading direction for 90° text)");
+  public final EnumParameter<Orient> orient =
+    new EnumParameter<Orient>("Orient", Orient.AUTO)
+    .setDescription("Which LED layers get the readability mirror (Auto = all; Exterior/Interior = one audience; Raw = none)");
 
   /**
    * Per-global-index LED emission normals (x/z components; y is never a surface
-   * normal here), built once from the model (no render-loop alloc). Zero for
-   * points not on a known Apotheneum surface.
+   * normal here) plus an outward/inward layer tag, built once from the model
+   * (no render-loop alloc). Zero/false for points not on a known Apotheneum
+   * surface.
    */
   private float[] nx;
   private float[] nz;
+  private boolean[] outward;
   private Object cachedCube;
   private Object cachedCylinder;
 
@@ -181,12 +203,10 @@ public class Text extends LXPattern implements UIDeviceControls<Text> {
     addParameter("hue", this.hue);
     addParameter("saturation", this.saturation);
     addParameter("brightness", this.brightness);
-    addParameter("flip", this.flip);
+    addParameter("otherSides", this.otherSides);
     addParameter("fontSel", this.fontSel);
     addParameter("fontFile", this.fontFile);
-    addParameter("autoProj", this.autoProj);
-    addParameter("flipProj", this.flipProj);
-    addParameter("flipRead", this.flipRead);
+    addParameter("orient", this.orient);
   }
 
   /**
@@ -207,6 +227,7 @@ public class Text extends LXPattern implements UIDeviceControls<Text> {
     final int size = getLX().getModel().size;
     this.nx = new float[size];
     this.nz = new float[size];
+    this.outward = new boolean[size];
     if (Apotheneum.exists) {
       if (Apotheneum.cube != null) {
         float centerX = 0, centerZ = 0;
@@ -249,7 +270,7 @@ public class Text extends LXPattern implements UIDeviceControls<Text> {
       final float fnx = xNormal ? (face.model.cx >= centerX ? emit : -emit) : 0f;
       final float fnz = xNormal ? 0f : (face.model.cz >= centerZ ? emit : -emit);
       for (Apotheneum.Column column : face.columns) {
-        setNormals(column, fnx, fnz);
+        setNormals(column, fnx, fnz, emit > 0);
       }
     }
   }
@@ -264,15 +285,16 @@ public class Text extends LXPattern implements UIDeviceControls<Text> {
         dx /= len;
         dz /= len;
       }
-      setNormals(column, dx * emit, dz * emit);
+      setNormals(column, dx * emit, dz * emit, emit > 0);
     }
   }
 
-  private void setNormals(Apotheneum.Column column, float fnx, float fnz) {
+  private void setNormals(Apotheneum.Column column, float fnx, float fnz, boolean outwardLayer) {
     for (LXPoint p : column.points) {
       if (p.index < this.nx.length) {
         this.nx[p.index] = fnx;
         this.nz[p.index] = fnz;
+        this.outward[p.index] = outwardLayer;
       }
     }
   }
@@ -325,7 +347,12 @@ public class Text extends LXPattern implements UIDeviceControls<Text> {
     final int FH = otfMode ? 0 : glyphFont.height();
 
     final float vRange = this.model.yRange;
-    final boolean useX = this.model.xRange >= this.model.zRange;
+    // Horizontal world axis is auto-detected (X on front/back, Z on left/right);
+    // OtherSides flips it to write on the opposite wall-pair / rotate the cylinder
+    // projection 90° around Y. The mirror rule below is keyed on useX, so far-side
+    // legibility follows the selected axis automatically.
+    final boolean baseUseX = this.model.xRange >= this.model.zRange;
+    final boolean useX = this.otherSides.isOn() ? !baseUseX : baseUseX;
     final float hRange = useX ? this.model.xRange : this.model.zRange;
     final float hMin = useX ? this.model.xMin : this.model.zMin;
     final float vMin = this.model.yMin;
@@ -357,12 +384,10 @@ public class Text extends LXPattern implements UIDeviceControls<Text> {
     final double theta = Math.toRadians(this.rotation.getValuef());
     final float cos = (float) Math.cos(theta);
     final float sin = (float) Math.sin(theta);
-    final boolean flipOn = this.flip.isOn();
-    final boolean autoOn = this.autoProj.isOn();
-    final boolean flipProjOn = this.flipProj.isOn();
-    final boolean flipReadOn = this.flipRead.isOn();
+    final Orient mode = this.orient.getEnum();
     final float[] nxArr = this.nx;
     final float[] nzArr = this.nz;
+    final boolean[] outwardArr = this.outward;
 
     final int color = LXColor.hsb(
       this.hue.getValue(), this.saturation.getValue(), this.brightness.getValue());
@@ -370,27 +395,28 @@ public class Text extends LXPattern implements UIDeviceControls<Text> {
     for (LXPoint p : this.model.points) {
       // World-planar text with +h rightward is legible only from the side its
       // readable normal N = up x h points to (h=+X -> N=-Z; h=+Z -> N=+X, anchored
-      // empirically by exterior column order reading L-to-R from outside). Any LED
-      // layer emitting away from N shows mirrored text to its own viewers, so give
-      // it one corrective reflection, taken about the text anchor (not the model
-      // center) so the block stays co-located on both layers. Opposite layers have
-      // opposite normals, so the two faces of a surface are always mutually
-      // reversed. flipRead picks the vertical axis instead, which for rotated text
-      // flips the reading direction (the two axes differ by 180°).
-      final boolean mirrorAuto = (p.index < nzArr.length)
+      // empirically by exterior column order reading L-to-R from outside). A layer
+      // whose emission faces away from N ("back") shows mirror-reversed text to its
+      // viewers; the fix is one horizontal reflection, taken about the text anchor
+      // (not the model center) so the block stays co-located on both layers. This
+      // H-mirror is the only correction ever needed — it fixes horizontal and both
+      // 90° reading directions alike (vertical direction is set by Rotate). Orient
+      // picks WHICH back-facing layers get corrected: AUTO all, EXTERIOR only
+      // outward-emitting, INTERIOR only inward, RAW none.
+      final boolean back = (p.index < nzArr.length)
         && (useX ? (nzArr[p.index] > 0f) : (nxArr[p.index] < 0f));
-      final boolean mirrorThis = autoOn ? (mirrorAuto ^ flipProjOn) : flipProjOn;
-      final boolean hRef = flipOn ^ (mirrorThis && !flipReadOn);
-      final boolean vRef = mirrorThis && flipReadOn;
+      final boolean outwardPt = (p.index < outwardArr.length) && outwardArr[p.index];
+      final boolean correct =
+           (mode == Orient.AUTO)
+        || (mode == Orient.EXTERIOR && outwardPt)
+        || (mode == Orient.INTERIOR && !outwardPt);
+      final boolean hRef = correct && back;
       final float hWorld = useX ? p.x : p.z;
       float dh = hWorld - anchorH;
       if (hRef) {
         dh = -dh;
       }
-      float dv = p.y - anchorV;
-      if (vRef) {
-        dv = -dv;
-      }
+      final float dv = p.y - anchorV;
       // world -> local text pixels (inverse of world = anchor + R(theta)*em*(u,-vDown))
       final float u = (dh * cos + dv * sin) / em;
       final float vDown = (dh * sin - dv * cos) / em;
@@ -456,12 +482,8 @@ public class Text extends LXPattern implements UIDeviceControls<Text> {
     addColumn(uiDevice, "Place",
       newKnob(pattern.xOffset),
       newKnob(pattern.yOffset),
-      newButton(pattern.flip)).setChildSpacing(6);
-    addVerticalBreak(ui, uiDevice);
-    addColumn(uiDevice, "Proj",
-      newButton(pattern.autoProj),
-      newButton(pattern.flipProj),
-      newButton(pattern.flipRead)).setChildSpacing(6);
+      newButton(pattern.otherSides),
+      newDropMenu(pattern.orient, 76)).setChildSpacing(6);
     addVerticalBreak(ui, uiDevice);
     addColumn(uiDevice, "Color",
       newKnob(pattern.hue),

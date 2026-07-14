@@ -76,6 +76,29 @@ turn, so **total travel time can exceed `steps`** (the cube can oscillate
 indefinitely). `reset` re-rolls a fresh high-entropy scramble and jumps to the
 endpoint for the current direction.
 
+### Constrained motion (CNSTRN) — churn, don't solve
+
+`constrained` (CNSTRN) turns off solving entirely and drives **pure motion**: a
+`reset` jumps to the high-entropy scrambled state exactly as Solving does (any
+`direction`), then each division picks a fresh random quarter turn via
+`randomConstrainedMove()` instead of stepping along the solve path. The random
+walk obeys two rules: **never the bottom face** (a `D` move — axis Y, layer −1;
+other slices may still displace bottom cubies) and **no immediate axis repeat**
+(so it never rocks back and forth). Every `Move` is already a single 90° quarter
+turn, so a "double" simply reads as two consecutive quarters.
+
+`pos` is frozen (`currentAdvance = 0`) but the cube still evolves via `applyMove`
+each wrap, so motion stays coherent; because `currentMove` is always non-null the
+solved test never trips and **the beat pulse never fires**. All timing controls
+(`division`, `movingDuty`, `easing`, `phaseOffset`) behave exactly as in normal
+mode — only move *selection* changes. Enter either order: toggle-then-`reset`
+seeds the first constrained move in `reset`; `reset`-then-toggle lets the in-flight
+move finish and picks up the walk at the next division.
+
+Leaving CNSTRN does **not** restore a solvable path (`pos`/`lastScramble` no longer
+describe the walked cube). Return to solving by toggling CNSTRN off **and** firing a
+Solving `reset`, under cover of a fade — the transition is not handled visually.
+
 ## Tempo-locked motion
 
 One `Tempo.Division` cycle = one turn.
@@ -202,9 +225,23 @@ face `i` uses swatch color `i` for the first five faces.
 Per tile, `tileMask(t, square, feather)` returns brightness in [0,1] from the
 tile-local coordinate. The `gap` parameter is the **gap amount** (0 = tiles touch;
 100% = stickers vanish); the colored square half-size is `square = 1 − gap`,
-feathered by `feather = edgeFade · square` (0 = hard edge, 1 = only the exact
-center is full bright). The final color is the face color scaled by
-`maskA · maskB · pulse`.
+feathered by `feather = edgeFade · square` (0 = hard edge, 1 = only the exact center
+is full bright). The final color is the face color scaled by `maskA · maskB · pulse`.
+
+**Smooth** (the standardized antialiasing knob) is **edge antialiasing by sub-pixel
+supersampling** — deliberately *not* a feather, so it never shrinks a tile or opens
+negative space between stickers (that is `gap`/`Fade`'s job). When `smooth ≥ AA_EPS`,
+each LED casts `AA_N = 4` sub-rays on a rotated grid (`AA_OFF`, RGSS → 5 coverage
+levels on axis-aligned edges) spread across ~one LED — transverse pitch `2/GRID_WIDTH`,
+vertical `2/GRID_HEIGHT`, each `/scale` so the AA width stays ~1 LED at any scale — and
+averages the results **per RGB channel (linear)**. `smooth` scales the spread, so
+`smooth = 0` collapses to a single hard sample. Interior pixels sample identical colors
+→ unchanged full brightness; only boundary pixels blend, softening **all** projected
+boundaries (color↔color grid/face seams *and* color↔black silhouette and the wedges the
+rotating slice opens). There is no motion-blend term — the turn animation is already a
+continuous function of `cyclePhase`. Works in both projection modes; the wall's
+transverse (horizontal) axis and `vy` are perturbed, the near-normal axis is left alone.
+Cost is `AA_N`× the ray casts only while `smooth > 0`; `AA_N` is the single quality dial.
 
 ## Solved beat pulse
 
@@ -231,6 +268,7 @@ where it differs from the field name.
 | `reset` (Reset) | TriggerParameter | — | — | restart the sequence in the current Direction |
 | `direction` (Direction) | EnumParameter&lt;Direction&gt; | SOLVING | — | travel toward solved / scrambled; flippable live (reverses at next division) |
 | `steps` (Steps) | CompoundDiscreteParameter | 16 | 1..64 | turns to scramble / solve |
+| `constrained` (CNSTRN) | BooleanParameter | off | — | constrained motion: continuous D-free quarter turns on a scrambled cube; never solves, no pulse (enter via Reset, exit via fade + Reset) |
 | `division` (TempoDiv) | EnumParameter&lt;Tempo.Division&gt; | QUARTER | — | one turn per cycle (and pulse rate) |
 | `movingDuty` (MoveDuty) | CompoundParameter | 0.6 | 0.05..1 | moving vs. paused split of each cycle |
 | `phaseOffset` (Phase) | CompoundParameter | 0 | 0..1 | shift the cycle vs. the tempo grid |
@@ -242,6 +280,7 @@ where it differs from the field name.
 | `yCenter` (YCenter) | CompoundParameter | 0 | -1..1 | vertical center of the image (+ = up) |
 | `yFloor` (YFloor) | CompoundParameter | -1.0 | -1..2 | bipolar floor, default -100%; -100% = 3 rows below image, 0% = just below bottom row, 100% = just above top row, 200% = 3 rows above image |
 | `surfaces` (Surface) | EnumParameter&lt;Surface&gt; | OUTER | — | OUTER / INNER / BOTH |
+| `smooth` (Smooth) | CompoundParameter | 1.0 | 0..1 | edge antialiasing by ~1-LED sub-pixel supersampling (all boundaries); never shrinks tiles / adds negative space |
 
 UI is Chromatik's default auto-generated control panel (no custom
 `UIDeviceControls`).

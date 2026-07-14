@@ -15,7 +15,7 @@ the rain (rafters hero).
 > merge); the symbols are **true vector glyphs** (shared `SymbolGlyphs`,
 > rasterized) that **condense out of the rain as liquid** — a per-cell fill sim
 > with gravity, surface-tension spread and bottom-lip overflow, gated by a
-> `Symbols` boolean; and the moiré is a tempo-locked 2D interference shimmer
+> 3-way `Mode` enum (Rain / Rain+Glyph / Glyph); and the moiré is a tempo-locked 2D interference shimmer
 > (grating phases advanced on the 1/16 grid from the engine tempo's beat
 > position). Glyphs read correctly inside and out via the reverse-normal mirror.
 > What remains are the numeric `CURATE:` values that can only be judged on the LEDs.
@@ -103,11 +103,18 @@ of the rain**.
 
 Per surface, `RainField` carries three canvas-sized grids (all preallocated):
 `mask` (glyph coverage 0..1), `fill` (liquid depth 0..1+), and `overflow` (the
-bottom-lip cells). The lifecycle, driven by the **`Symbols`** boolean and the
-continuous **`Glyph`** selector:
+bottom-lip cells). The lifecycle is driven by the **`Mode`** enum — **Rain**
+(drops only, glyph hidden), **Rain+Glyph** (drops condense into the glyph and
+fill it), **Glyph** (the glyph shown instantly full with rain hidden) — and the
+continuous **`Glyph`** selector. In **Glyph** mode the glyph is filled to
+render-full (1.0) instantly on entry and on any structural change; a uniformly-
+full glyph is a stable fixed point under the sim (gravity caps at 1.0, lip spill
+is strictly `> 1.0`), so it simply holds. Ambient rain is retired instantly on
+entry (`RainField.clearRain`); **Release** still drains the glyph and **SheetWash**
+still refills ~50% (see below).
 
-1. **Build the mask.** When `Symbols` turns on, or `Glyph` floors to a new
-   index, or `Smooth` changes, `rebuildMask()` rasters the vector glyph via
+1. **Build the mask.** On entering glyph-active from Rain, or when `Glyph` floors
+   to a new index, or `Smooth` changes, `rebuildMask()` rasters the vector glyph via
    `SymbolGlyphs.coverage(sym, GLYPH_PX, GLYPH_PX, smooth)` and stamps it at each
    instance center (`CUBE_CENTERS = {25,75,125,175}`, `CYL_CENTERS = {20,60,99}`),
    then precomputes the lip cells (a masked cell with no masked cell directly
@@ -122,19 +129,20 @@ continuous **`Glyph`** selector:
 4. **Overflow.** Once a bottom-lip cell passes `SPILL_LEVEL`, the excess spills
    as a new liquid-colored **drip** just below the lip (rate-limited to
    `MAX_SPILL_PER_FRAME`), which runs on down the glass.
-5. **Color.** The liquid color eases from the cold droplet color toward the warm
-   **3rd swatch** (`warm`) over `TINT_SECONDS` — "slowly change their liquid color
-   to the palette 3 swatch."
-6. **Release.** When `Glyph` changes or `Symbols` turns off, `releaseLiquid()`
-   converts every filled column into a downward drip and zeroes `fill` — the held
-   liquid is "instantly released to continue to flow down," and a fresh glyph
-   starts empty.
+5. **Color.** The liquid/glyph color is chosen by **`GColor`** (1.0–5.99): a point
+   on a **cyclic RGB gradient through the 5 palette colors** (`gcolor()`, linear
+   `LXColor.lerp` per segment). 1.0 = swatch color 1, 5.5 = halfway between color 5
+   and color 1, wrapping at 6. (The old cold→warm `TINT_SECONDS` ease is gone.)
+6. **Release.** When `Glyph` changes (Carry off) or `Mode` returns to **Rain**,
+   `releaseLiquid()` converts every filled column into a downward drip and zeroes
+   `fill` — the held liquid is "instantly released to continue to flow down," and a
+   fresh glyph starts empty.
 
 `renderLiquid()` lights each glyph cell at `fill × mask` in the liquid color
 (MAX over the rain), so the symbol appears exactly as it fills. Antialiasing of
 the glyph edge is the `Smooth` knob (it dials the mask's coverage sharpness in
 `SymbolGlyphs`). CURATE: `GLYPH_PX`, instance positions/counts, `INFLOW_PER_DROP`,
-`FLOW_DOWN`/`FLOW_SIDE` (viscosity/surface-tension), `SPILL_LEVEL`, `TINT_SECONDS`.
+`FLOW_DOWN`/`FLOW_SIDE` (viscosity/surface-tension), `SPILL_LEVEL`.
 
 ### Reverse-normal legibility
 
@@ -164,8 +172,8 @@ identical inside/out would need a second buffer and was deliberately not built.
   separably (per-column fringe × per-row shimmer, precomputed into preallocated
   scratch arrays) so the inner loop is a multiply, not a trig call — zero-alloc.
 - **Sheet-wash** (`drawWash`) — the `SheetWash` trigger sends a bright horizontal
-  band sweeping down the glass over `WASH_SECONDS`, one gesture shared across both
-  surfaces (rinse on a section change).
+  band sweeping down the glass over `WASH_BEATS` beats at the live tempo (4 beats /
+  one bar at 4/4), one gesture shared across both surfaces (rinse on a section change).
 
 ## Candidate alternative layer (NOT built)
 
@@ -221,45 +229,72 @@ UI/registration order (do not deviate; keys/labels are referenced by saved .lxp)
 `glyph` (enum) → `glyph` (continuous), and `form` was **removed** — old .lxp
 projects lose those three values on load.
 
-1. Triggers (`dropBurst`, `wash`)
+1. Triggers (`dropBurst`, `wash`, `release`)
 2. `energy`
-3. Pattern params (`density`, `streak`, `bloom`, `symbols`, `glyph`, `moire`, `smooth`)
+3. Pattern params (`density`, `streak`, `bloom`, `symbols`, `glyph`, `glyRate`, `glySize`, `glyY`, `carry`, `moire`, `smooth`)
 4. `audio`
 
 | Param | Label | Type | Default | Range | Meaning |
 |---|---|---|---|---|---|
 | `dropBurst` | DropBurst | TriggerParameter | — | — | spatter a heavy-drop cluster over both surfaces |
-| `wash` | SheetWash | TriggerParameter | — | — | bright sheet of water washes down the glass |
+| `wash` | SheetWash | TriggerParameter | — | — | bright sheet washes down over 4 beats; (glyph active) fills the glyph **as the band passes over it**, conserved to ~50% of capacity (`feedWash`: deposit at the band row capped at full + settle the remainder bottom-up, no spill loss) |
+| `release` | Release | TriggerParameter | — | — | spill the liquid held in the glyph so it runs down (keeps its warm accumulated color) |
 | `energy` | Energy | CompoundParameter | 0.3 | 0..1 | droplet density + fall speed |
 | `density` | Density | CompoundParameter | 0.4 | 0..1 | how many droplets are on the glass at once |
 | `streak` | Streak | CompoundParameter | 0.5 | 0..1 | streak/trail length (canvas decay half-life) |
 | `bloom` | Bloom | CompoundParameter | 0 | 0..1 | arc envelope: cold spine → warm maj7 bloom + trail smear |
-| `symbols` | Symbols | BooleanParameter | off | on/off | condense the glyph as liquid; off releases the held liquid |
+| `mode` | Mode | EnumParameter | Rain | Rain / Rain+Glyph / Glyph | **Rain** = drops only (glyph hidden); **Rain+Glyph** = drops condense into the glyph and fill it; **Glyph** = glyph shown instantly full with rain hidden (Release drains, SheetWash refills) |
 | `glyph` | Glyph | CompoundParameter | 1 | 1..9 | which symbol condenses (continuous, floored to a glyph) |
+| `glyRate` | GlyRate | CompoundParameter | 4.0 | 1..16 | fill-per-captured-drop multiplier: 1 = original slow pool, higher = faster form |
+| `glySize` | GlySize | CompoundParameter | ≈0.53 | 0..1 | glyph size: 0 = gone, 1 = fills the cube height; scales live, keeping the fill level |
+| `glyY` | GlyY | CompoundParameter | 0.5 | 0..1 | glyph vertical center: **higher = higher on the sculpture** (0 = bottom, 1 = top); moves live, keeping the fill level |
+| `gcolor` | GColor | CompoundParameter | 1.0 | 1.0..5.99 | glyph/liquid color: point on a cyclic RGB gradient through the 5 palette colors (1.0 = color 1, 5.5 = halfway 5→1, wraps at 6) |
+| `carry` | Carry | BooleanParameter | off | on/off | Glyph change: off = release + start empty; on = keep fill %, render next glyph instantly |
 | `moire` | Moire | CompoundParameter | 0 | 0..1 | 1/16-grid moiré shimmer over the rain (peaks) |
 | `smooth` | Smooth | CompoundParameter | 1.0 | 0..1 | motion blending + antialiasing incl. the glyph mask edge |
 | `audio` | Audio | CompoundParameter | 0 | 0..1 | audio reactivity depth (0 = pure screensaver) |
 
 Timeline usage: automate **Bloom** 0→1 at 1:22, hold across 1:56–2:20 (peak
 2:03), back to 0 by 2:44; **Moire** up only on the 1:56–2:20 plateau; toggle
-**Symbols** on for the symbol moments (and step **Glyph** across its range to
-transmute one symbol into the next — each step releases the old liquid and pools
+**Mode** = Rain+Glyph for the symbol moments (and step **Glyph** across its range
+to transmute one symbol into the next — each step releases the old liquid and pools
 the new); **Energy** low in the "young" intro, up on the plateau, thin in the
 coda, near-0 in the outro.
 
-## Triggers + Symbols
+## Triggers + Mode
 
-Two triggers plus the `Symbols` gesture, small → large:
+Two triggers plus the `Mode` gesture, small → large:
 
 - `dropBurst` (small) — a spatter of ~18 fast droplets appears at once; reads in
   a fraction of a second, resolves as they fall. Wired to kicks / bass hits.
-- `symbols` (medium, a **boolean** not a trigger) — turning it on begins
+- `mode` (medium, a **3-way enum**) — **Rain** is drops only. **Rain+Glyph** begins
   condensing the selected glyph out of the rain as liquid (fills over seconds);
-  stepping `Glyph` transmutes to the next symbol (releases the old liquid, pools
-  the new); turning it off releases the held liquid to run down. Wired to the
-  symbol section (e.g. on at the 2:16 vocal cluster, glyph steps across it).
+  stepping `Glyph` transmutes to the next symbol. **Glyph** shows the glyph instantly
+  full with the rain hidden (Release drains it, SheetWash refills ~50%). Returning to
+  **Rain** releases the held liquid to run down. Wired to the symbol section (e.g.
+  Rain+Glyph at the 2:16 vocal cluster, glyph steps across it). `GlyRate` sets how
+  fast a glyph forms *per drop that lands in it*; `GlySize`/`GlyY` scale/move the
+  glyph grid **live, preserving the current fill level** (no empty-and-refill
+  fadeout). `Carry` governs a Glyph step: **off** releases the old liquid and starts
+  the new glyph empty (default); **on** keeps the accumulated fill % and renders the
+  new glyph instantly. Released/overflow water is **frozen at the glyph's color**
+  (`GColor`) as it runs down.
+- `release` (small) — a dedicated trigger that spills whatever liquid the glyph
+  currently holds (same as a Glyph change with `Carry` off, but without swapping
+  the glyph). Wired to a moment where the symbol should "let go."
 - `wash` (large) — a bright sheet sweeps the full height of both surfaces over
-  `WASH_SECONDS`; a whole-room rinse gesture. Wired to section changes.
+  `WASH_BEATS` beats at the live tempo (4 beats / one 4/4 bar); a whole-room rinse
+  gesture. Wired to section changes. While a glyph is active the sheet **fills the
+  glyph as it passes over it** (`feedWash`): in the rows the band front newly
+  crosses each frame, each masked cell takes `WASH_GLYPH_FILL` (0.5) — as much as
+  fits at the band's own row (the visible top-down splash, capped at render-full so
+  gravity then sinks it), with any capped remainder settled **bottom-up**
+  (`settleColumnBottomUp`). Nothing exceeds render-full, so the lip-spill never
+  fires for wash water: the deposit is **conserved to ~50%** of the glyph's capacity
+  for any GlySize (only a column already at full drops its remainder). This restores
+  the "fills as the sheet passes" look while keeping the round-3 retention fix — the
+  earlier instant `depositWash` had lost the progressive visual, and the original
+  `feedWash` had lost the fill to mid-sweep gravity/lip-spill.
 
 ## Simulation-principles compliance
 
@@ -293,12 +328,14 @@ Show the math (fastest sustained motion at default energy AND at energy = 1):
 - Droplet physics (`FALL_MIN/MAX`, `RAIN_*_PER_SEC`, `BURST_DROPS`)
   — all first-pass numbers, untuned on hardware.
 - Trail half-life range + `BLOOM_TRAIL_STRETCH` — the smear amount for the bloom.
-- **Liquid-symbol sim**: `GLYPH_PX` (glyph size), `CUBE_CENTERS`/`CYL_CENTERS`
+- **Liquid-symbol sim**: `GLYPH_PX` (default glyph size seeding GlySize) +
+  `GLYPH_PX_MAX` (GlySize=1 box = cube height), `CUBE_CENTERS`/`CYL_CENTERS`
   (positions/counts, kept symmetric for the reverse-normal mirror),
-  `INFLOW_PER_DROP` (fill rate), `FLOW_DOWN`/`FLOW_SIDE` (viscosity / surface
-  tension), `SPILL_LEVEL` + `MAX_SPILL_PER_FRAME` (overflow feel), `TINT_SECONDS`
-  (how fast the liquid warms to swatch-3), `MASK_MIN` (glyph membership
-  threshold). All read by eye on the LEDs — the whole sim is new this pass.
+  `INFLOW_PER_DROP` × `GlyRate` (fill-per-drop; GlyRate default 4, range 1..16),
+  `WASH_GLYPH_FILL` (wash-deposited ~50% capacity, poured at the band row + settled bottom-up, conserved),
+  `FLOW_DOWN`/`FLOW_SIDE`
+  (viscosity / surface tension), `SPILL_LEVEL` + `MAX_SPILL_PER_FRAME` (overflow
+  feel), `MASK_MIN` (glyph membership threshold). All read by eye on the LEDs.
 - Moiré tuning values: `MOIRE_FREQ_A/B/V`, `MOIRE_PHASE_H/V_PER_16`,
   `MOIRE_MAX_BRIGHT` — the interference math is built and tempo-locked; these are
   the pitch/brightness/drift numbers to eyeball on the LEDs.
@@ -308,8 +345,9 @@ Show the math (fastest sustained motion at default energy AND at energy = 1):
 - `warm = 3rd swatch color` — assumes the reserved warm accent sits at swatch
   index 2 (per the brief's Gareth `#33CCFF/#CC99FF/#FFB38A` triad); this is also
   the liquid-symbol target color.
-- Vector glyph geometry lives in `SymbolGlyphs` (proportions of the cross pommée
-  bulbs, the Star/Om/Crescent rotations, the abstract Om) — see `SymbolGlyphs.md`.
+- Vector glyph geometry lives in `SymbolGlyphs` (the symmetric Greek cross
+  pommée bulbs, the Star/Om/Crescent rotations, the abstract Om) — see
+  `SymbolGlyphs.md`.
 
 ## TODO notes
 
@@ -328,3 +366,8 @@ glyph mirrors (current path mirrors the whole surface — invisible for rain).
 | 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path) | Project-wide retirement of the Sync/TempoDiv + Meta pattern-control convention. Droplet spawning now always free-runs (the on-grid `GRID_BURST` pulse is gone); the moiré's 1/16 phase lock is kept, reading the engine tempo's beat position directly. |
 | 2026-07-08 | Added `Smooth` (house AA/interp convention); `energy` retained unchanged | Adopted the house motion-blur/antialiasing `Smooth` knob (default 1.0), registered after the pattern params and before `audio`. Wired into `paintStreak()`: `smooth` crossfades the wet trail between a pixel-snapped `lineMax` and a Wu-AA `lineWu`, and gates a fractional-row crossfade for the ADD-blended head's sub-pixel fall — 0 = steppy/pixel-snapped, 1 = smooth sub-pixel + antialiased. Reuses existing `SurfaceCanvas` primitives + `scaleRGB` coverage, zero-alloc in `step()`. `energy` deliberately kept as-is: rafters is a rigid 140 BPM song and `energy` drives BOTH droplet density AND fall speed (not speed-only), so it was not renamed or retimed. |
 | 2026-07-08 | GlassRain feedback pass (Jeff): vector glyphs + liquid condensation + reverse-normal + param changes | Rewrote `SymbolGlyphs` from 11px bitmap masks to **true vector geometry** rasterized to a cached, `Smooth`-antialiased coverage grid (headless AWT, à la `OtfTypeface`); changed Cross to a **cross pommée** and rotated Star −90°, Om −90°, Crescent +45°; dropped the bitmap `morph`/`pixel`/`rows` API (only GlassRain used it). In GlassRain: `Condense` trigger → **`Symbols`** boolean; `Glyph` enum → **continuous** `1..count` floored to an index; **removed `Form`** (+ the auto-formation envelope). Replaced the stamp-and-fade symbol with a **per-cell liquid sim** — rain absorbed into the glyph mask, gravity + lateral surface-tension leveling, bottom-lip overflow drips, color easing to the warm 3rd swatch, instant release on glyph-change / Symbols-off. Glyphs now follow the **reverse-normal rule**: `copyTo(exterior)` + `copyToMirrored(interior)` with instances placed symmetric about each surface center (interior rain mirrors too — invisible). `SurfaceCanvas` untouched; `SymbolGlyphs` is GlassRain-only so its API break is contained. |
+| 2026-07-09 | GlassRain feedback (Jeff): symmetric cross + faster/scalable glyph fill | (1) `SymbolGlyphs.cross()` → a **symmetric Greek cross** (equal 0.76-length bars crossing at the box center) with the four end bulbs enlarged 0.10→0.15 (+50%). (2) New **`GlyRate`** knob (default 4, range 1..8) scales `INFLOW_PER_DROP` at the `step()` call site — each captured drop deposits more liquid, so a glyph forms much faster *for the same drops falling into it*; the per-cell deposit clamp was lifted to `FILL_MAX + inflow` so high GlyRate isn't truncated (gravity/lip-spill drain the transient over-cap). (3) **`SheetWash` now feeds the glyph** — while `Symbols` is on it adds `WASH_GLYPH_FILL`=0.5 (~50% of capacity) to every masked cell. (4) New **`GlySize`** knob (0 = gone, 1 = cube height) re-rasters the mask at a runtime `glyphPx` via `rebuildMask(...,glyphPx)` and `GLYPH_PX_MAX`; a size change clears `fill` so it doesn't orphan onto moved cells (re-forms empty). `SymbolGlyphs.cross()` is a **shared-module** change (also used by chrome/distance). |
+| 2026-07-10 | GlassRain round-2 feedback (Jeff): liquid-physics refinements + glyph fixes | (1) **SheetWash feeds the glyph as its band sweeps** (`feedWash` + per-field `washFedRow`), not instantly. (2) **GlySize now scales live with no fadeout** and new **`GlyY`** (vertical center, registered right after `GlySize`) moves it live — both via `rebuildKeepingFill` which preserves the average fill % across the re-raster (gravity re-settles). (3) **Released/overflow water freezes its color** at spawn (per-drop `dropColor[]`, releases use the cached `lastLiquidColor`), so drips keep the glyph's accumulated warm color instead of reverting cold; the cold→warm desaturated fill ease is unchanged. (4) New **`Carry`** bool: off = release + empty on Glyph change (today); on = keep fill % and render the next glyph instantly. (5) New **`Release`** trigger spills the held water on demand. (6) **`GlyRate` max doubled** to 16. (7) `SymbolGlyphs`: **EYE** rebuilt as an explicit two-Bézier `almond()` for sharp corners (vesica cusps were clipping); **CRESCENT** switched to equal-radius discs for symmetric sharp horns. `SymbolGlyphs` (eye/crescent) is a **shared-module** change (also used by chrome/distance). |
+| 2026-07-13 | GlassRain round-3 feedback (Jeff): Mode enum, GColor, glyph redraws, wash + GlyY fixes | (1) **`Symbols` boolean → `Mode` enum** {Rain, Rain+Glyph, Glyph}. Rain = drops only; Rain+Glyph = today's condense-and-fill; **Glyph** = glyph shown **instantly full** with rain **instantly hidden** on entry (`fillGlyphFull` + `RainField.clearRain`) — a uniformly-full glyph is a stable sim fixed point; Release still drains, SheetWash still refills. Lifecycle reworked from `symbolsWereOn` to a `lastMode` transition switch; moiré + bass-burst gated to `rainVisible`. (2) New **`GColor`** knob (1.0–5.99): glyph/liquid color from a **cyclic RGB gradient through the 5 palette colors** (`gcolor()`, `updatePalette` now caches `pal[5]`); replaces the cold→warm `liquidTint`/`TINT_SECONDS` ease (removed). Rain keeps cold→warm(Bloom). (3) **SheetWash 50% fix**: the old `feedWash` (row-by-row as the band swept) lost most of its deposit to gravity + lip-spill mid-sweep. Replaced with **`depositWash`** — a conserved, per-column **bottom-up** deposit of 0.5×(masked cells), armed via `washPending`, so ~50% reliably sticks for any GlySize; band stays cosmetic. (4) **GlyY reversed** — higher = higher on the sculpture (`(1 - glyYval)`). (5) `SymbolGlyphs`: **OM** fully redrawn (continuous flag→"3"→tail Bézier body + up-opening chandra & bindu; caller `-90°` rotation dropped); **STAR** points **well-rounded** (`roundedTriangle` helper, orientation kept); **FISH** gains a **rounded-paddle open tail** (single arc past the body endpoints, no closing chord). `SymbolGlyphs` (om/star/fish) is a **shared-module** change (also used by chrome/distance). Invalid composition-lane values from the `symbols`→`mode` type change are out of scope per Jeff. |
+| 2026-07-13 | GlassRain: SheetWash 4-beat timing + progressive-yet-conserved fill | (1) The wash sweep duration is now **4 beats at the live tempo** (`WASH_BEATS`, `4 × tempo.period`) instead of a fixed 2.5 s. (2) **Fills as the sheet passes AND retains ~50%**: round-3's instant `depositWash` fixed retention but lost the desirable "glyph fills as the band passes over it" visual. Replaced with a progressive `feedWash` — in the rows the band front newly crosses, deposit `WASH_GLYPH_FILL` (0.5) per masked cell at the band's own row (capped at render-full 1.0, the top-down splash that gravity sinks) and settle any capped remainder bottom-up (`settleColumnBottomUp`). Nothing exceeds 1.0 so the wash never lip-spills → conserved ~50% for any GlySize, now delivered progressively. Re-added `RainField.washFedRow`; dropped `washPending`/`depositWash`. GlassRain-only. |
+| 2026-07-13 | GlassRain: robust Glyph-only re-entry refill | Entering Glyph-only refills the glyph, but the entry was detected only from render's per-frame `lastMode`. If two mode changes coalesce within one render frame (tight automation / scrub), render never sees the intermediate mode, so `lastMode` stays `GLYPH` and a "switch back into Glyph-only" after a Release didn't refill. Added a `mode` **listener** that flags `fillGlyphOnEnter` on any real transition INTO Glyph-only (tracked at the listener level, per `setValue`, so coalesced switches are caught); render ORs it into `enteringGlyph` and consumes it. Same-value re-applications don't set the flag, so a Release-drained glyph still stays drained under a mode lane that holds GLYPH. GlassRain-only. |

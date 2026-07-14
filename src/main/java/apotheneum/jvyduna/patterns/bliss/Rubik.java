@@ -93,6 +93,10 @@ public class Rubik extends ApotheneumPattern {
     new CompoundDiscreteParameter("Steps", 16, 1, 65)
     .setDescription("Number of turns used to scramble (and therefore to solve)");
 
+  public final BooleanParameter constrained =
+    new BooleanParameter("CNSTRN", false)
+    .setDescription("Constrained motion: continuous quarter turns on a scrambled cube that never turn the bottom face and never solve (no pulse). Enter via a Reset; exit via fade + Reset");
+
   public final EnumParameter<Tempo.Division> division =
     new EnumParameter<Tempo.Division>("TempoDiv", Tempo.Division.QUARTER)
     .setDescription("Tempo division for one turn (and the solved beat pulse)");
@@ -145,11 +149,17 @@ public class Rubik extends ApotheneumPattern {
     new EnumParameter<Surface>("Surface", Surface.OUTER)
     .setDescription("Which surfaces to render onto");
 
+  public final CompoundParameter smooth =
+    new CompoundParameter("Smooth", 1.0)
+    .setUnits(CompoundParameter.Units.PERCENT_NORMALIZED)
+    .setDescription("Edge antialiasing via sub-pixel coverage: 0 = hard, pixel-snapped edges; 1 = ~1-LED antialiased edges (all projected boundaries). Never shrinks tiles or adds negative space between stickers");
+
   public Rubik(LX lx) {
     super(lx);
     addParameter("reset", this.reset);
     addParameter("direction", this.direction);
     addParameter("steps", this.steps);
+    addParameter("constrained", this.constrained);
     addParameter("division", this.division);
     addParameter("movingDuty", this.movingDuty);
     addParameter("phaseOffset", this.phaseOffset);
@@ -161,6 +171,7 @@ public class Rubik extends ApotheneumPattern {
     addParameter("yCenter", this.yCenter);
     addParameter("yFloor", this.yFloor);
     addParameter("surfaces", this.surfaces);
+    addParameter("smooth", this.smooth);
 
     reset();
   }
@@ -300,6 +311,25 @@ public class Rubik extends ApotheneumPattern {
     }
   }
 
+  /** Last axis chosen by {@link #randomConstrainedMove()}, to avoid immediate repeats. */
+  private int lastRandAxis = -1;
+
+  /**
+   * A random quarter turn for CNSTRN mode: never the bottom face (axis Y = 1, layer
+   * -1, i.e. a D move) and never an immediate axis repeat (which would let the walk
+   * rock back and forth). The reject set never covers all options, so this terminates.
+   */
+  private Move randomConstrainedMove() {
+    int axis, layer;
+    do {
+      axis = this.random.nextInt(3);
+      layer = this.random.nextBoolean() ? 1 : -1;
+    } while (axis == this.lastRandAxis || (axis == 1 && layer == -1));
+    this.lastRandAxis = axis;
+    int sign = this.random.nextBoolean() ? 1 : -1;
+    return new Move(axis, layer, sign);
+  }
+
   /**
    * Visual-mix score of the current cube state: summed Shannon entropy of the
    * sticker-color histogram on each of the 6 visible faces. A solved cube scores
@@ -361,6 +391,15 @@ public class Rubik extends ApotheneumPattern {
    * than a fixed queue — is what lets Direction flip live mid-sequence.
    */
   private void selectMove() {
+    if (this.constrained.isOn()) {
+      // Constrained-motion mode: pure churn, never solving. Path position is frozen
+      // (currentAdvance = 0) but the cube still evolves via applyMove on each wrap, so
+      // motion stays coherent. currentMove is always non-null here, so isSolved()'s
+      // pulse never fires.
+      this.currentMove = randomConstrainedMove();
+      this.currentAdvance = 0;
+      return;
+    }
     boolean scrambling = (this.direction.getEnum() == Direction.SCRAMBLING);
     if (scrambling && this.pos < this.lastScramble.size()) {
       this.currentMove = this.lastScramble.get(this.pos);
@@ -389,8 +428,10 @@ public class Rubik extends ApotheneumPattern {
     computeBestScramble(); // fills lastScramble; leaves the cube solved (pos 0)
     this.holdDivisions = 0;
     this.currentAdvance = 0;
-    if (this.direction.getEnum() == Direction.SOLVING) {
-      // Jump straight to the scrambled endpoint, then animate toward solved.
+    this.lastRandAxis = -1;
+    if (this.constrained.isOn() || this.direction.getEnum() == Direction.SOLVING) {
+      // Jump straight to the scrambled endpoint. SOLVING then animates toward solved;
+      // CNSTRN instead churns from here (selectMove picks a constrained move).
       for (Move m : this.lastScramble) {
         applyMove(m);
       }
@@ -446,6 +487,16 @@ public class Rubik extends ApotheneumPattern {
 
   private static final double CELL = 2.0 / 3.0;   // cubie spacing in [-1,1]
   private static final double HALF = 1.0 / 3.0;   // half tile width
+
+  // Smooth = sub-pixel supersampling (edge antialiasing). AA_OFF is a rotated grid
+  // (RGSS): 4 samples giving 5 coverage levels on axis-aligned edges, offsets in
+  // fractions of one LED. Below AA_EPS we cast a single ray (hard, no cost). AA_N is
+  // the one dial for more gradations.
+  private static final double AA_EPS = 1e-3;
+  private static final int AA_N = 4;
+  private static final double[][] AA_OFF = {
+    { -0.375, -0.125 }, { 0.125, -0.375 }, { 0.375, 0.125 }, { -0.125, 0.375 }
+  };
 
   /** Rotate (x,y,z) about axis (cos c, sin s) into out. */
   private static void fRot(double[] out, double x, double y, double z, int axis, double c, double s) {
@@ -585,8 +636,11 @@ public class Rubik extends ApotheneumPattern {
     }
 
     boolean solvedNow = (this.currentMove == null) && isSolved();
+    // Pulse on the same phase-shifted cycle as the turns (cyclePhase already folds
+    // in phaseOffset), so a completed move cycle always leads straight into a pulse
+    // cycle in phase, not just when Phase = 0.
     double pulse = solvedNow
-      ? LXUtils.lerp(1.0, 0.5, this.lx.engine.tempo.getBasis(div))
+      ? LXUtils.lerp(1.0, 0.5, cyclePhase)
       : 1.0;
 
     buildRenderStickers(angle);
@@ -600,6 +654,14 @@ public class Rubik extends ApotheneumPattern {
     final double s = Math.max(this.scale.getValue(), 1e-3);
     final double yc = this.yCenter.getValue();
     final boolean beam = this.beamMode.isOn();
+
+    // Smooth = sub-pixel supersampling. Sub-ray offsets span ~one LED in the wall's two
+    // in-plane axes (transverse pitch 2/GRID_WIDTH, vertical 2/GRID_HEIGHT), each /s so
+    // the AA width stays ~1 LED at any scale. Scaled by Smooth: 0 -> single hard sample.
+    final double smoothAmt = this.smooth.getValue();
+    final boolean aa = smoothAmt >= AA_EPS;
+    final double spreadT = smoothAmt * (2.0 / Apotheneum.GRID_WIDTH) / s;
+    final double spreadV = smoothAmt * (2.0 / Apotheneum.GRID_HEIGHT) / s;
 
     // YFloor mutes LEDs whose vertical vy falls below a floor line, measured in the
     // same frame as the sticker rows: rows span [-1,-1/3] (bottom), [-1/3,1/3]
@@ -618,20 +680,48 @@ public class Rubik extends ApotheneumPattern {
             continue; // below the floor -> muted
           }
           double nz = (p.z - this.cz) / this.sxz;
+          // Horizontal screen axis is the wall's transverse axis (the one divided by s):
+          // Z on X-normal walls, X on Z-normal walls. Vertical is always vy.
+          final boolean transverseZ = Math.abs(nx) >= Math.abs(nz);
           if (beam) {
             // Orthographic: scale is a true model resize, so the LED position is
             // sampled at P/s against the unscaled sticker geometry.
-            this.colors[p.index] = projectLEDOrtho(nx / s, vy, nz / s, g, feather, pulse);
+            double px = nx / s, pz = nz / s;
+            if (!aa) {
+              this.colors[p.index] = projectLEDOrtho(px, vy, pz, g, feather, pulse);
+            } else {
+              int r = 0, gch = 0, b = 0;
+              for (int k = 0; k < AA_N; ++k) {
+                double ot = AA_OFF[k][0] * spreadT, ov = AA_OFF[k][1] * spreadV;
+                int c = transverseZ
+                  ? projectLEDOrtho(px, vy + ov, pz + ot, g, feather, pulse)
+                  : projectLEDOrtho(px + ot, vy + ov, pz, g, feather, pulse);
+                r += (c >> 16) & 0xff; gch += (c >> 8) & 0xff; b += c & 0xff;
+              }
+              this.colors[p.index] = LXColor.rgba(r / AA_N, gch / AA_N, b / AA_N, 255);
+            }
           } else {
             // Gnomonic: scale only the in-plane (transverse) horizontal axis; the
             // dominant horizontal axis is this wall's outward normal (|comp|~1).
             double dx = nx, dz = nz;
-            if (Math.abs(dx) >= Math.abs(dz)) {
+            if (transverseZ) {
               dz /= s; // X-normal wall -> Z is the horizontal transverse axis
             } else {
               dx /= s; // Z-normal wall -> X is the horizontal transverse axis
             }
-            this.colors[p.index] = projectLED(dx, vy, dz, g, feather, pulse);
+            if (!aa) {
+              this.colors[p.index] = projectLED(dx, vy, dz, g, feather, pulse);
+            } else {
+              int r = 0, gch = 0, b = 0;
+              for (int k = 0; k < AA_N; ++k) {
+                double ot = AA_OFF[k][0] * spreadT, ov = AA_OFF[k][1] * spreadV;
+                int c = transverseZ
+                  ? projectLED(dx, vy + ov, dz + ot, g, feather, pulse)
+                  : projectLED(dx + ot, vy + ov, dz, g, feather, pulse);
+                r += (c >> 16) & 0xff; gch += (c >> 8) & 0xff; b += c & 0xff;
+              }
+              this.colors[p.index] = LXColor.rgba(r / AA_N, gch / AA_N, b / AA_N, 255);
+            }
           }
         }
       }

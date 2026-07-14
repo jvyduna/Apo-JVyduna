@@ -5,12 +5,14 @@ import java.util.Random;
 
 import apotheneum.Apotheneum;
 import apotheneum.ApotheneumPattern;
+import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.TriggerBag;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
 import heronarts.lx.Tempo;
 import heronarts.lx.audio.GraphicMeter;
+import heronarts.lx.audio.LXAudioComponent;
 import heronarts.lx.color.LXColor;
 import heronarts.lx.parameter.CompoundParameter;
 import heronarts.lx.parameter.DiscreteParameter;
@@ -220,6 +222,8 @@ public class UnknownPleasures extends ApotheneumPattern {
   private float fftMax = 0;
 
   private final GraphicMeter meter;
+  /** Audio component our meter is currently bound to; tracks lx.engine.audio.mode */
+  private LXAudioComponent meterSource = null;
   private final Random random = new Random(); // reseeded per line via setSeed (no allocation)
 
   /** True = lines scroll downward (born at top); flipped by the Flip trigger */
@@ -240,7 +244,10 @@ public class UnknownPleasures extends ApotheneumPattern {
   public UnknownPleasures(LX lx) {
     super(lx);
 
-    // Our own analysis (not the shared engine meter) so Decay can own its release
+    // Our own analysis (not the shared engine meter) so Decay can own its
+    // release. Seeded on the input mix; render() rebinds it every frame to the
+    // engine's active source (input / output / composition timeline) so it
+    // hears whatever is actually playing — see AudioReactive.activeSource.
     this.meter = new GraphicMeter("UPMeter", lx.engine.audio.input.mix);
     startModulator(this.meter);
 
@@ -485,6 +492,15 @@ public class UnknownPleasures extends ApotheneumPattern {
     // Decay knob owns our meter's release (the meter's parameter is parented
     // to the meter, so it can't be registered on the pattern directly)
     this.meter.release.setValue(this.decay.getValue());
+
+    // Follow the engine's active audio source (input / output / composition
+    // timeline). Hardcoding input.mix goes silent during composition playback,
+    // when the input buffer is stopped; rebind only when the source changes.
+    final LXAudioComponent src = AudioReactive.activeSource(this.lx);
+    if (src != this.meterSource) {
+      this.meterSource = src;
+      this.meter.setBuffer(src.mix);
+    }
 
     // Continuous division-time U; integer-only folds preserve fractional phase
     // so line emergence stays exactly on-division across division changes and

@@ -2,6 +2,7 @@ package apotheneum.jvyduna.util;
 
 import heronarts.lx.LX;
 import heronarts.lx.audio.GraphicMeter;
+import heronarts.lx.audio.LXAudioComponent;
 import heronarts.lx.parameter.LXParameter;
 
 /**
@@ -175,6 +176,37 @@ public class AudioReactive {
   public AudioReactive(LX lx) {
     this.lx = lx;
     this.meter = lx.engine.audio.meter;
+  }
+
+  /**
+   * The audio component the engine is currently metering, per
+   * {@code lx.engine.audio.mode} (INPUT / OUTPUT / TIMELINE). Use its
+   * {@code .mix} buffer.
+   *
+   * <p>The shared {@code lx.engine.audio.meter} follows this automatically, so
+   * anything built on this class is already correct. But a pattern that owns
+   * its <em>own</em> {@link GraphicMeter} (e.g. for an independent Decay /
+   * release, as {@code UnknownPleasures} does) must bind to THIS rather than
+   * hardcoding {@code lx.engine.audio.input.mix} — otherwise it goes silent
+   * during composition-timeline (or output-mode) playback, when the input
+   * buffer is stopped, even while the shared meter keeps pumping. {@code mode}
+   * is a live parameter, so re-check each frame and {@code setBuffer(...)} only
+   * when the source changes:
+   *
+   * <pre>
+   *   final LXAudioComponent src = AudioReactive.activeSource(this.lx);
+   *   if (src != this.meterSource) {
+   *     this.meterSource = src;
+   *     this.meter.setBuffer(src.mix);
+   *   }
+   * </pre>
+   */
+  public static LXAudioComponent activeSource(LX lx) {
+    switch (lx.engine.audio.mode.getEnum()) {
+      case OUTPUT:   return lx.engine.audio.output;
+      case TIMELINE: return lx.engine.audio.timeline;
+      default:       return lx.engine.audio.input;
+    }
   }
 
   /**

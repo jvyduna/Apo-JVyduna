@@ -365,6 +365,37 @@ public class SurfaceCanvas {
   }
 
   /**
+   * Per-channel max-composite another canvas into this one, with the other's
+   * RGB scaled by mult (clamped to 0..1) first. Neither layer ever darkens
+   * the other, so saturated content stays saturated — used for fading a
+   * snapshot of a previous scene out underneath fresh drawing. Both canvases
+   * must have identical dimensions.
+   */
+  public void maxFrom(SurfaceCanvas other, double mult) {
+    if (other.width != this.width || other.height != this.height) {
+      throw new IllegalArgumentException(
+        "SurfaceCanvas.maxFrom dimension mismatch: " + other.width + "x" + other.height
+        + " -> " + this.width + "x" + this.height);
+    }
+    if (mult > 1) {
+      mult = 1;
+    } else if (mult < 0) {
+      mult = 0;
+    }
+    for (int i = 0; i < this.pixels.length; ++i) {
+      final int s = other.pixels[i];
+      if ((s & 0x00ffffff) == 0) {
+        continue;
+      }
+      final int d = this.pixels[i];
+      final int r = Math.max((d >> 16) & 0xff, (int) (((s >> 16) & 0xff) * mult));
+      final int g = Math.max((d >> 8) & 0xff, (int) (((s >> 8) & 0xff) * mult));
+      final int b = Math.max(d & 0xff, (int) ((s & 0xff) * mult));
+      this.pixels[i] = 0xff000000 | (r << 16) | (g << 8) | b;
+    }
+  }
+
+  /**
    * Copy the canvas onto any Apotheneum surface, column-major. Works for a full
    * Orientation (the cube ring spans all 4 faces = 200 columns; the cylinder =
    * 120 columns) as well as a single {@link Apotheneum.Cube.Face} (50 columns) —

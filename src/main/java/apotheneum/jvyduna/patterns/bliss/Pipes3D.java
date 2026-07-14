@@ -138,21 +138,14 @@ public class Pipes3D extends ApotheneumPattern {
 
   // ---- HoldBars (progress-bar mode) constants --------------------------------
 
-  /** Depth caps a completed bar spends parked (the hidden "wait") before it
+  /** Idle caps a completed bar spends parked (the "wait") before it
    *  auto-advances to the next bar via the teleport mechanism. CURATE: the
-   *  wait feel — 4 caps at CapDiv 1 is 4 beats of invisible depth growth. */
+   *  wait feel — 4 caps at CapDiv 1 is a 4-beat hold. */
   private static final int HOLD_WAIT_CAPS = 4;
 
-  /** How many recent bar rows new bars avoid, so fresh bars don't overdraw
-   *  the flat projection of a just-finished bar. CURATE. */
+  /** How many recent bar rows new bars avoid, so fresh bars don't start on
+   *  a just-finished bar's row. CURATE. */
   private static final int BAR_Y_HISTORY = 4;
-
-  /** Flip the HoldBars replicated projection's horizontal read. False maps
-   *  u = (gx - x)·cw, which mirrors on the exterior LED plane and therefore
-   *  reads LEFT-to-RIGHT for a viewer INSIDE the cube (interior faces are
-   *  pixel copies of exterior faces). CURATE: set true if the interior read
-   *  is backwards on hardware. */
-  private static final boolean HOLD_BARS_FLIP = false;
 
   // ---- Sun (world-fixed directional light for the specular stripe) ----------
 
@@ -302,7 +295,7 @@ public class Pipes3D extends ApotheneumPattern {
     .setDescription("Joint/cap ball size as a multiple of the classic cap size; 0 hides caps (PlsCap pulses them in)");
 
   public final DiscreteParameter density =
-    new DiscreteParameter("Density", 10, MIN_DENSITY, MAX_DENSITY + 1)
+    new DiscreteParameter("Density", 12, MIN_DENSITY, MAX_DENSITY + 1)
     .setDescription("Room grid cells across each axis; takes effect at the next drain");
 
   public final CompoundParameter shaded =
@@ -323,7 +316,7 @@ public class Pipes3D extends ApotheneumPattern {
 
   public final BooleanParameter holdBars =
     new BooleanParameter("HoldBars", false)
-    .setDescription("Progress-bar mode: instant clear, then bars fill left-to-right (interior view, replicated projection) and secretly park in depth between bars; reveal with Shaded/RotX/RotY");
+    .setDescription("Progress-bar mode (no clear): pipes become bar fillers at distinct heights — front/back and left/right wall pairs each get their own bars — idling briefly between bars");
 
   public final CompoundParameter rotX =
     new CompoundParameter("RotX", 0)
@@ -402,9 +395,9 @@ public class Pipes3D extends ApotheneumPattern {
   private final long[] pBirth = new long[MAX_PIPES];       // spawn order, for oldest-first culls
   private long birthCounter = 0;
 
-  // HoldBars per-pipe phase state: a bar FILLS rightward (+x), then PARKS in
-  // ±z depth runs (invisible under the replicated flat projection) for
-  // pHoldCapsLeft caps before auto-advancing to a fresh bar.
+  // HoldBars per-pipe phase state: a bar FILLS along its role axis (+x for
+  // FB pipes, +z for LR pipes), then PARKS as a pure idle for pHoldCapsLeft
+  // caps before auto-advancing to a fresh bar.
   private final boolean[] pParked = new boolean[MAX_PIPES];
   private final int[] pHoldCapsLeft = new int[MAX_PIPES];
 
@@ -439,9 +432,6 @@ public class Pipes3D extends ApotheneumPattern {
 
   /** This frame's live half-thicknesses (Thick applies to the whole model in realtime) */
   private double frameHalfPx, frameBallHalfPx;
-
-  /** This frame's HoldBars flag (read once; the projection helpers branch on it) */
-  private boolean frameHoldBars;
 
   /** This frame's shading state: Shaded mix/AA blend, specular gain, rig lights */
   private boolean frameShadingOn;
@@ -834,6 +824,14 @@ public class Pipes3D extends ApotheneumPattern {
       planBarRun(i);
       return;
     }
+    if (latticeFull()) {
+      // Never self-reset (ninth pass): at the fill limit, growth PARKS at
+      // this cap instead of auto-draining. The gated self-heal in
+      // updatePipes resumes automatically once Reverse/Drain/JumpTo frees
+      // cells — until then the lattice waits for a parameter change.
+      this.pCapBeat[i] = Double.POSITIVE_INFINITY;
+      return;
+    }
     if (!walkStep(i)) {
       return;
     }
@@ -841,28 +839,37 @@ public class Pipes3D extends ApotheneumPattern {
     final double head = (DX[d] != 0) ? this.pHeadX[i]
       : (DY[d] != 0) ? this.pHeadY[i] : this.pHeadZ[i];
     scheduleCap(i, this.lastBeats, Math.abs(this.pGoal[i] - head));
-    if (this.occupiedCount > FILL_LIMIT * this.gx * this.gy * this.gz) {
-      startDrain();
-    }
+  }
+
+  /** The never-self-reset fill gate: at/over the limit, forward growth parks */
+  private boolean latticeFull() {
+    return this.occupiedCount > FILL_LIMIT * this.gx * this.gy * this.gz;
   }
 
   // ---- HoldBars planning --------------------------------------------------------
 
   /**
-   * HoldBars phase machine, called at every cap in place of the free walk.
-   * FILLING: straight +x runs until the head reaches the right edge — under
-   * the replicated projection the bar completes left-to-right for an interior
-   * viewer, advancing in beat-planned chunks on the CapDiv grid. PARKED: ±z
-   * depth runs (invisible in the flat projection — u,v are independent of z)
-   * for HOLD_WAIT_CAPS caps, then auto-advance to a fresh bar via the
-   * teleport mechanism. NO fill-based auto-drain in this mode — completed
-   * bars must never go away (overflow/no-free-cell drains remain as safety
-   * valves).
+   * One HoldBars phase step for pipe i, shared by live planning and the
+   * JumpTo synthesizer (ninth pass). Role-aware: FB pipes (even slots) fill
+   * +x bars that read on the front/back walls; the LR pipe (odd slot) fills
+   * +z bars that read on left/right — under the TRUE corner-continuous
+   * projection each wall pair natively shows its perpendicular runner as a
+   * progress bar (opposite walls mirror the fill direction, physically
+   * consistent). A completed bar PARKS as a pure idle for HOLD_WAIT_CAPS
+   * caps (the true projection has no globally-invisible axis, so the wait
+   * is time, not secret motion), then teleport-advances to a fresh bar.
+   * Returns true when a walk happened (a fresh pGoal awaits scheduling);
+   * false when it idled, teleported, or overflowed. NO fill-based
+   * auto-drain in this mode — completed bars must never go away.
    */
-  private void planBarRun(int i) {
-    final int ax = clampi((int) Math.round(this.pHeadX[i] - 0.5), 0, this.gx - 1);
-    if (!this.pParked[i] && (ax >= this.gx - 1)) {
-      // Bar complete: begin the hidden depth wait
+  private boolean barStep(int i) {
+    final boolean lr = barRoleLR(i);
+    final int aMain = lr
+      ? clampi((int) Math.round(this.pHeadZ[i] - 0.5), 0, this.gz - 1)
+      : clampi((int) Math.round(this.pHeadX[i] - 0.5), 0, this.gx - 1);
+    final int gMain = lr ? this.gz : this.gx;
+    if (!this.pParked[i] && (aMain >= gMain - 1)) {
+      // Bar complete: begin the idle wait
       this.pParked[i] = true;
       this.pHoldCapsLeft[i] = HOLD_WAIT_CAPS;
     }
@@ -871,21 +878,36 @@ public class Pipes3D extends ApotheneumPattern {
         // Wait over: cap here and start the next bar (teleport mechanism —
         // the cap ball is hidden at CapDia 0, so the advance is silent)
         teleportPipe(i);
-        return;
+        return false;
       }
       --this.pHoldCapsLeft[i];
+      return false; // idling out the wait
     }
-    final int dir = this.pParked[i] ? pickDepthDir(i) : 1; // 1 = +x
-    if (dir < 0 || !barWalkStep(i, dir)) {
-      // Nowhere to park (single-cell depth column, fully boxed): idle until
-      // the wait elapses — cap checks keep arriving on the grid
+    return barWalkStep(i, lr ? 5 : 1); // +z for LR bars, +x for FB bars
+  }
+
+  /**
+   * HoldBars planning at a live cap: one phase step, then schedule. When the
+   * step walked, the cap targets the run's end; when it idled or was blocked
+   * (and didn't already re-plan via teleport), an idle cap keeps the phase
+   * machine ticking on the CapDiv grid.
+   */
+  private void planBarRun(int i) {
+    final double capBefore = this.pCapBeat[i];
+    if (barStep(i)) {
+      final int d = this.pDir[i];
+      final double head = (DX[d] != 0) ? this.pHeadX[i]
+        : (DY[d] != 0) ? this.pHeadY[i] : this.pHeadZ[i];
+      scheduleCap(i, this.lastBeats, Math.abs(this.pGoal[i] - head));
+    } else if (this.pCapBeat[i] == capBefore) {
+      // Idled or walk-blocked (a teleport would have re-scheduled already)
       this.pCapBeat[i] = scheduleCapBeat(this.lastBeats, 1);
-      return;
     }
-    final int d = this.pDir[i];
-    final double head = (DX[d] != 0) ? this.pHeadX[i]
-      : (DY[d] != 0) ? this.pHeadY[i] : this.pHeadZ[i];
-    scheduleCap(i, this.lastBeats, Math.abs(this.pGoal[i] - head));
+  }
+
+  /** Bar role by pipe slot: even = FB (+x, reads front/back), odd = LR (+z, reads left/right) */
+  private boolean barRoleLR(int i) {
+    return (i % 2) == 1;
   }
 
   /** walkStep with a forced direction (HoldBars); resets the override. */
@@ -897,51 +919,31 @@ public class Pipes3D extends ApotheneumPattern {
   }
 
   /**
-   * Depth direction for a parked bar: the ±z direction with the longer free
-   * run (bounce off the walls); when both are blocked, the longer in-bounds
-   * run (intersect); -1 only in a degenerate 1-cell-deep room.
+   * HoldBars seed pick for pipe i (spawn/advance — "the teleport moment").
+   * Role FB starts in the x < gx/2 half at a random z; role LR starts in
+   * the z < gz/2 half at a random x. Y comes from the pipe's height band —
+   * distinct per concurrent pipe (band k of pipeCount), so the
+   * perpendicular FB/LR runners can never collide in the lattice — and
+   * avoids recently-used bar rows (relaxed in the later tries). Falls back
+   * to any free cell so a crowded room degrades rather than stalls.
+   * CURATE: band spacing.
    */
-  private int pickDepthDir(int i) {
-    final int ax = clampi((int) Math.round(this.pHeadX[i] - 0.5), 0, this.gx - 1);
-    final int ay = clampi((int) Math.round(this.pHeadY[i] - 0.5), 0, this.gy - 1);
-    final int az = clampi((int) Math.round(this.pHeadZ[i] - 0.5), 0, this.gz - 1);
-    int free4 = 0, free5 = 0, bound4 = 0, bound5 = 0;
-    for (int z = az - 1; z >= 0; --z) {
-      ++bound4;
-      if ((free4 == bound4 - 1) && !this.occupied[ax][ay][z]) {
-        ++free4;
-      }
-    }
-    for (int z = az + 1; z < this.gz; ++z) {
-      ++bound5;
-      if ((free5 == bound5 - 1) && !this.occupied[ax][ay][z]) {
-        ++free5;
-      }
-    }
-    if ((free4 > 0) || (free5 > 0)) {
-      return (free5 >= free4) ? 5 : 4;
-    }
-    if ((bound4 > 0) || (bound5 > 0)) {
-      return (bound5 >= bound4) ? 5 : 4;
-    }
-    return -1;
-  }
-
-  /**
-   * HoldBars spawn/advance pick: a random free cell in the interior-left
-   * half (x < gx/2 under the replicated mapping), at a Y not among the last
-   * BAR_Y_HISTORY bar rows (relaxed in later tries), random free z. Falls
-   * back to any free cell so a crowded room degrades rather than stalls.
-   */
-  private boolean findBarCell() {
-    final int halfX = Math.max(1, this.gx / 2);
+  private boolean findBarCell(int i) {
+    final int count = Math.max(1, this.pipes.getValuei());
+    final int slot = Math.min(i, count - 1);
+    final int bandLo = slot * this.gy / count;
+    final int bandHi = Math.max(bandLo + 1, (slot + 1) * this.gy / count);
+    final boolean lr = barRoleLR(i);
+    final int halfMain = Math.max(1, (lr ? this.gz : this.gx) / 2);
     for (int t = 0; t < RELOCATE_TRIES; ++t) {
-      final int x = this.random.nextInt(halfX);
-      final int y = this.random.nextInt(this.gy);
+      final int main = this.random.nextInt(halfMain);
+      final int y = bandLo + this.random.nextInt(bandHi - bandLo);
       if ((t < RELOCATE_TRIES / 2) && isRecentBarY(y)) {
         continue; // prefer fresh rows; relax the rule in the later tries
       }
-      final int z = this.random.nextInt(this.gz);
+      final int cross = this.random.nextInt(lr ? this.gx : this.gz);
+      final int x = lr ? cross : main;
+      final int z = lr ? main : cross;
       if (!this.occupied[x][y][z] && hasFreeNeighbor(x, y, z)) {
         this.rlX = x; this.rlY = y; this.rlZ = z;
         return true;
@@ -1007,14 +1009,15 @@ public class Pipes3D extends ApotheneumPattern {
   private void spawnPipe() {
     for (int i = 0; i < MAX_PIPES; ++i) {
       if (!this.pAlive[i]) {
-        if (findFreeCell()) {
+        if (this.holdBars.isOn() ? findBarCell(i) : findFreeCell()) {
           // Fresh birth (teleports keep their original stamp — a teleported
           // pipe is still the same, old pipe for oldest-first culls)
           this.pBirth[i] = this.birthCounter++;
           placePipe(i, this.rlX, this.rlY, this.rlZ);
         } else {
-          LX.log("Pipes3D: no free cell to spawn a pipe; draining");
-          startDrain();
+          // Never self-reset: no room right now — skip; a later parameter
+          // change (Reverse/Drain/JumpTo) frees cells and re-syncs
+          LX.log("Pipes3D: no free cell to spawn a pipe; waiting");
         }
         return;
       }
@@ -1073,24 +1076,24 @@ public class Pipes3D extends ApotheneumPattern {
       }
     } else if (parameter == this.holdBars) {
       if (this.holdBars.isOn()) {
-        // Enter progress-bar mode: instant clear (no drain fade — "clears
-        // the screen immediately"), cancel any drain/reverse in progress,
-        // then fresh bars per the constrained spawn rules
-        this.reverse.setValue(false); // its callback may spawn; killed below
-        this.draining = false;
-        applyDensity();
-        clearRoom();
+        // Enter progress-bar mode WITHOUT clearing (ninth pass): the
+        // current lattice, pipes, and history stay as the constraint for
+        // the rest of the animation — each live pipe's next cap replans as
+        // a bar (planRun branches to planBarRun), and a running reverse or
+        // drain is left alone. Only the bar phase state initializes here.
+        // NB: this shifts the effective "plan": a later JumpTo x% is
+        // relative to a fresh synthesis in the current mode, not whatever
+        // the pre-toggle animation would have built.
         for (int i = 0; i < MAX_PIPES; ++i) {
-          this.pAlive[i] = false;
+          this.pParked[i] = false;
+          this.pHoldCapsLeft[i] = HOLD_WAIT_CAPS;
         }
         this.recentBarYCount = 0;
         this.recentBarYNext = 0;
-        syncPipeCount();
       }
-      // Turning HoldBars off keeps all geometry: walkers replan as free
-      // pipes at their next caps, and the projection snaps back to the
-      // corner-continuous table (a jump-cut — mask it with rotation, or
-      // simply leave HoldBars on for the reveal)
+      // Turning HoldBars off also keeps all geometry: walkers replan as
+      // free pipes at their next caps. The projection is identical in both
+      // modes (ninth pass), so toggling is visually seamless either way.
     }
   }
 
@@ -1139,28 +1142,34 @@ public class Pipes3D extends ApotheneumPattern {
     // Cap ball at the disconnect point (the continuous head — off-corner
     // positions after a speed change are capped as-is)
     addBall(this.pHeadX[i], this.pHeadY[i], this.pHeadZ[i], this.pHue[i], this.pSat[i], this.pBri[i]);
-    final boolean found = this.holdBars.isOn() ? findBarCell() : findFreeCell();
+    final boolean found = this.holdBars.isOn() ? findBarCell(i) : findFreeCell();
     if (found) {
       placePipe(i, this.rlX, this.rlY, this.rlZ);
     } else {
-      startDrain();
+      // Never self-reset: nowhere to land — park capped in place; the gated
+      // self-heal resumes this pipe once cells free up
+      this.pCapBeat[i] = Double.POSITIVE_INFINITY;
     }
   }
 
   /**
    * Trigger: jump the animation to JmpPct of the way through the build —
    * synthesize a room filled to pct x the auto-drain level with the current
-   * settings by running the growth walk synchronously. Playback then
-   * continues in the CURRENT direction: forward keeps the walkers alive and
-   * growing from the seeded state (pct 0 = an instant drain + restart);
-   * Reverse leaves the geometry to the unbuild cursor (pct 1 = the classic
-   * jump-to-end seed). Event-rate; bounded by the retained-list capacities
-   * and an iteration guard.
+   * settings by running the growth walk synchronously. In HoldBars mode the
+   * synthesis drives the BAR phase machine (barStep — bars, idle parks, and
+   * teleport advances), so the jump lands on a state hold playback would
+   * actually produce (ninth pass). Playback then continues in the CURRENT
+   * direction: forward keeps the walkers alive and growing from the seeded
+   * state (pct 0 = an instant drain + restart); Reverse leaves the geometry
+   * to the unbuild cursor (pct 1 = the classic jump-to-end seed).
+   * Event-rate; bounded by the retained-list capacities and an iteration
+   * guard.
    */
   private void jumpTo() {
     if (this.draining) {
       return;
     }
+    final boolean hold = this.holdBars.isOn();
     applyDensity();
     clearRoom();
     for (int i = 0; i < MAX_PIPES; ++i) {
@@ -1171,7 +1180,7 @@ public class Pipes3D extends ApotheneumPattern {
     if (target >= 1) {
       // Place the walkers (placement core of placePipe, without scheduling)
       for (int i = 0; i < walkers; ++i) {
-        if (findFreeCell()) {
+        if (hold ? findBarCell(i) : findFreeCell()) {
           occupy(this.rlX, this.rlY, this.rlZ);
           this.pAlive[i] = true;
           this.pHeadX[i] = this.rlX + 0.5;
@@ -1179,11 +1188,18 @@ public class Pipes3D extends ApotheneumPattern {
           this.pHeadZ[i] = this.rlZ + 0.5;
           this.pDir[i] = -1;
           this.pSeg[i] = -1;
+          this.pParked[i] = false;
+          this.pHoldCapsLeft[i] = HOLD_WAIT_CAPS;
+          if (hold) {
+            recordBarY(this.rlY);
+          }
           assignPipeColor(i);
           addBall(this.pHeadX[i], this.pHeadY[i], this.pHeadZ[i], this.pHue[i], this.pSat[i], this.pBri[i]);
         }
       }
-      // Instant growth: walk until the target fill, snapping heads to goals
+      // Instant growth: walk until the target fill, snapping heads to goals.
+      // In hold mode the bar phase machine runs synchronously — idle park
+      // caps and teleport advances count as progress (the guard bounds them)
       final int maxSteps = 4 * MAX_SEGMENTS; // runaway guard
       int guard = 0;
       outer:
@@ -1196,7 +1212,7 @@ public class Pipes3D extends ApotheneumPattern {
           if ((this.segCount >= MAX_SEGMENTS - 1) || (this.ballCount >= MAX_BALLS - 1)) {
             break outer; // leave headroom for the walk's own bookkeeping
           }
-          if (walkStep(i)) {
+          if (hold ? barStep(i) : walkStep(i)) {
             final int d = this.pDir[i];
             if (DX[d] != 0) {
               this.pHeadX[i] = this.pGoal[i];
@@ -1212,6 +1228,8 @@ public class Pipes3D extends ApotheneumPattern {
               this.segBz[s] = this.pHeadZ[i];
             }
             advanced = true;
+          } else if (hold) {
+            advanced = true; // idle/teleport still moves the phase machine
           }
         }
         if (!advanced) {
@@ -1291,10 +1309,12 @@ public class Pipes3D extends ApotheneumPattern {
       if (!this.pAlive[i] || (this.pDir[i] < 0)) {
         continue;
       }
-      if (!Double.isFinite(this.pCapBeat[i])) {
-        // Parked at infinity (scheduled while paused) — self-heal: schedule
-        // now, so the animation always kicks off when Speed rises, no matter
-        // how the pause state was reached (load order, inactive knob turns)
+      if (!Double.isFinite(this.pCapBeat[i]) && !latticeFull()) {
+        // Parked at infinity (scheduled while paused, parked at the fill
+        // limit, or stranded by a dead-end teleport) — self-heal: schedule
+        // now, so the animation always kicks off when Speed rises or cells
+        // free up. Gated on !latticeFull so a full room stays parked (never
+        // self-resets) until Reverse/Drain/JumpTo makes space.
         final int dh = this.pDir[i];
         final double headH = (DX[dh] != 0) ? this.pHeadX[i]
           : (DY[dh] != 0) ? this.pHeadY[i] : this.pHeadZ[i];
@@ -1316,7 +1336,7 @@ public class Pipes3D extends ApotheneumPattern {
           this.segBy[sSnap] = this.pHeadY[i];
           this.segBz[sSnap] = this.pHeadZ[i];
         }
-        planRun(i); // may start the drain (fill limit / list overflow)
+        planRun(i); // may park at the fill limit, or drain on list overflow
         if (this.draining) {
           return;
         }
@@ -1376,8 +1396,10 @@ public class Pipes3D extends ApotheneumPattern {
       return; // paused
     }
     if (this.segCount == 0) {
+      // Never self-reset (ninth pass): fully unbuilt — idle here, still in
+      // Reverse, until a parameter change moves things (Reverse off
+      // respawns via onParameterChanged; Drain and JumpTo also restart)
       this.ballCount = 0;
-      this.reverse.setValue(false); // respawn via onParameterChanged
       return;
     }
     final int s = this.segCount - 1;
@@ -1480,16 +1502,14 @@ public class Pipes3D extends ApotheneumPattern {
     this.tz = -this.sinAy * x0 + this.cosAy * z1 + this.czr;
   }
 
+  // NB (ninth pass): HoldBars previously replicated ONE flat mapping across
+  // all four walls so a single +x bar read identically everywhere. With the
+  // FB/LR bar roles (each wall pair natively sees its perpendicular runner)
+  // that hack is unnecessary — hold mode now renders through the same
+  // corner-continuous projection as everything else, and is purely a
+  // planner mode.
+
   private double wallU(int w, double x, double z) {
-    if (this.frameHoldBars) {
-      // HoldBars: ONE mapping replicated on all four walls (corner
-      // continuity intentionally breaks). Mirrored on the exterior plane so
-      // +x growth reads LEFT-to-RIGHT from INSIDE the cube (interior faces
-      // are pixel copies of exterior faces); ±z runs are invisible on EVERY
-      // wall since u,v are independent of z. CURATE: HOLD_BARS_FLIP if the
-      // interior read is backwards on hardware.
-      return (HOLD_BARS_FLIP ? x : (this.gx - x)) * this.cw;
-    }
     switch (w) {
       case 0: return x * this.cw;
       case 1: return z * this.cw;
@@ -1499,9 +1519,6 @@ public class Pipes3D extends ApotheneumPattern {
   }
 
   private double wallDepth(int w, double x, double z) {
-    if (this.frameHoldBars) {
-      return z; // shared mapping: depth = z on all walls
-    }
     switch (w) {
       case 0: return z;
       case 1: return this.gx - x;
@@ -1512,9 +1529,6 @@ public class Pipes3D extends ApotheneumPattern {
 
   /** Screen-u component of a world direction on wall w (in px per cell) */
   private double wallMu(int w, double mx, double mz) {
-    if (this.frameHoldBars) {
-      return (HOLD_BARS_FLIP ? mx : -mx) * this.cw;
-    }
     switch (w) {
       case 0: return mx * this.cw;
       case 1: return mz * this.cw;
@@ -1913,7 +1927,6 @@ public class Pipes3D extends ApotheneumPattern {
 
     this.frameHalfPx = thickEff / 2;
     this.frameBallHalfPx = (this.frameHalfPx + BALL_EXTRA_PX) * capDiaEff;
-    this.frameHoldBars = this.holdBars.isOn();
 
     // Shaded response curve: 0 = flat fast path (all shader compute skipped);
     // (0, 0.1] fades the AA/pipeline in over the flat look (frameAABlend);
