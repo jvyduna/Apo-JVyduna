@@ -9,7 +9,10 @@ target/
 *.class
 
 # IntelliJ: per-user state only. .idea/runConfigurations IS committed (shared run configs).
+# vcs.xml is untracked too: it holds machine-specific host-source VCS mappings
+# ($HOST_SRC$/Apotheneum, heronarts/LX, ...) that IntelliJ rewrites per checkout.
 /.idea/workspace.xml
+/.idea/vcs.xml
 
 # Claude Code local settings
 .claude/settings.local.json
