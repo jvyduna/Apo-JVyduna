@@ -15,6 +15,7 @@ import heronarts.lx.color.LXDynamicColor;
 import heronarts.lx.model.LXPoint;
 import heronarts.lx.parameter.CompoundDiscreteParameter;
 import heronarts.lx.parameter.CompoundParameter;
+import heronarts.lx.parameter.DiscreteParameter;
 import heronarts.lx.parameter.EnumParameter;
 import heronarts.lx.parameter.LXParameter;
 import heronarts.lx.parameter.TriggerParameter;
@@ -62,8 +63,8 @@ public class Satori extends ApotheneumPattern {
   /** One full color cycle takes 8s at Speed 100%; Speed 200% halves it to 4s */
   private static final double CYCLE_SEC = 8;
 
-  /** Radial phase pulse (bass hit / manual trigger) relaxes over 2s (event visual life >= 1.5s) */
-  private static final double PULSE_RELAX_MS = 2000;
+  /** Pulse attack fraction of TrigDiv: smoothstep up to max over the first 1/8, decay over the last 7/8 */
+  private static final double PULSE_ATTACK_FRAC = 0.125;
 
   /** Radial pulse wavefront depth in LUT cycles (CURATE: 6x the old default-energy 0.22) */
   private static final double PULSE_DEPTH = 1.3;
@@ -89,7 +90,7 @@ public class Satori extends ApotheneumPattern {
   /** Smooth: per-pixel temporal color low-pass time constant at Smooth=1 (CURATE) */
   private static final double TAU_MS = 300;
 
-  /** Floor on the one-beat morph duration so extreme tempi don't strobe (CURATE) */
+  /** Floor on the TrigDiv-driven morph duration so short divisions / fast tempi don't strobe (CURATE) */
   private static final double MIN_MORPH_MS = 250;
 
   /** Max posterize band count (CompoundDiscreteParameter max is exclusive: 2..16) */
@@ -97,8 +98,8 @@ public class Satori extends ApotheneumPattern {
 
   // ---- Parameters -------------------------------------------------------------
 
-  public final TriggerParameter newField =
-    new TriggerParameter("NewField", this::reseed)
+  public final TriggerParameter reseed =
+    new TriggerParameter("ReSeed", this::reseed)
     .setDescription("Reseed the field centers and seeds, keeping the current Field variant");
 
   public final TriggerParameter reverse =
@@ -107,7 +108,29 @@ public class Satori extends ApotheneumPattern {
 
   public final TriggerParameter pulse =
     new TriggerParameter("Pulse", this::firePulse)
-    .setDescription("Launch the radial phase pulse manually: bands warp outward from the seeded center, relaxing over 2s");
+    .setDescription("Launch the radial phase pulse manually: bands warp outward from the seeded center over the TrigDiv duration");
+
+  /** Labels for {@link #trigDiv}; parallel to {@link #TRIG_DIV_UNITS} / {@link #TRIG_DIV_BARS}. */
+  private static final String[] TRIG_DIV_LABELS = {
+    "1/16", "1/8", "1/4", "1/2", "1 bar", "2 bar", "4 bar", "8 bar"
+  };
+
+  /** Length of each division: beats for sub-bar entries, bars for bar entries (see {@link #TRIG_DIV_BARS}). */
+  private static final double[] TRIG_DIV_UNITS = {
+    0.25, 0.5, 1, 2, 1, 2, 4, 8
+  };
+
+  /** Whether each {@link #TRIG_DIV_UNITS} entry is measured in bars (true) or beats (false). */
+  private static final boolean[] TRIG_DIV_BARS = {
+    false, false, false, false, true, true, true, true
+  };
+
+  /** Default division index ("1 bar"). */
+  private static final int TRIG_DIV_DEFAULT = 4;
+
+  public final DiscreteParameter trigDiv =
+    new DiscreteParameter("TrigDiv", TRIG_DIV_LABELS, TRIG_DIV_DEFAULT)
+    .setDescription("Duration for the next ReSeed blend, Reverse ease, or Pulse envelope — a musical division read at the current BPM, not grid-locked");
 
   public final EnumParameter<FieldMode> fieldMode =
     new EnumParameter<FieldMode>("Field", FieldMode.INTERFERENCE)
@@ -148,10 +171,11 @@ public class Satori extends ApotheneumPattern {
   private boolean fieldDirty = true;
   private boolean reseedPending = true;
 
-  // One-beat decelerating morph on Field / Bands change
+  // TrigDiv-long decelerating morph on ReSeed / Field / Bands change
   private boolean morphPending = false;
   private boolean morphActive = false;
   private double morphMs = 0;
+  private double morphDurMs = 0;     // TrigDiv duration captured when the morph starts
   private double bandsOld = 0;
   private int bandsPrev = -1;        // last frame's band count (the "old" count)
 
@@ -183,17 +207,34 @@ public class Satori extends ApotheneumPattern {
 
   // Cycle state
   private double phase = 0;
-  private int cycleDirection = 1;
+  private double cycleDirection = 1; // continuous [-1,1], eased through 0 during a Reverse
   private double slowLevel = 0;
-  private double pulseEnv = 0;
+
+  // Reverse: ease the cycle direction from its current value to the flipped
+  // target over the TrigDiv duration (a decelerating pass through a momentary pause)
+  private int dirTarget = 1;         // +1 / -1 target sign
+  private boolean reverseActive = false;
+  private double reverseMs = 0;
+  private double reverseDurMs = 0;
+  private double reverseFrom = 1;
+
+  // Pulse: fixed-duration attack/decay envelope over TrigDiv (manual trigger or
+  // bass hit). pulseFirePending carries a manual Pulse from the trigger callback
+  // into the next render; strength is 1 (manual) or audio depth (bass hit).
+  private boolean pulseActive = false;
+  private double pulseMs = 0;
+  private double pulseDurMs = 0;
+  private double pulseStrength = 0;
+  private double pulseFirePending = 0;
 
   public Satori(LX lx) {
     super(lx);
     this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
 
-    addParameter("newField", this.newField);
+    addParameter("reseed", this.reseed);
     addParameter("reverse", this.reverse);
     addParameter("pulse", this.pulse);
+    addParameter("trigDiv", this.trigDiv);
     addParameter("fieldMode", this.fieldMode);
     addParameter("speed", this.speed);
     addParameter("width", this.width);
@@ -205,20 +246,34 @@ public class Satori extends ApotheneumPattern {
 
   // ---- Triggers ---------------------------------------------------------------
 
-  /** NewField: reseed centers/seeds and rebuild the field (one O(n) pass, event-rate) */
+  /** Reseed: reseed centers/seeds, rebuild the field, and blend into it over TrigDiv */
   private void reseed() {
     this.reseedPending = true;
     this.fieldDirty = true;
+    this.morphPending = true;
   }
 
-  /** Reverse: flip the direction of the palette rotation; the field is untouched */
+  /** Reverse: ease the palette-rotation direction to its flip over TrigDiv; the field is untouched */
   private void reverseDirection() {
-    this.cycleDirection = -this.cycleDirection;
+    this.dirTarget = -this.dirTarget;
+    this.reverseFrom = this.cycleDirection;
+    this.reverseMs = 0;
+    this.reverseDurMs = trigDivMs();
+    this.reverseActive = true;
   }
 
-  /** Pulse: launch the radial phase wave manually, at full strength regardless of audio depth */
+  /** Pulse: request a manual radial pulse (started in render at full strength, regardless of audio depth) */
   private void firePulse() {
-    this.pulseEnv = 1;
+    this.pulseFirePending = 1;
+  }
+
+  /** TrigDiv as a duration in ms at the live BPM — a musical division, never grid-locked */
+  private double trigDivMs() {
+    final int i = this.trigDiv.getValuei();
+    final double beats = TRIG_DIV_BARS[i]
+      ? TRIG_DIV_UNITS[i] * this.lx.engine.tempo.beatsPerBar.getValuei()
+      : TRIG_DIV_UNITS[i];
+    return beats * this.lx.engine.tempo.period.getValue();
   }
 
   @Override
@@ -454,6 +509,32 @@ public class Satori extends ApotheneumPattern {
     return band / (double) n;
   }
 
+  /** Cubic smoothstep, clamped to [0,1] */
+  private static double smoothstep(double t) {
+    if (t <= 0) {
+      return 0;
+    }
+    if (t >= 1) {
+      return 1;
+    }
+    return t * t * (3 - 2 * t);
+  }
+
+  /**
+   * Pulse attack/decay over normalized time u in [0,1]: smoothstep up to the
+   * maximum over the first {@link #PULSE_ATTACK_FRAC} (1/8), then smoothstep
+   * back to the default over the remaining 7/8. 0 outside [0,1].
+   */
+  private static double pulseEnvelope(double u) {
+    if ((u <= 0) || (u >= 1)) {
+      return 0;
+    }
+    if (u < PULSE_ATTACK_FRAC) {
+      return smoothstep(u / PULSE_ATTACK_FRAC);
+    }
+    return 1 - smoothstep((u - PULSE_ATTACK_FRAC) / (1 - PULSE_ATTACK_FRAC));
+  }
+
   /** Trailing-fraction smoothstep: 0 until (1-amt) of the band, ramps to 1 at its end */
   private static double ramp(double f, double amt) {
     if (amt <= 0) {
@@ -481,6 +562,7 @@ public class Satori extends ApotheneumPattern {
         System.arraycopy(this.field, 0, this.fieldOld, 0, this.field.length);
         this.bandsOld = this.bandsPrev;
         this.morphMs = 0;
+        this.morphDurMs = Math.max(trigDivMs(), MIN_MORPH_MS);
         this.morphActive = true;
       }
       this.morphPending = false;
@@ -499,24 +581,49 @@ public class Satori extends ApotheneumPattern {
     this.slowLevel += (this.audio.level - this.slowLevel) * (1 - Math.exp(-deltaMs / SLOW_LEVEL_MS));
     final double speedMul = 1 + AUDIO_SPEED_DEPTH * this.slowLevel;
 
+    // Reverse: ease the cycle direction from its captured value to the flipped
+    // target over TrigDiv (a decelerating smoothstep through a momentary pause)
+    if (this.reverseActive) {
+      this.reverseMs += deltaMs;
+      final double u = (this.reverseDurMs > 0) ? Math.min(1.0, this.reverseMs / this.reverseDurMs) : 1.0;
+      this.cycleDirection = this.reverseFrom + (this.dirTarget - this.reverseFrom) * smoothstep(u);
+      if (u >= 1.0) {
+        this.cycleDirection = this.dirTarget;
+        this.reverseActive = false;
+      }
+    }
+
     // Speed multiplies the phase rate (never divides), so 0 is a clean pause
     this.phase += this.cycleDirection * speedMul * this.speed.getValue() * deltaMs / (CYCLE_SEC * 1000);
     this.phase -= Math.floor(this.phase);
 
     // Radial phase pulse: wavefront offset proportional to distance from the
-    // pulse center, relaxing over ~2s. Sources: bass hits (scaled by depth so
-    // a barely-open Audio knob pulses gently) and the manual Pulse trigger
-    // (sets pulseEnv directly at event rate).
-    double pulseFire = 0;
+    // pulse center, on a fixed TrigDiv-long attack/decay envelope (smoothstep up
+    // over the first 1/8, back down over the last 7/8). Sources: the manual Pulse
+    // trigger (strength 1) and bass hits (scaled by depth so a barely-open Audio
+    // knob pulses gently). A new fire restarts the envelope at its captured length.
+    double pulseFire = this.pulseFirePending;
+    this.pulseFirePending = 0;
     if (this.audio.bassHit()) {
-      pulseFire = this.audio.depth();
+      pulseFire = Math.max(pulseFire, this.audio.depth());
     }
     if (pulseFire > 0) {
-      this.pulseEnv = Math.max(this.pulseEnv, pulseFire);
-    } else {
-      this.pulseEnv = Math.max(0, this.pulseEnv - deltaMs / PULSE_RELAX_MS);
+      this.pulseStrength = this.pulseActive ? Math.max(this.pulseStrength, pulseFire) : pulseFire;
+      this.pulseMs = 0;
+      this.pulseDurMs = trigDivMs();
+      this.pulseActive = true;
     }
-    final double pulseDepth = this.pulseEnv * PULSE_DEPTH;
+    double pulseEnv = 0;
+    if (this.pulseActive) {
+      this.pulseMs += deltaMs;
+      final double u = (this.pulseDurMs > 0) ? this.pulseMs / this.pulseDurMs : 1.0;
+      if (u >= 1.0) {
+        this.pulseActive = false;
+      } else {
+        pulseEnv = this.pulseStrength * pulseEnvelope(u);
+      }
+    }
+    final double pulseDepth = pulseEnv * PULSE_DEPTH;
 
     // Treble shimmer (depth-scaled inside AudioReactive's treble tap)
     final double shimmer = SHIMMER_MAX * Math.min(1, this.audio.treble);
@@ -538,9 +645,8 @@ public class Satori extends ApotheneumPattern {
     double bandsEff = bands;
     boolean fractionalBands = false;
     if (this.morphActive) {
-      final double beatMs = Math.max(this.lx.engine.tempo.period.getValue(), MIN_MORPH_MS);
       this.morphMs += deltaMs;
-      final double u = Math.min(1.0, this.morphMs / beatMs);
+      final double u = Math.min(1.0, this.morphMs / this.morphDurMs);
       final double omu = 1.0 - u;
       e = 1.0 - omu * omu * omu;
       bandsEff = this.bandsOld * (1.0 - e) + bands * e;
