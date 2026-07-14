@@ -29,13 +29,13 @@ The Composition window has three fixed zones:
 
 There are three ways to navigate the timeline; none of them are labeled, so they're worth memorizing:
 
-| Gesture | Where | Result |
-|---|---|---|
-| Click + drag **vertically** | Either ruler (top or bottom) | Zoom in (drag down) / out (drag up), centered on the mouse |
-| Click + drag **horizontally** | Either ruler | Scroll the timeline sideways |
-| Drag vertically / horizontally | **Overview strip** (the thin bar above the timeline) | Zoom / scroll, same as the ruler |
-| **Double-click** | Overview strip | Zoom all the way out |
-| Trackpad / wheel scroll | Lane area | Scroll horizontally (lane content) and vertically (lane stack) |
+| Action | How |
+|---|---|
+| Zoom in / out | Drag **vertically** in either ruler (down = in, up = out; centered on the mouse) |
+| Scroll sideways | Drag **horizontally** in either ruler |
+| Zoom / scroll | Drag vertically / horizontally in the **overview strip** (thin bar above the timeline) |
+| Zoom all the way out | **Double-click** the overview strip |
+| Scroll the lane area | Trackpad / wheel scroll (horizontal = content, vertical = lane stack) |
 
 The overview strip always shows the full composition, with a rectangle outlining the portion currently visible and small blocks marking where audio and clip events live — useful for jumping around a long arrangement.
 
@@ -96,13 +96,18 @@ Once a locator exists:
 
 | Action | How |
 |---|---|
-| **Rename** | Click its text label and type (or focus the flag and press `Cmd+R`) |
-| **Move** | Drag the flag left/right (snaps; `Cmd` inverts snap), or nudge with `←` / `→` |
-| **Jump to it** | Click the flag — while stopped, this moves the insert marker; while playing (or with `Cmd` held), it relaunches playback from the locator |
-| **Delete** | Focus the flag and press `Delete` |
-| **Step between locators** | The **◀ ▶ buttons** in the top-right corner jump to the previous / next locator |
+| **Rename** | Focus the flag, press `Cmd+R` |
+| **Move** | Drag the flag (snaps; `Cmd` inverts), or nudge with `←` / `→` |
+| **Jump to it** | Click the flag (while playing, or with `Cmd`: relaunch from it) |
+| **Delete** | Focus the flag, press `Delete` |
+| **Step between locators** | ◀ ▶ buttons in the top-right corner |
 
 The prev/next locator actions are trigger parameters on the composition, so they can be **MIDI- or OSC-mapped** for show control, as can each locator's launch trigger.
+
+Note: clicking a locator's *label* does not rename it — it launches playback
+from that spot, and an upstream interaction also defeats double-click-to-edit
+(root cause in `docs/arrange-feedback/2026-07-08-locator-label-rename.md`).
+`Cmd+R` is the reliable path until it's fixed upstream.
 
 ---
 
@@ -189,6 +194,98 @@ The Composition records the way clips do: **arm, then perform**.
 If the *Start Transport With Record* preference is enabled, arming record starts playback immediately.
 
 A practical arrangement workflow: drop your audio file in, set locators at the musical moments that matter, record a live pass against the audio, then use snap and the event editing tools to tighten the timing.
+
+---
+
+## Arrange Tools (jvyduna plugin)
+
+The built-in editor selects and moves events **one lane at a time**. The
+**Arrange Tools** plugin (this package — enable it under CONTENT → PLUGINS)
+adds cross-lane shifting and range copy/paste on top, without modifying the
+host. Everything it does is a normal undoable edit: one `Cmd+Z` reverses an
+entire multi-lane operation, and saved `.lxp` files are indistinguishable
+from hand-edited ones.
+
+### Shifting a range across all lanes
+
+Drag-select a range in **any one lane** (or `Cmd+A` for the whole lane), then:
+
+| Shortcut | Action |
+|---|---|
+| `Cmd+Shift+]` / `Cmd+Shift+[` | Shift every event in that time range, in **all** lanes, right / left by one grid step |
+| `Cmd+Alt+]` / `Cmd+Alt+[` | Same, by a fine 1/4-beat step |
+
+To shift the **entire composition's content** together: `Cmd+A` in any lane
+with events spanning the piece, then shift — the range covers the full lane
+length and every lane's events inside it move as one.
+
+### Rectangular selection (a block of lanes)
+
+Extend the selection vertically to a contiguous block of lanes — two ways:
+
+| Shortcut | Action |
+|---|---|
+| Drag across lanes | Rubber-band as usual, but keep dragging **vertically into other lanes** — the rectangle follows the pointer |
+| `Cmd+Shift+J` / `Cmd+Shift+K` | Grow the rectangle down / up one lane from the keyboard (vim j/k; the opposite key shrinks it back) |
+
+The rectangle draws a border with a near-transparent tint and tracks
+pan/zoom live. With a rectangle active, **shift moves only the member
+lanes** (and leaves locators alone), and **`Cmd+Shift+C` copies the member
+lanes** — paste returns them to those same lanes at the insert marker. Any
+click dismisses the rectangle (clicking clears or moves the anchor
+selection it's built on). Arrow keys can't extend it: the timeline consumes
+`↑`/`↓` for lane focus regardless of modifiers.
+
+Notes:
+
+- **Locators inside the range move too** (when shifting the composition
+  timeline), so your musical markers stay glued to the content.
+- Like the built-in drag-move, a shifted range **replaces** whatever events
+  it lands on (fully undoable).
+- The selection **highlight does not follow** the shift (the plugin never
+  touches host UI state) — but repeated nudges still chain correctly; the
+  plugin tracks where the events actually went until you change the
+  selection or undo.
+- **MIDI note lanes are skipped** (with a log message): a range boundary can
+  split a note-on/off pair, so they're excluded until a pair-aware shift
+  exists.
+- Keep the lane focused while nudging — clicking elsewhere clears the host
+  selection (built-in behavior).
+
+### Copying and pasting a range
+
+| Shortcut | Action |
+|---|---|
+| `Cmd+Shift+C` | Copy the selected range (rectangle if active, else the focused lane) |
+| `Cmd+Shift+V` | Paste at the **insert marker** (click a lane to place it) |
+
+- Paste is **replace**: the destination window is cleared first, then the
+  copied events land at the marker with their original relative spacing.
+  Events that would fall past the end of the composition are skipped.
+- **Cross-lane paste**: copy from a single lane, focus a *different*
+  parameter lane, and paste — it retargets to the focused lane. Only between
+  lanes of the same kind (normalized→normalized, boolean→boolean,
+  trigger→trigger; discrete only with an identical value range). Anything
+  incompatible is rejected whole with a dialog explaining why — no partial
+  paste.
+- Multi-lane copies always paste back into their **source lanes**.
+- v1 captures parameter and pattern lanes; MIDI/audio/bus/text lanes are
+  skipped with a log count.
+
+### Shortcut reference panel
+
+Click the **keyboard icon** at the right end of the composition window's
+bottom help bar (or press `Cmd+Shift+/`) to overlay this guide's shortcut
+tables in the app. Click the icon again, click the panel, click anywhere
+else, or press `Esc` to dismiss it.
+
+### Known limitation (upstream)
+
+Shifting a **narrow selection that clips the tail of a long audio/bus event**
+by more than the selection's own width can leave that lane's event ordering
+inconsistent — this is an arrange-host bug the plugin inherits (the host's
+own long drags hit it too). Prefer selecting the whole event, or shift in
+smaller steps, until it's fixed upstream.
 
 ---
 

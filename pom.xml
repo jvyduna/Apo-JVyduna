@@ -57,6 +57,23 @@
         <!-- CRITICAL: keep the jar name distinct from the upstream apotheneum-*.jar
              so both can coexist in ~/Chromatik/Packages without collision. -->
         <finalName>jvyduna-apotheneum-${project.version}</finalName>
+        <resources>
+            <!-- Default resources (explicit, since declaring any <resources>
+                 replaces the default list) -->
+            <resource>
+                <directory>src/main/resources</directory>
+            </resource>
+            <!-- Bundle the composition guide so the Arrange Tools shortcut
+                 reference panel can parse its tables at runtime — the guide
+                 stays the single source of truth for shortcuts. -->
+            <resource>
+                <directory>docs</directory>
+                <includes>
+                    <include>Composition-Guide.md</include>
+                </includes>
+                <targetPath>arrange</targetPath>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
