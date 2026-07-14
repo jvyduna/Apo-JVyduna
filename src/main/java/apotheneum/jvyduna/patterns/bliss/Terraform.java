@@ -8,59 +8,63 @@ import apotheneum.Apotheneum;
 import apotheneum.ApotheneumPattern;
 import apotheneum.jvyduna.util.AudioReactive;
 import apotheneum.jvyduna.util.PerceptualHue;
-import apotheneum.jvyduna.util.Ranges;
+import apotheneum.jvyduna.util.TempoLock;
 import heronarts.lx.LX;
 import heronarts.lx.LXCategory;
 import heronarts.lx.LXComponent;
+import heronarts.lx.Tempo;
 import heronarts.lx.color.LXColor;
 import heronarts.lx.color.LXDynamicColor;
 import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundParameter;
+import heronarts.lx.parameter.DiscreteParameter;
+import heronarts.lx.parameter.EnumParameter;
 import heronarts.lx.parameter.TriggerParameter;
 import heronarts.lx.utils.LXUtils;
 
 /**
  * An evolving terrain skyline wrapped around the sculpture. A 1D heightfield
  * circles the cube ring (200 columns) and, independently, the cylinder (120
- * columns). Each column is rendered bottom-up as hard elevation bands — water,
- * then palette-driven land bands (sand, grass, rock, peaks) — with a bright
- * one-row waterline at the sea surface.
+ * columns). Each column is rendered bottom-up as elevation-banded land over a
+ * settable sea, with a bright one-row waterline at the sea surface.
  *
- * Mountains are born by uplift (bass hits when the music drives hard, a
- * spontaneous timer at ambient) and rise as eased envelopes over ~1.4
- * seconds. They age by erosion (neighbor diffusion
- * + slow subsidence). The sea rests at the SeaLevel value (plus any Water and
- * erosion silt) and is independent of the music; Flood ramps it to the top for
- * one beat and settles back over eight. Treble hits flash the peaks white. All
- * audio reactivity (uplift drive, erosion regime, treble flash) is gated by the
- * Audio depth knob (default 0 = pure screensaver); audio never moves the sea.
+ * <p>The simulation has three legible, choreographable subsystems (2026-07-12
+ * redesign):
  *
- * See Terraform.md (beside this file) for the full design note.
+ * <ol>
+ * <li><b>Tempo-driven eruptions</b> — on each {@code TrigDiv} phase crossing an
+ *     eruption may fire (probability {@code Chance}), offset by {@code Phase}.
+ *     Each eruption is a rise-then-fall overlay living exactly {@code MtnLife}
+ *     with rise fraction {@code Duty}; it fully returns to baseline (never
+ *     commits to the terrain). The manual {@code Erupt} trigger fires one now.
+ *     All eruptions are forced to breach the current sea by
+ *     {@code ERUPT_MARGIN_ROWS} so they are always visible.</li>
+ * <li><b>Conservation-of-mass water</b> — a signed integrator: land rising
+ *     above the {@code SeaLevel} reference pulls water down, land eroding lets
+ *     it rise, and at rest the sea settles back to {@code SeaLevel}.
+ *     {@code LndWtr} sets the coupling depth (strongest at mid SeaLevel); the
+ *     water fraction is always clamped to [0,1] so SeaLevel 0 = dry and
+ *     SeaLevel 1 = full.</li>
+ * <li><b>Bands as a color count</b> — {@code Bands} (0..5) equal color bands
+ *     ground&rarr;peak with a circular {@code BndPhase}; {@code Smooth} both
+ *     antialiases the band and silhouette edges and motion-smooths the crest.
+ *     {@code WhtCps} forces the highest band white.</li>
+ * </ol>
+ *
+ * <p>Audio is used ONLY for the {@code TrbSprk} treble crest-flash, gated by the
+ * {@code Audio} depth knob (default 0 = pure screensaver).
+ *
+ * <p>See Terraform.md (beside this file) for the full design note.
  */
 @LXCategory("Apotheneum/jvyduna")
 @LXComponent.Name("Terraform")
-@LXComponent.Description("Evolving terrain skyline: uplifts raise mountains, erosion silts the sea, and a settable sea level with flood and eruption triggers")
+@LXComponent.Description("Evolving terrain skyline: tempo-driven eruptions rise and fall, conservation-of-mass water couples to the land, and elevation color bands with a settable sea")
 public class Terraform extends ApotheneumPattern {
 
   // ---- Timing constants (physical intent) -----------------------------------
 
-  /** Background terrain chase: full-height (45-row) change takes >= 5 s (erosion/reseed/cataclysm) */
-  private static final double RISE_FULL_SEC = 5;
-
-  /** Rise time of a new uplift envelope (free-run; the old Sync-off value) */
-  private static final double UPLIFT_RISE_MS = 1400;
-
-  /** Flood trigger: smoothstep rise to the top over this many beats */
-  private static final double FLOOD_RISE_BEATS = 1;
-
-  /** Flood trigger: smoothstep settle back to the nominal sea over this many beats */
-  private static final double FLOOD_SETTLE_BEATS = 8;
-
-  /** Time constant of the audio-level smoothing that substitutes for the old Energy knob (s) */
-  private static final double DRIVE_TAU_SEC = 2;
-
-  /** Cataclysm shake duration — the one event-like exception, <= 0.5 s */
-  private static final double SHAKE_SEC = 0.45;
+  /** Floor on a mountain's total life so a tiny division can't divide by ~0 (ms) */
+  private static final double MTN_LIFE_MIN_MS = 50;
 
   /** Peak cataclysm shake displacement, in rows */
   private static final double SHAKE_AMP_ROWS = 2.5;
@@ -71,82 +75,65 @@ public class Terraform extends ApotheneumPattern {
   /** Spatial wavelength of the shake ripple, radians per column */
   private static final double SHAKE_WAVE = 0.6;
 
-  /** Terrain subsidence (slump) time constant at ambient drive (s) */
-  private static final double SUBSIDE_TAU_AMBIENT_SEC = 120;
+  // ---- Mountain / eruption constants -----------------------------------------
 
-  /** Terrain subsidence (slump) time constant at peak drive (s) */
-  private static final double SUBSIDE_TAU_PEAK_SEC = 30;
+  /** Eruption amplitude (fraction of full height) at Uplift = 1, before breach forcing */
+  private static final double UPLIFT_AMP_FRAC = 0.6;
 
-  // ---- Rates and thresholds --------------------------------------------------
-
-  /** Spontaneous (timer) uplifts per second per surface at ambient (~1 per 17 s) */
-  private static final double UPLIFT_RATE_AMBIENT_HZ = 0.06;
-
-  /** Spontaneous uplifts per second per surface at peak drive (~1 per 2 s) */
-  private static final double UPLIFT_RATE_PEAK_HZ = 0.5;
-
-  /** Diffusion coefficient (Laplacian fraction/s) at erosion=1, ambient drive */
-  private static final double DIFFUSION_AMBIENT = 0.4;
-
-  /** Diffusion coefficient (Laplacian fraction/s) at erosion=1, peak drive */
-  private static final double DIFFUSION_PEAK = 2.0;
-
-  /** Per-sub-step diffusion stability clamp (3-tap stencil requires < 0.5) */
-  private static final double DIFFUSION_MAX_FRAME = 0.24;
-
-  /** Cap on diffusion sub-steps per frame (saturates only on pathological dt) */
-  private static final int MAX_DIFFUSION_STEPS = 10;
-
-  /** Uplift amplitude factor (fraction of full height, x Uplift param) at ambient / peak drive */
-  private static final double UPLIFT_AMP_AMBIENT = 0.4, UPLIFT_AMP_PEAK = 0.9;
-
-  /** Uplift bump sigma (fraction of ring length) at ambient / peak drive */
-  private static final double UPLIFT_SIGMA_AMBIENT = 0.02, UPLIFT_SIGMA_PEAK = 0.045;
-
-  /** Bass hits trigger uplifts only when the depth-independent smoothed music
-   *  level exceeds this (the gate compares drive against this x audio depth) */
-  private static final double BASS_UPLIFT_MIN_LEVEL = 0.35;
-
-  /** Sea goal clamp: bottom = dry (sea at the base); top leaves room for Water/silt to lift the resting sea */
-  private static final double SEA_MIN = 0, SEA_MAX = 0.98;
-
-  /** Sea fraction the flood trigger rises to (1.0 = top of the installation) */
-  private static final double SEA_FLOOD = 1.0;
+  /** Eruption bump sigma (fraction of ring length) */
+  private static final double UPLIFT_SIGMA_FRAC = 0.03;
 
   /** Erupt guarantees a new peak this many rows above the current sea surface */
   private static final double ERUPT_MARGIN_ROWS = 3;
 
-  /** Silt: sea-level rise per unit of normalized eroded above-sea volume */
-  private static final double SILT_GAIN = 8;
+  // ---- Conservation water constants ------------------------------------------
 
-  /** Silt washes out of the basin over this time constant (s) */
-  private static final double SILT_DECAY_SEC = 25;
+  /** Signed integrator gain: normalized above-sea volume change -> water displacement.
+   *  CURATE: GAIN 6 chosen so a default eruption visibly dips/swells the sea; verify magnitude. */
+  private static final double LAND_WATER_GAIN = 6;
 
-  /** Silt contribution to the sea goal never exceeds this fraction of height */
-  private static final double SILT_MAX = 0.3;
+  /** Water integrator decay time constant (s): the sea settles back to SeaLevel at rest.
+   *  CURATE: TAU 8 s chosen to settle in a few seconds; verify it reads as a tide, not a lag. */
+  private static final double LAND_WATER_TAU = 8;
 
-  /** Roughness jitter bumps per second per surface at Rough = 1 */
-  private static final double ROUGH_RATE_MAX_HZ = 25;
+  /** Per-frame clamp on the above-sea volume delta, so cataclysm/reseed can't spike the sea */
+  private static final double LAND_WATER_DVOL_CLAMP = 0.05;
 
-  /** Roughness jitter amplitude, +/- fraction of full height (~2.7 rows) */
+  // ---- Roughness constants ----------------------------------------------------
+
+  /** Roughness jitter amplitude, +/- fraction of full height (~2.7 rows on the cube) */
   private static final double ROUGH_AMP_FRAC = 0.06;
+
+  /** Roughness fades in over the first few rows of land, so cleared ground stays
+   *  perfectly flat and eruptions don't pop craggy at birth (rows). */
+  private static final double ROUGH_FADE_ROWS = 3;
+
+  /** Roughness drift: columns re-targeted to a fresh random value per frame (per surface).
+   *  CURATE: 1 col/frame + ease 0.04 chosen for slow craggy drift; verify not boiling/static. */
+  private static final int ROUGH_RETARGET_PER_FRAME = 1;
+
+  /** Roughness drift: per-frame ease of the field toward its (drifting) target. CURATE. */
+  private static final double ROUGH_EASE = 0.04;
+
+  // ---- Smooth (crest AA + motion) constants ----------------------------------
+
+  /** Smooth = 1 anti-aliases band / silhouette / sea edges over +/- this many rows */
+  private static final double SMOOTH_MAX_ROWS = 1.25;
+
+  /** Smooth = 1 slows the crest motion low-pass to this fraction of instant.
+   *  CURATE: 0.85 (alpha 0.15 at Smooth 1) chosen for a gliding, not laggy, crest. */
+  private static final double CREST_MOTION_MAX = 0.85;
+
+  // ---- Treble flash constants ------------------------------------------------
 
   /** Treble flash exponential decay time constant (ms); < 10% by ~105 ms */
   private static final double FLASH_DECAY_MS = 45;
 
-  /** Fraction of peak-band pixels that flash at TrbSprk = 1 */
+  /** Fraction of crest pixels that flash at TrbSprk = 1 */
   private static final double FLASH_COVERAGE = 0.45;
 
-  /** Treble flashes spill this many rows down into the rock band */
-  private static final double FLASH_ROCK_SPILL_ROWS = 2;
-
-  // Elevation band tops as fractions of full sculpture height (before BandShift)
-  private static final double SAND_TOP = 0.30;
-  private static final double GRASS_TOP = 0.55;
-  private static final double ROCK_TOP = 0.80;
-
-  /** Smoothing = 1 anti-aliases band and sea-surface edges over +/- this many rows */
-  private static final double SMOOTH_MAX_ROWS = 1.25;
+  /** Treble flash reaches this many rows down from the crest */
+  private static final double FLASH_CREST_ROWS = 4;
 
   // ---- Fixed colors (sea + sky; land bands come from the palette) ------------
 
@@ -154,220 +141,262 @@ public class Terraform extends ApotheneumPattern {
   private static final int WATER_DEEP = LXColor.hsb(215, 85, 40);
   private static final int WATERLINE = LXColor.hsb(190, 35, 100);
 
-  // ---- Flood state machine ----------------------------------------------------
-
-  private static final int FLOOD_NONE = 0, FLOOD_RISING = 1, FLOOD_SETTLING = 2;
-
   // ---- Parameters -------------------------------------------------------------
 
   public final TriggerParameter cataclysm =
     new TriggerParameter("Cataclysm", this::cataclysm)
-    .setDescription("Raise a huge mountain ridge with a brief whole-ring shake, then let it settle over seconds");
-
-  public final TriggerParameter flood =
-    new TriggerParameter("Flood", this::flood)
-    .setDescription("Ramp the sea to maximum over a few seconds, hold briefly, then drain back");
+    .setDescription("Heave up a transient ridge with a whole-ring shake over a 1/4 bar, then burst 4 concurrent eruptions; leaves no lasting terrain");
 
   public final TriggerParameter reseed =
     new TriggerParameter("Reseed", this::reseed)
-    .setDescription("Morph to a fresh random terrain over ~5 s");
+    .setDescription("Glide every currently-active mountain to a fresh random position over a 1/4 bar; no new or persistent terrain");
 
   public final TriggerParameter erupt =
     new TriggerParameter("Erupt", this::erupt)
-    .setDescription("Raise one new mountain now, exactly as a spontaneous uplift would");
+    .setDescription("Raise one new mountain now on each surface, forced to breach the current sea");
+
+  public final EnumParameter<Tempo.Division> triggerDiv =
+    new EnumParameter<Tempo.Division>("TrigDiv", Tempo.Division.WHOLE)
+    .setDescription("Tempo division whose phase crossings offer an ambient eruption");
+
+  public final CompoundParameter chance = new CompoundParameter("Chance", 0.5)
+    .setDescription("Probability an eruption fires on each TrigDiv opportunity");
+
+  public final EnumParameter<Tempo.Division> mtnLife =
+    new EnumParameter<Tempo.Division>("MtnLife", Tempo.Division.FOUR)
+    .setDescription("Total rise-then-fall lifetime of each eruption");
+
+  public final CompoundParameter eruptDuty = new CompoundParameter("Duty", 0.3)
+    .setDescription("Fraction of a mountain's life spent rising (rest is the fall)");
+
+  public final CompoundParameter trigPhase = new CompoundParameter("Phase", 0)
+    .setDescription("Phase offset within the TrigDiv cycle at which eruptions may fire");
 
   public final CompoundParameter upliftSize = new CompoundParameter("Uplift", 0.5)
-    .setDescription("Amplitude of new mountain uplifts");
-
-  public final CompoundParameter erosion = new CompoundParameter("Erosion", 0.4, 0, 10)
-    .setDescription("How fast mountains age: neighbor diffusion plus slow subsidence; quadratic knob, top is 10x");
+    .setDescription("Amplitude of new mountain eruptions");
 
   public final CompoundParameter rough = new CompoundParameter("Rough", 0.25)
-    .setDescription("Terrain ruggedness: continuous small jitter bumps and divots injected into the land");
+    .setDescription("Terrain ruggedness: a slowly-drifting per-column noise added to the displayed skyline");
 
-  public final CompoundParameter seaLevel = new CompoundParameter("SeaLevel", 0.5, 0, 0.9)
-    .setDescription("Resting sea level as a fraction of sculpture height; at the bottom the sea sits at the base. Erosion silt and eruptions fluctuate it from here");
+  public final CompoundParameter seaLevel = new CompoundParameter("SeaLevel", 0.5, 0, 1)
+    .setDescription("Resting sea level as a fraction of sculpture height; 0 = dry, 1 = fully flooded. Land displacement couples water around this via LndWtr");
 
-  public final CompoundParameter water = new CompoundParameter("Water", 0, 0, 0.5)
-    .setDescription("Extra water volume in the system, raising the sea above SeaLevel (adds upward only)");
+  public final CompoundParameter lndWtr = new CompoundParameter("LndWtr", 0.5)
+    .setDescription("Land-to-water coupling depth: how far a rising/eroding mountain pushes/pulls the sea (strongest at mid SeaLevel)");
 
-  public final CompoundParameter bandShift = new CompoundParameter("Bands", 0, -0.2, 0.2)
-    .setDescription("Shifts all elevation band thresholds up (+) or down (-) as a fraction of height");
+  public final DiscreteParameter bands = new DiscreteParameter("Bands", 4, 0, 6)
+    .setDescription("Number of equal elevation color bands ground->peak (0/1 = monochrome, up to 5)");
 
-  public final CompoundParameter smoothing = new CompoundParameter("Smooth", 0)
-    .setDescription("Anti-aliases the band-to-band edges and the sea surface top; 0 = hard edges");
+  public final CompoundParameter bndPhase = new CompoundParameter("BndPhase", 0)
+    .setDescription("Circular phase shift of the color bands up the wall (phase 0 = phase 1)");
+
+  public final CompoundParameter smoothing = new CompoundParameter("Smooth", 0.3)
+    .setDescription("Anti-aliases band, silhouette and sea edges and motion-smooths the crest; 0 = hard/instant");
 
   public final BooleanParameter whiteCaps = new BooleanParameter("WhtCps", false)
-    .setDescription("Render the peaks band pure white; swatch color 0 is skipped (rock/grass/sand stay on swatch 1/2/3) and TrbSprk crackles the peaks dark for contrast");
+    .setDescription("Force the highest color band pure white (snow cap); the treble flash then crackles the peaks dark");
 
   public final CompoundParameter trbSprk = new CompoundParameter("TrbSprk", 0.5)
-    .setDescription("Treble-hit white flash bursts on the peaks");
+    .setDescription("Treble-hit white flash bursts on the mountain crests");
 
   public final CompoundParameter audioDepth = new CompoundParameter("Audio", 0)
-    .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full reactivity");
+    .setDescription("Audio reactivity depth: 0 = pure screensaver (default), 1 = full treble-flash reactivity");
 
   // ---- State (all preallocated; zero allocation in the render path) -----------
 
   private final AudioReactive audio;
   private final Random random = new Random();
+  private final TempoLock tempoLock;
 
-  // Terrain heightfields in rows. target[] receives uplift/erosion; height[]
-  // (the displayed field) chases target rate-limited to fullHeight/RISE_FULL_SEC.
-  private final double[] cubeTarget = new double[Apotheneum.Cube.Ring.LENGTH];
+  // Base terrain in rows. There is no persistent landscape: the base stays flat
+  // (all zero) and every mountain rides on top as a transient eruption overlay
+  // (Erupt / TrigDiv / Cataclysm / Reseed). height[] is kept as the zero base so
+  // the breach calc and renderer can index it uniformly.
   private final double[] cubeHeight = new double[Apotheneum.Cube.Ring.LENGTH];
-  private final double[] cubeScratch = new double[Apotheneum.Cube.Ring.LENGTH];
-  private final double[] cylinderTarget = new double[Apotheneum.Cylinder.Ring.LENGTH];
   private final double[] cylinderHeight = new double[Apotheneum.Cylinder.Ring.LENGTH];
-  private final double[] cylinderScratch = new double[Apotheneum.Cylinder.Ring.LENGTH];
+
+  // Slowly-drifting per-column roughness noise in [-1, 1] (field chases target).
+  private final double[] cubeRough = new double[Apotheneum.Cube.Ring.LENGTH];
+  private final double[] cubeRoughTarget = new double[Apotheneum.Cube.Ring.LENGTH];
+  private final double[] cylinderRough = new double[Apotheneum.Cylinder.Ring.LENGTH];
+  private final double[] cylinderRoughTarget = new double[Apotheneum.Cylinder.Ring.LENGTH];
+
+  // Motion-smoothed crest (low-pass of the displayed height), rendered from.
+  private final double[] cubeSmooth = new double[Apotheneum.Cube.Ring.LENGTH];
+  private final double[] cylinderSmooth = new double[Apotheneum.Cylinder.Ring.LENGTH];
 
   /**
-   * Rising mountains: fixed pool of eased envelope events rendered as an
-   * additive overlay on height[], committed into target[]+height[] exactly at
-   * their deadline (the background chase rate would miss short deadlines).
+   * Rising-then-falling mountains: a fixed pool of Div-timed rise/fall
+   * envelopes rendered as an additive overlay on height[]. Nothing commits to
+   * the terrain — a mountain fully vanishes at end of life.
    */
-  private static final int MAX_UPLIFTS = 8;
+  private static final int MAX_UPLIFTS = 16;
 
-  private static final class UpliftPool {
-    final int[] center = new int[MAX_UPLIFTS];
+  private static final class MountainPool {
+    final double[] center = new double[MAX_UPLIFTS]; // current (possibly gliding) column
     final double[] ampRows = new double[MAX_UPLIFTS];
     final double[] sigmaCols = new double[MAX_UPLIFTS];
     final double[] elapsedMs = new double[MAX_UPLIFTS];
-    final double[] durMs = new double[MAX_UPLIFTS]; // <= 0 marks a free slot
+    final double[] lifeMs = new double[MAX_UPLIFTS]; // <= 0 marks a free slot
+    final double[] dutyFrac = new double[MAX_UPLIFTS];
+    // Reseed center glide: interpolate center from `centerFrom` to `centerTo`
+    // over `centerAnimDur` ms (0 = not gliding, center resting at its value).
+    final double[] centerFrom = new double[MAX_UPLIFTS];
+    final double[] centerTo = new double[MAX_UPLIFTS];
+    final double[] centerAnimMs = new double[MAX_UPLIFTS];
+    final double[] centerAnimDur = new double[MAX_UPLIFTS];
     final double[] overlay;
 
-    UpliftPool(int width) {
+    MountainPool(int width) {
       this.overlay = new double[width];
     }
   }
 
-  private final UpliftPool cubeUplifts = new UpliftPool(Apotheneum.Cube.Ring.LENGTH);
-  private final UpliftPool cylinderUplifts = new UpliftPool(Apotheneum.Cylinder.Ring.LENGTH);
+  private final MountainPool cubeUplifts = new MountainPool(Apotheneum.Cube.Ring.LENGTH);
+  private final MountainPool cylinderUplifts = new MountainPool(Apotheneum.Cylinder.Ring.LENGTH);
 
-  /** Smoothed music level substituting for the old Energy knob (0..1, tau = DRIVE_TAU_SEC) */
-  private double drive = 0;
+  /** Signed conservation-water integrator (0 at rest); displaces the sea around SeaLevel */
+  private double landWater = 0;
 
-  /** Eroded-mountain silt raising the sea goal (0..SILT_MAX, slow decay) */
-  private double silt = 0;
+  /** Previous frame's normalized above-(SeaLevel-reference) land volume, for the signed delta */
+  private double prevAboveVol = 0;
 
   /** Current sea level as a fraction of sculpture height, shared by both surfaces */
   private double seaFrac;
 
-  private int floodPhase = FLOOD_NONE;
-  private double floodElapsedMs = 0;
-  private double floodRiseMs = 0;
-  private double floodSettleMs = 0;
-  private double floodStartFrac = 0;
+  // Eruption phase-crossing detector state
+  private double prevBasis = Double.NaN;
+  private Tempo.Division prevTriggerDiv = null;
 
-  private double shakeMs = 0;
+  private double shakeMs = 0;      // remaining shake time (linear decay)
+  private double shakeDurMs = 1;   // total shake duration (envelope denominator)
   private double shakePhase = 0;
+
+  /** Cataclysm deferred burst: after the ridge animates for a 1/4 bar, fire the
+   *  4-eruption burst. >= 0 while counting down; < 0 = idle. */
+  private double cataclysmEruptMs = -1;
 
   /** Treble flash envelope (1 on a hit, exponential decay) and its per-hit pixel-subset seed */
   private double flash = 0;
   private int flashSeed = 0;
 
-  // Land band colors from the palette: [0] peaks, [1] rock, [2] grass, [3] sand.
-  // Scratch for perceptual hue allocation (no per-frame heap), as in Rubik.
-  private final int[] bandColor = new int[4];
-  private final float[] hueWork = new float[4];
-  private final float[] hueOut = new float[4];
+  // Land band colors from the palette (up to 5). Scratch for perceptual hue
+  // allocation (no per-frame heap), as in Rubik. mBands = active count (>= 1).
+  private final int[] bandColor = new int[5];
+  private final float[] hueWork = new float[5];
+  private final float[] hueOut = new float[5];
+  private int mBands = 1;
 
   public Terraform(LX lx) {
     super(lx);
     this.audio = new AudioReactive(lx).setDepth(this.audioDepth);
-    this.erosion.setExponent(2);
+    this.tempoLock = new TempoLock(lx);
 
     addParameter("cataclysm", this.cataclysm);
-    addParameter("flood", this.flood);
     addParameter("reseed", this.reseed);
     addParameter("erupt", this.erupt);
+    addParameter("triggerDiv", this.triggerDiv);
+    addParameter("chance", this.chance);
+    addParameter("mtnLife", this.mtnLife);
+    addParameter("eruptDuty", this.eruptDuty);
+    addParameter("trigPhase", this.trigPhase);
     addParameter("upliftSize", this.upliftSize);
-    addParameter("erosion", this.erosion);
     addParameter("rough", this.rough);
     addParameter("seaLevel", this.seaLevel);
-    addParameter("water", this.water);
-    addParameter("bandShift", this.bandShift);
+    addParameter("lndWtr", this.lndWtr);
+    addParameter("bands", this.bands);
+    addParameter("bndPhase", this.bndPhase);
     addParameter("smoothing", this.smoothing);
     addParameter("whiteCaps", this.whiteCaps);
     addParameter("trbSprk", this.trbSprk);
     addParameter("audio", this.audioDepth);
 
-    // Start with a formed landscape: seed and snap heights to it
-    seedTerrain(this.cubeTarget, Apotheneum.GRID_HEIGHT);
-    seedTerrain(this.cylinderTarget, Apotheneum.CYLINDER_HEIGHT);
-    System.arraycopy(this.cubeTarget, 0, this.cubeHeight, 0, this.cubeTarget.length);
-    System.arraycopy(this.cylinderTarget, 0, this.cylinderHeight, 0, this.cylinderTarget.length);
-    // Settled sea at rest exactly at SeaLevel (+ Water; silt is 0 at init)
-    this.seaFrac = seaGoal();
-  }
+    // Start with a clear base: no terrain. height[]/smooth[] stay zero-filled, so
+    // the sculpture opens on flat ground (sky + sea at SeaLevel) and every
+    // mountain arrives later as a transient eruption (Erupt / TrigDiv / triggers).
 
-  /** Nominal sea fraction: SeaLevel plus Water reservoir plus erosion silt, clamped. */
-  private double seaGoal() {
-    return LXUtils.constrain(this.seaLevel.getValue() + this.water.getValue() + this.silt, SEA_MIN, SEA_MAX);
+    // Seed the roughness fields with a stable random craggy texture
+    for (int x = 0; x < this.cubeRough.length; ++x) {
+      this.cubeRough[x] = this.cubeRoughTarget[x] = 2 * this.random.nextDouble() - 1;
+    }
+    for (int x = 0; x < this.cylinderRough.length; ++x) {
+      this.cylinderRough[x] = this.cylinderRoughTarget[x] = 2 * this.random.nextDouble() - 1;
+    }
+
+    // Settle the water at rest so there is no start-up jump: landWater = 0,
+    // seaFrac = SeaLevel, and prevAboveVol captured from the (flat) terrain.
+    final int cubeW = this.cubeUplifts.overlay.length;
+    final int cylW = this.cylinderUplifts.overlay.length;
+    final double ref = this.seaLevel.getValue();
+    final double denom = cubeW * Apotheneum.GRID_HEIGHT + cylW * Apotheneum.CYLINDER_HEIGHT;
+    final double sum =
+      aboveVolume(this.cubeHeight, this.cubeUplifts.overlay, ref * Apotheneum.GRID_HEIGHT)
+      + aboveVolume(this.cylinderHeight, this.cylinderUplifts.overlay, ref * Apotheneum.CYLINDER_HEIGHT);
+    this.prevAboveVol = sum / denom;
+    this.landWater = 0;
+    this.seaFrac = ref;
   }
 
   // ---- Triggers --------------------------------------------------------------
 
   private void cataclysm() {
     LX.log("Terraform: cataclysm");
-    addRidge(this.cubeTarget, Apotheneum.GRID_HEIGHT);
-    addRidge(this.cylinderTarget, Apotheneum.CYLINDER_HEIGHT);
-    this.shakeMs = SHAKE_SEC * 1000;
-  }
-
-  private void flood() {
-    LX.log("Terraform: flood");
-    // One beat to rise from the current level to the top on a smoothstep curve,
-    // then eight beats to settle back to the nominal sea. Beat length is
-    // captured at the trigger (as Lorre's tint envelope does).
-    final double beatMs = Math.max(1, this.lx.engine.tempo.period.getValue());
-    this.floodPhase = FLOOD_RISING;
-    this.floodElapsedMs = 0;
-    this.floodStartFrac = this.seaFrac;
-    this.floodRiseMs = FLOOD_RISE_BEATS * beatMs;
-    this.floodSettleMs = FLOOD_SETTLE_BEATS * beatMs;
+    final double durMs = quarterBarMs();
+    bookRidge(this.cubeUplifts, Apotheneum.GRID_HEIGHT, durMs);
+    bookRidge(this.cylinderUplifts, Apotheneum.CYLINDER_HEIGHT, durMs);
+    this.shakeMs = durMs;
+    this.shakeDurMs = durMs;
+    this.cataclysmEruptMs = durMs; // burst 4 eruptions when the ridge finishes
   }
 
   private void erupt() {
     LX.log("Terraform: erupt");
-    spawnEruption();
+    spawnEruptions(1);
   }
 
   private void reseed() {
     LX.log("Terraform: reseed");
-    // Heights are left in place; they chase the new targets over <= RISE_FULL_SEC
-    seedTerrain(this.cubeTarget, Apotheneum.GRID_HEIGHT);
-    seedTerrain(this.cylinderTarget, Apotheneum.CYLINDER_HEIGHT);
+    final double durMs = quarterBarMs();
+    reseedGlide(this.cubeUplifts, durMs);
+    reseedGlide(this.cylinderUplifts, durMs);
   }
 
-  /** A cataclysm mountain range: one huge central bump flanked by two shoulders. */
-  private void addRidge(double[] target, int fullHeight) {
-    final int w = target.length;
+  /** Duration of a 1/4 bar (quarter note) at the current tempo, floored (ms). */
+  private double quarterBarMs() {
+    return Math.max(MTN_LIFE_MIN_MS, this.tempoLock.divisionMs(Tempo.Division.QUARTER));
+  }
+
+  /**
+   * A cataclysm mountain range as a transient overlay ridge: a tall central peak
+   * flanked by two shoulders, rising then falling over {@code durMs} (a 1/4 bar,
+   * duty 0.5 = symmetric) so it leaves no lasting terrain — the base stays clear.
+   */
+  private void bookRidge(MountainPool pool, int fullHeight, double durMs) {
+    final int w = pool.overlay.length;
     final int center = this.random.nextInt(w);
-    final double sigma = w * 0.05;
+    final double sigma = 0.05 * w;
     final int shoulder = (int) (1.5 * sigma);
-    addBump(target, center, 0.85 * fullHeight, sigma, fullHeight);
-    addBump(target, center - shoulder, 0.55 * fullHeight, sigma, fullHeight);
-    addBump(target, center + shoulder, 0.55 * fullHeight, sigma, fullHeight);
+    bookAt(pool, center, 0.85 * fullHeight, sigma, durMs, 0.5);
+    bookAt(pool, center - shoulder, 0.55 * fullHeight, sigma, durMs, 0.5);
+    bookAt(pool, center + shoulder, 0.55 * fullHeight, sigma, durMs, 0.5);
   }
 
-  /** Fresh random landscape: a low base plus a handful of random mountains. */
-  private void seedTerrain(double[] target, int fullHeight) {
-    final int w = target.length;
-    final double base = (0.05 + 0.1 * this.random.nextDouble()) * fullHeight;
-    Arrays.fill(target, base);
-    final int bumps = 3 + w / 40; // cube: 8, cylinder: 6
-    for (int i = 0; i < bumps; ++i) {
-      addBump(target,
-        this.random.nextInt(w),
-        (0.25 + 0.55 * this.random.nextDouble()) * fullHeight,
-        w * (0.02 + 0.04 * this.random.nextDouble()),
-        fullHeight);
+  /**
+   * Reseed: glide every active mountain from its current column to a fresh random
+   * one over {@code durMs} (a 1/4 bar). Amplitude and life are untouched, so each
+   * mountain keeps its current status and no new terrain is created. A no-op when
+   * nothing is active.
+   */
+  private void reseedGlide(MountainPool pool, double durMs) {
+    for (int i = 0; i < MAX_UPLIFTS; ++i) {
+      if (pool.lifeMs[i] <= 0) {
+        continue;
+      }
+      pool.centerFrom[i] = pool.center[i];
+      pool.centerTo[i] = this.random.nextInt(pool.overlay.length);
+      pool.centerAnimMs[i] = 0;
+      pool.centerAnimDur[i] = durMs;
     }
-  }
-
-  /** Add a wrap-aware Gaussian bump to a heightfield, clamped just above full height. */
-  private static void addBump(double[] target, int center, double amp, double sigma, int fullHeight) {
-    addGaussian(target, center, amp, sigma, 1.02 * fullHeight);
   }
 
   /** Add a wrap-aware Gaussian into the uplift overlay (unclamped; clamped at render). */
@@ -377,9 +406,9 @@ public class Terraform extends ApotheneumPattern {
 
   /**
    * The one Gaussian kernel behind bumps and overlays, so a rising overlay is
-   * always the exact shape of the bump it commits as. Windowed to +/- 4 sigma
-   * (tails beyond contribute < 1 LSB of height); the window is capped below
-   * the antipode so no wrap column is visited twice.
+   * always the exact shape of the bump it would commit as. Windowed to +/- 4
+   * sigma (tails beyond contribute < 1 LSB of height); the window is capped
+   * below the antipode so no wrap column is visited twice.
    */
   private static void addGaussian(double[] field, int center, double amp, double sigma, double maxHeight) {
     final int w = field.length;
@@ -403,104 +432,44 @@ public class Terraform extends ApotheneumPattern {
     this.audio.tick(deltaMs);
     final double dt = deltaMs / 1000.0;
 
-    // -- Audio smoother: drive substitutes for the old Energy knob, steering
-    // uplift/erosion/diffusion regimes and the treble flash (never the sea)
-    this.drive += (this.audio.level - this.drive) * Math.min(dt / DRIVE_TAU_SEC, 1);
-
     computeBandColors();
 
-    // -- Advance uplift envelopes; completed ones commit into target + height.
-    // Runs before the spawn decision (so a rise booked this frame is not
-    // credited this frame's pre-booking deltaMs, which would land its peak a
-    // frame early) and before erosion (so a committed bump ages from the
-    // same frame).
-    advanceUplifts(this.cubeUplifts, this.cubeTarget, this.cubeHeight, Apotheneum.GRID_HEIGHT, deltaMs);
-    advanceUplifts(this.cylinderUplifts, this.cylinderTarget, this.cylinderHeight, Apotheneum.CYLINDER_HEIGHT, deltaMs);
+    // -- Tempo-driven eruption scheduling: unconditionally poll the TrigDiv
+    // sawtooth basis and fire (gated by Chance) on the frame it passes Phase.
+    scheduleEruptions();
 
-    // -- Uplift: spontaneous births always run (silence-safe); bass adds when
-    // the music drives hard. Births are a free-running Poisson timer (the
-    // per-frame probability preserves the expected rate).
-    final double upliftRate = Ranges.exp(this.drive, UPLIFT_RATE_AMBIENT_HZ, UPLIFT_RATE_PEAK_HZ);
-    final boolean timerUplift = this.random.nextDouble() < upliftRate * deltaMs * 0.001;
-    // Gate scaled by depth() so it reads the depth-independent smoothed level:
-    // drive tops out at the Audio knob value, and a fixed gate would silently
-    // disable bass uplifts for any knob setting below it
-    final boolean bassUplift = (this.drive >= BASS_UPLIFT_MIN_LEVEL * this.audio.depth()) && this.audio.bassHit();
-    if (timerUplift || bassUplift) {
-      // Bass-born mountains scale by how hard the transient hit
-      spawnUplift(bassUplift ? 0.6 + 0.4 * Math.min(this.audio.bassRatio, 2.5) / 2.5 : 1);
-    }
+    // -- Advance mountain lifecycles: rebuild the additive overlay each frame,
+    // free any that reached end of life (no commit — they fully vanish).
+    advanceMountains(this.cubeUplifts, deltaMs);
+    advanceMountains(this.cylinderUplifts, deltaMs);
 
-    // -- Roughness: continuous small jitter bumps and divots on the targets
-    final double roughExpect = this.rough.getValue() * ROUGH_RATE_MAX_HZ * dt;
-    roughen(this.cubeTarget, Apotheneum.GRID_HEIGHT, roughExpect);
-    roughen(this.cylinderTarget, Apotheneum.CYLINDER_HEIGHT, roughExpect);
+    // -- Roughness: slowly drift the per-column noise field (zero allocation)
+    driftRough(this.cubeRough, this.cubeRoughTarget);
+    driftRough(this.cylinderRough, this.cylinderRoughTarget);
 
-    // -- Erosion: diffusion + subsidence on targets; heights chase rate-limited.
-    // The diffusion pass is sub-stepped so the stencil stays stable (each
-    // sub-step k <= DIFFUSION_MAX_FRAME < 0.5) at the 10x top of the knob.
-    // The silt loss is measured inside advanceTerrain, so it covers exactly
-    // diffusion + subsidence — uplift commits and roughness jitter must stay
-    // ABOVE this point or their target[] writes would be counted as erosion.
-    final double kTotal = this.erosion.getValue() * Ranges.lin(this.drive, DIFFUSION_AMBIENT, DIFFUSION_PEAK) * dt;
-    int diffusionSteps = 1 + (int) (kTotal / DIFFUSION_MAX_FRAME);
-    if (diffusionSteps > MAX_DIFFUSION_STEPS) {
-      diffusionSteps = MAX_DIFFUSION_STEPS;
-    }
-    final double kStep = Math.min(kTotal / diffusionSteps, DIFFUSION_MAX_FRAME);
-    final double subsideTau = Ranges.exp(this.drive, SUBSIDE_TAU_AMBIENT_SEC, SUBSIDE_TAU_PEAK_SEC);
-    final double subsideAlpha = 1 - Math.exp(-this.erosion.getValue() * dt / subsideTau);
-    final double cubeLoss = advanceTerrain(this.cubeTarget, this.cubeHeight, this.cubeScratch,
-      Apotheneum.GRID_HEIGHT, dt, kStep, diffusionSteps, subsideAlpha, this.seaFrac * Apotheneum.GRID_HEIGHT);
-    final double cylinderLoss = advanceTerrain(this.cylinderTarget, this.cylinderHeight, this.cylinderScratch,
-      Apotheneum.CYLINDER_HEIGHT, dt, kStep, diffusionSteps, subsideAlpha, this.seaFrac * Apotheneum.CYLINDER_HEIGHT);
+    // -- Conservation water: signed integrator around the SeaLevel reference.
+    updateWater(dt);
 
-    // -- Silt: eroded above-sea volume raises the sea goal, washing out slowly
-    this.silt += SILT_GAIN * 0.5 * (cubeLoss + cylinderLoss);
-    this.silt -= this.silt * Math.min(dt / SILT_DECAY_SEC, 1);
-    if (this.silt > SILT_MAX) {
-      this.silt = SILT_MAX;
-    }
-
-    // -- Sea level: rests at the nominal goal (SeaLevel + Water + silt),
-    // independent of the music. Flood drives seaFrac directly over its
-    // smoothstep envelope; otherwise the sea chases the goal within a beat so
-    // parameter moves ease rather than jump.
-    final double nominal = seaGoal();
-    if (this.floodPhase == FLOOD_RISING) {
-      this.floodElapsedMs += deltaMs;
-      final double t = Math.min(this.floodElapsedMs / this.floodRiseMs, 1);
-      final double p = t * t * (3 - 2 * t);
-      this.seaFrac = LXUtils.lerp(this.floodStartFrac, SEA_FLOOD, p);
-      if (t >= 1) {
-        this.floodPhase = FLOOD_SETTLING;
-        this.floodElapsedMs = 0;
-      }
-    } else if (this.floodPhase == FLOOD_SETTLING) {
-      this.floodElapsedMs += deltaMs;
-      final double t = Math.min(this.floodElapsedMs / this.floodSettleMs, 1);
-      final double p = t * t * (3 - 2 * t);
-      this.seaFrac = LXUtils.lerp(SEA_FLOOD, nominal, p); // settle to the live nominal
-      if (t >= 1) {
-        this.floodPhase = FLOOD_NONE;
-      }
-    } else {
-      final double seaRate = 1000 / this.lx.engine.tempo.period.getValue(); // full sweep in one beat
-      this.seaFrac += LXUtils.constrain(nominal - this.seaFrac, -seaRate * dt, seaRate * dt);
-    }
-
-    // -- Cataclysm shake envelope (<= 0.5 s, linearly decaying)
+    // -- Cataclysm shake envelope (1/4 bar, linearly decaying)
     double shakeAmp = 0;
     if (this.shakeMs > 0) {
       this.shakeMs -= deltaMs;
       this.shakePhase += dt * SHAKE_RATE_HZ * 2 * Math.PI;
-      shakeAmp = SHAKE_AMP_ROWS * Math.max(this.shakeMs, 0) / (SHAKE_SEC * 1000);
+      shakeAmp = SHAKE_AMP_ROWS * Math.max(this.shakeMs, 0) / this.shakeDurMs;
+    }
+
+    // -- Cataclysm deferred burst: once the ridge has animated a 1/4 bar, launch
+    // the 4-eruption burst on each surface.
+    if (this.cataclysmEruptMs >= 0) {
+      this.cataclysmEruptMs -= deltaMs;
+      if (this.cataclysmEruptMs <= 0) {
+        this.cataclysmEruptMs = -1;
+        spawnEruptions(4);
+      }
     }
 
     // -- Treble flash: each treble hit fires a white burst on a fresh random
-    // subset of peak pixels, decaying fast enough to read as a strobe glint.
-    // Hits are boolean at any depth > 0.01, so the burst amplitude carries
-    // the depth scaling itself (the AudioReactive hit-response contract)
+    // subset of crest pixels, decaying fast enough to read as a strobe glint.
     if (this.audio.trebleHit()) {
       this.flash = this.audio.depth();
       this.flashSeed = this.random.nextInt();
@@ -509,280 +478,381 @@ public class Terraform extends ApotheneumPattern {
     final int flashByte = (int) (256 * FLASH_COVERAGE * this.trbSprk.getValue());
     final double flashLevel = ((this.flash > 0.02) && (flashByte > 0)) ? this.flash : 0;
 
+    // Crest motion low-pass factor: 1 = instant (Smooth 0), small = slow glide
+    final double crestAlpha = LXUtils.constrain(1 - this.smoothing.getValue() * CREST_MOTION_MAX, 0.02, 1);
+
     setColors(LXColor.BLACK);
     renderSurface(Apotheneum.cube.exterior, this.cubeHeight, this.cubeUplifts.overlay,
-      Apotheneum.GRID_HEIGHT, shakeAmp, flashLevel, flashByte);
+      this.cubeRough, this.cubeSmooth, Apotheneum.GRID_HEIGHT, shakeAmp, crestAlpha, flashLevel, flashByte);
     renderSurface(Apotheneum.cylinder.exterior, this.cylinderHeight, this.cylinderUplifts.overlay,
-      Apotheneum.CYLINDER_HEIGHT, shakeAmp, flashLevel, flashByte);
+      this.cylinderRough, this.cylinderSmooth, Apotheneum.CYLINDER_HEIGHT, shakeAmp, crestAlpha, flashLevel, flashByte);
     copyCubeExterior();
     copyCylinderExterior();
   }
 
   /**
-   * Land band colors from the current palette swatch: peaks <- swatch 0,
-   * rock <- 1, grass <- 2, sand <- 3. A short swatch is completed with
-   * fully-saturated hues placed perceptually even against the defined ones
-   * (same rules as Rubik's face colors). WhtCps forces the peaks band pure
-   * white and discards swatch 0 without shifting the other bands.
+   * Poll the TrigDiv sawtooth basis and, on the frame it passes the Phase
+   * offset, spawn an eruption on each surface with probability Chance. A
+   * division change or the first frame resyncs without firing.
    */
-  private void computeBandColors() {
-    final List<LXDynamicColor> swatch = this.lx.engine.palette.swatch.colors;
-    final int first = this.whiteCaps.isOn() ? 1 : 0;
-    if (first == 1) {
-      this.bandColor[0] = LXColor.WHITE;
+  private void scheduleEruptions() {
+    final Tempo.Division div = this.triggerDiv.getEnum();
+    final double basis = this.lx.engine.tempo.getBasis(div);
+    final double phase = this.trigPhase.getValue();
+    final boolean divChanged = (div != this.prevTriggerDiv);
+    if (!divChanged && !Double.isNaN(this.prevBasis)
+        && crossedPhase(this.prevBasis, basis, phase)
+        && (this.random.nextDouble() < this.chance.getValue())) {
+      spawnEruptions(1);
     }
-    int defined = 0;
-    for (int i = first; i < 4; ++i) {
-      if (i < swatch.size()) {
-        final int c = swatch.get(i).getColor();
-        this.bandColor[i] = c;
-        this.hueWork[defined++] = PerceptualHue.toPerceptualPosition(LXColor.h(c));
-      }
+    this.prevBasis = basis;
+    this.prevTriggerDiv = div;
+  }
+
+  /**
+   * Did the 0..1 sawtooth pass {@code phase} going from {@code prev} to
+   * {@code cur}? Within one cycle (cur >= prev) it is prev &lt; phase &lt;= cur;
+   * on a wrap (cur &lt; prev) it is (prev &lt; phase) || (phase &lt;= cur).
+   */
+  private static boolean crossedPhase(double prev, double cur, double phase) {
+    if (cur >= prev) {
+      return (prev < phase) && (phase <= cur);
     }
-    final int generate = (4 - first) - defined;
-    if (generate > 0) {
-      PerceptualHue.fillCircle(this.hueWork, defined, generate, this.hueOut);
-      int j = 0;
-      for (int i = Math.max(first, swatch.size()); i < 4; ++i) {
-        this.bandColor[i] = PerceptualHue.color(this.hueOut[j++]);
-      }
+    return (prev < phase) || (phase <= cur);
+  }
+
+  /** Spawn {@code n} breach-forced eruptions on each surface (independent random centers). */
+  private void spawnEruptions(int n) {
+    for (int i = 0; i < n; ++i) {
+      bookMountain(this.cubeUplifts, this.cubeHeight, Apotheneum.GRID_HEIGHT);
+      bookMountain(this.cylinderUplifts, this.cylinderHeight, Apotheneum.CYLINDER_HEIGHT);
     }
   }
 
   /**
-   * Terrain aging: sub-stepped neighbor diffusion (wrap-continuous) plus
-   * exponential subsidence on target[], then height[] chases target[] with the
-   * per-point rate limit (full height in no less than RISE_FULL_SEC).
-   *
-   * @return the normalized loss of visible (above-sea) terrain volume this
-   *         frame, in units of (w x fullHeight) — the silt source
+   * Book one rise-then-fall mountain: amplitude scaled by Uplift but forced high
+   * enough to breach the current sea by ERUPT_MARGIN_ROWS so it is always
+   * visible. Life = MtnLife, rise fraction = Duty. No terrain commit ever.
    */
-  private static double advanceTerrain(double[] target, double[] height, double[] scratch,
-                                       int fullHeight, double dt, double kStep, int steps,
-                                       double subsideAlpha, double seaRows) {
-    final int w = target.length;
-    double visBefore = 0;
-    for (int x = 0; x < w; ++x) {
-      if (target[x] > seaRows) {
-        visBefore += target[x] - seaRows;
-      }
-    }
-    for (int s = 0; s < steps; ++s) {
-      System.arraycopy(target, 0, scratch, 0, w);
-      for (int x = 0; x < w; ++x) {
-        final double left = scratch[(x + w - 1) % w];
-        final double right = scratch[(x + 1) % w];
-        target[x] = scratch[x] + kStep * (left + right - 2 * scratch[x]);
-      }
-    }
-    final double maxStep = fullHeight * dt / RISE_FULL_SEC;
-    double visAfter = 0;
-    for (int x = 0; x < w; ++x) {
-      double t = target[x];
-      t -= t * subsideAlpha; // slump toward the sea floor
-      if (t < 0) {
-        t = 0;
-      }
-      target[x] = t;
-      if (t > seaRows) {
-        visAfter += t - seaRows;
-      }
-      final double d = t - height[x];
-      height[x] += (d > maxStep) ? maxStep : (d < -maxStep) ? -maxStep : d;
-    }
-    final double loss = visBefore - visAfter;
-    return (loss > 0) ? loss / (w * fullHeight) : 0;
-  }
-
-  /** Continuous roughness jitter: expect bumps this frame, +/- amplitude, tiny sigma. */
-  private void roughen(double[] target, int fullHeight, double expect) {
-    int n = (int) expect + ((this.random.nextDouble() < expect - (int) expect) ? 1 : 0);
-    while (n-- > 0) {
-      addBump(target,
-        this.random.nextInt(target.length),
-        (2 * this.random.nextDouble() - 1) * ROUGH_AMP_FRAC * fullHeight,
-        1 + 2 * this.random.nextDouble(),
-        fullHeight);
-    }
-  }
-
-  /**
-   * Book one new mountain on each surface (random independent centers),
-   * sized by drive and the Uplift knob, optionally scaled by ampScale. The
-   * rise is an eased envelope over UPLIFT_RISE_MS.
-   * Zero-allocation; called from the spontaneous/bass render path. The Erupt
-   * trigger uses spawnEruption instead (guaranteed to breach the sea).
-   */
-  private void spawnUplift(double ampScale) {
-    final double ampFrac = ampScale * this.upliftSize.getValue() * Ranges.lin(this.drive, UPLIFT_AMP_AMBIENT, UPLIFT_AMP_PEAK);
-    final double sigmaFrac = Ranges.lin(this.drive, UPLIFT_SIGMA_AMBIENT, UPLIFT_SIGMA_PEAK);
-    final double durMs = UPLIFT_RISE_MS;
-    final int cubeW = this.cubeUplifts.overlay.length;
-    final int cylW = this.cylinderUplifts.overlay.length;
-    bookUplift(this.cubeUplifts, this.cubeTarget, this.cubeHeight, Apotheneum.GRID_HEIGHT,
-      this.random.nextInt(cubeW), ampFrac * Apotheneum.GRID_HEIGHT, sigmaFrac, durMs);
-    bookUplift(this.cylinderUplifts, this.cylinderTarget, this.cylinderHeight, Apotheneum.CYLINDER_HEIGHT,
-      this.random.nextInt(cylW), ampFrac * Apotheneum.CYLINDER_HEIGHT, sigmaFrac, durMs);
-  }
-
-  /**
-   * Erupt: raise one new mountain on each surface whose crest always lands
-   * ERUPT_MARGIN_ROWS above the current sea surface, so a new peak is always
-   * visibly above the water regardless of the sea level or the local terrain.
-   */
-  private void spawnEruption() {
-    final double ampFrac = this.upliftSize.getValue() * Ranges.lin(this.drive, UPLIFT_AMP_AMBIENT, UPLIFT_AMP_PEAK);
-    final double sigmaFrac = Ranges.lin(this.drive, UPLIFT_SIGMA_AMBIENT, UPLIFT_SIGMA_PEAK);
-    final double durMs = UPLIFT_RISE_MS;
-    bookEruption(this.cubeUplifts, this.cubeTarget, this.cubeHeight, Apotheneum.GRID_HEIGHT, ampFrac, sigmaFrac, durMs);
-    bookEruption(this.cylinderUplifts, this.cylinderTarget, this.cylinderHeight, Apotheneum.CYLINDER_HEIGHT, ampFrac, sigmaFrac, durMs);
-  }
-
-  /** Book one eruption: amplitude forced high enough to breach the current sea. */
-  private void bookEruption(UpliftPool pool, double[] target, double[] height, int fullHeight,
-                            double ampFrac, double sigmaFrac, double durMs) {
-    final int center = this.random.nextInt(pool.overlay.length);
-    final double baseAmpRows = ampFrac * fullHeight;
-    final double neededRows = this.seaFrac * fullHeight + ERUPT_MARGIN_ROWS - height[center];
-    bookUplift(pool, target, height, fullHeight, center, Math.max(baseAmpRows, neededRows), sigmaFrac, durMs);
-  }
-
-  private void bookUplift(UpliftPool pool, double[] target, double[] height, int fullHeight,
-                          int center, double ampRows, double sigmaFrac, double durMs) {
+  private void bookMountain(MountainPool pool, double[] height, int fullHeight) {
     final int w = pool.overlay.length;
-    int slot = -1;
+    final int center = this.random.nextInt(w);
+    final double lifeMs = Math.max(MTN_LIFE_MIN_MS, this.tempoLock.divisionMs(this.mtnLife.getEnum()));
+    final double duty = LXUtils.constrain(this.eruptDuty.getValue(), 0.01, 0.99);
+    double ampRows = this.upliftSize.getValue() * UPLIFT_AMP_FRAC * fullHeight;
+    // Breach: force the crest at least ERUPT_MARGIN_ROWS above the current sea
+    final double waterRows = this.seaFrac * fullHeight;
+    final double neededRows = waterRows + ERUPT_MARGIN_ROWS - height[center];
+    if (ampRows < neededRows) {
+      ampRows = neededRows;
+    }
+    final double sigmaCols = Math.max(2, UPLIFT_SIGMA_FRAC * w);
+    bookAt(pool, center, ampRows, sigmaCols, lifeMs, duty);
+  }
+
+  /** A free slot, or (pool full) the most-progressed one, stolen (no commit — a
+   *  near-done mountain vanishing is imperceptible, and nothing pops). */
+  private static int allocSlot(MountainPool pool) {
     for (int i = 0; i < MAX_UPLIFTS; ++i) {
-      if (pool.durMs[i] <= 0) {
+      if (pool.lifeMs[i] <= 0) {
+        return i;
+      }
+    }
+    int slot = 0;
+    double best = -1;
+    for (int i = 0; i < MAX_UPLIFTS; ++i) {
+      final double p = pool.elapsedMs[i] / pool.lifeMs[i];
+      if (p > best) {
+        best = p;
         slot = i;
-        break;
       }
     }
-    if (slot < 0) {
-      // Pool full: steal the most-progressed rise by handing it to the
-      // background chase without a pop — height keeps exactly the eased
-      // fraction the overlay was showing (and that overlay contribution is
-      // cancelled), target gets the full bump, and the chase raises the rest
-      double best = -1;
-      for (int i = 0; i < MAX_UPLIFTS; ++i) {
-        final double p = pool.elapsedMs[i] / pool.durMs[i];
-        if (p > best) {
-          best = p;
-          slot = i;
-        }
-      }
-      final double s = Math.min(pool.elapsedMs[slot] / pool.durMs[slot], 1);
-      final double p = s * s * (3 - 2 * s);
-      addBump(target, pool.center[slot], pool.ampRows[slot], pool.sigmaCols[slot], fullHeight);
-      addBump(height, pool.center[slot], p * pool.ampRows[slot], pool.sigmaCols[slot], fullHeight);
-      addOverlayBump(pool.overlay, pool.center[slot], -p * pool.ampRows[slot], pool.sigmaCols[slot]);
-      pool.durMs[slot] = 0;
-    }
+    return slot;
+  }
+
+  /** Fill a fresh mountain slot at a resting center (no glide) with the given envelope. */
+  private static void bookAt(MountainPool pool, double center, double ampRows,
+                             double sigmaCols, double lifeMs, double duty) {
+    final int slot = allocSlot(pool);
     pool.center[slot] = center;
     pool.ampRows[slot] = ampRows;
-    pool.sigmaCols[slot] = Math.max(2, sigmaFrac * w);
+    pool.sigmaCols[slot] = sigmaCols;
     pool.elapsedMs[slot] = 0;
-    pool.durMs[slot] = durMs;
+    pool.lifeMs[slot] = lifeMs;
+    pool.dutyFrac[slot] = duty;
+    pool.centerAnimDur[slot] = 0; // resting; not gliding
   }
 
-  /** Write an uplift's full Gaussian into both fields and free its slot. */
-  private static void commitUplift(UpliftPool pool, int i, double[] target, double[] height, int fullHeight) {
-    addBump(target, pool.center[i], pool.ampRows[i], pool.sigmaCols[i], fullHeight);
-    addBump(height, pool.center[i], pool.ampRows[i], pool.sigmaCols[i], fullHeight);
-    pool.durMs[i] = 0;
-  }
-
-  /** Advance one surface's uplift envelopes: rebuild the overlay, commit any that hit their deadline. */
-  private static void advanceUplifts(UpliftPool pool, double[] target, double[] height, int fullHeight, double deltaMs) {
+  /**
+   * Advance one surface's mountain lifecycles: rebuild the additive overlay
+   * from each active envelope, free any that reached end of life. The envelope
+   * rises (smoothstep 0->1) over the Duty fraction, then falls (1->0) over the
+   * remainder; at end of life the slot frees with no terrain commit. A slot may
+   * also be gliding its center to a new column (Reseed) over centerAnimDur.
+   */
+  private static void advanceMountains(MountainPool pool, double deltaMs) {
+    final int w = pool.overlay.length;
     Arrays.fill(pool.overlay, 0);
     for (int i = 0; i < MAX_UPLIFTS; ++i) {
-      if (pool.durMs[i] <= 0) {
+      if (pool.lifeMs[i] <= 0) {
         continue;
       }
       pool.elapsedMs[i] += deltaMs;
-      final double s = pool.elapsedMs[i] / pool.durMs[i];
-      if (s >= 1) {
-        commitUplift(pool, i, target, height, fullHeight);
-      } else {
-        final double p = s * s * (3 - 2 * s); // smoothstep ease, exactly 1 at the deadline
-        addOverlayBump(pool.overlay, pool.center[i], p * pool.ampRows[i], pool.sigmaCols[i]);
+      final double p = pool.elapsedMs[i] / pool.lifeMs[i];
+      if (p >= 1) {
+        pool.lifeMs[i] = 0; // vanished; free the slot
+        continue;
       }
+      // Reseed center glide: interpolate along the shortest wrap path, then rest.
+      if (pool.centerAnimDur[i] > 0) {
+        pool.centerAnimMs[i] += deltaMs;
+        final double g = pool.centerAnimMs[i] / pool.centerAnimDur[i];
+        if (g >= 1) {
+          pool.center[i] = Math.floorMod((int) Math.round(pool.centerTo[i]), w);
+          pool.centerAnimDur[i] = 0;
+        } else {
+          pool.center[i] = wrapLerp(pool.centerFrom[i], pool.centerTo[i], smoothstep(g), w);
+        }
+      }
+      final double duty = pool.dutyFrac[i];
+      final double e = (p < duty)
+        ? smoothstep(p / duty)
+        : smoothstep(1 - (p - duty) / (1 - duty));
+      final int center = Math.floorMod((int) Math.round(pool.center[i]), w);
+      addOverlayBump(pool.overlay, center, e * pool.ampRows[i], pool.sigmaCols[i]);
+    }
+  }
+
+  /** Interpolate a ring column from {@code from} to {@code to} along the shortest
+   *  wrap path, returned in [0, w). */
+  private static double wrapLerp(double from, double to, double t, int w) {
+    double delta = to - from;
+    delta -= w * Math.floor(delta / w + 0.5); // shortest signed delta in (-w/2, w/2]
+    double c = from + delta * t;
+    c -= w * Math.floor(c / w); // wrap into [0, w)
+    return c;
+  }
+
+  /** Slowly drift a roughness field: re-target a few random columns, ease all toward target. */
+  private void driftRough(double[] field, double[] target) {
+    for (int k = 0; k < ROUGH_RETARGET_PER_FRAME; ++k) {
+      target[this.random.nextInt(field.length)] = 2 * this.random.nextDouble() - 1;
+    }
+    for (int x = 0; x < field.length; ++x) {
+      field[x] += (target[x] - field[x]) * ROUGH_EASE;
+    }
+  }
+
+
+  /**
+   * Conservation-of-mass water: a signed integrator around the SeaLevel
+   * reference. Rising land (above-reference volume up) pulls the sea down,
+   * eroding land (volume down) lets it rise, and at rest the integrator decays
+   * to 0 so the sea settles back to SeaLevel. The reference is the knob (not the
+   * live water), so there is no feedback loop. The final fraction is clamped to
+   * [0,1] with an env(s) = 4 s (1 - s) weight, so SeaLevel 0 = dry and 1 = full.
+   */
+  private void updateWater(double dt) {
+    final int cubeW = this.cubeUplifts.overlay.length;
+    final int cylW = this.cylinderUplifts.overlay.length;
+    final double ref = this.seaLevel.getValue();
+    final double denom = cubeW * Apotheneum.GRID_HEIGHT + cylW * Apotheneum.CYLINDER_HEIGHT;
+    final double sum =
+      aboveVolume(this.cubeHeight, this.cubeUplifts.overlay, ref * Apotheneum.GRID_HEIGHT)
+      + aboveVolume(this.cylinderHeight, this.cylinderUplifts.overlay, ref * Apotheneum.CYLINDER_HEIGHT);
+    final double aboveVol = sum / denom;
+
+    double dVol = aboveVol - this.prevAboveVol;
+    dVol = LXUtils.constrain(dVol, -LAND_WATER_DVOL_CLAMP, LAND_WATER_DVOL_CLAMP);
+    this.landWater -= LAND_WATER_GAIN * dVol;            // rise -> water down; erosion -> water up
+    this.landWater -= this.landWater * Math.min(dt / LAND_WATER_TAU, 1); // decay to 0 at rest
+    this.prevAboveVol = aboveVol;
+
+    final double s = ref;
+    final double env = 4 * s * (1 - s); // 0 at s=0 and s=1, peak 1 at s=0.5
+    this.seaFrac = LXUtils.constrain(s + this.lndWtr.getValue() * env * this.landWater, 0, 1);
+  }
+
+  /** Sum over columns of max(0, (height + overlay) - seaRefRows): above-reference land volume. */
+  private static double aboveVolume(double[] height, double[] overlay, double seaRefRows) {
+    double sum = 0;
+    for (int x = 0; x < height.length; ++x) {
+      final double v = height[x] + overlay[x] - seaRefRows;
+      if (v > 0) {
+        sum += v;
+      }
+    }
+    return sum;
+  }
+
+  /**
+   * Land band colors from the current palette swatch: M = max(1, Bands) equal
+   * bands ground->peak. The first min(M, swatch) colors come straight from the
+   * swatch (anchored at their perceptual hue positions); any remaining bands are
+   * generated perceptually (Rubik/Satori fillCircle idiom). WhtCps forces the
+   * highest band (M-1) pure white without shifting the others. M = 1 is
+   * monochrome bandColor[0].
+   */
+  private void computeBandColors() {
+    final List<LXDynamicColor> swatch = this.lx.engine.palette.swatch.colors;
+    final int m = Math.max(1, this.bands.getValuei());
+    this.mBands = m;
+
+    final int defined = Math.min(m, swatch.size());
+    for (int i = 0; i < defined; ++i) {
+      final int c = swatch.get(i).getColor();
+      this.bandColor[i] = c;
+      this.hueWork[i] = PerceptualHue.toPerceptualPosition(LXColor.h(c));
+    }
+    final int generate = m - defined;
+    if (generate > 0) {
+      PerceptualHue.fillCircle(this.hueWork, defined, generate, this.hueOut);
+      for (int j = 0; j < generate; ++j) {
+        this.bandColor[defined + j] = PerceptualHue.color(this.hueOut[j]);
+      }
+    }
+    if (this.whiteCaps.isOn()) {
+      this.bandColor[m - 1] = LXColor.WHITE; // snow cap on the highest band
     }
   }
 
   /**
    * Draw one surface's skyline into the exterior color buffer. Elevation is
    * counted in rows above the ground: column.points[0] is the top row, so
-   * elev = fullHeight - 1 - yi. Every column carries the full point count
-   * (the model enforces this; door cutouts are masked by the core doors
-   * effect, not by shorter columns) — indexing elevation from the top keeps
-   * the sea and band thresholds aligned across all columns regardless.
+   * elev = fullHeight - 1 - yi. Every column carries the full point count (the
+   * model enforces this; door cutouts are masked by the core doors effect, not
+   * by shorter columns), so indexing elevation from the top keeps the sea and
+   * band boundaries aligned across all columns.
+   *
+   * <p>Per column: the displayed height (base + eruption overlay + roughness +
+   * shake) is low-passed into smoothHeight[] (the crest glides at high Smooth,
+   * snaps at Smooth 0), then rendered. Land is colored by circular elevation
+   * band; the band edges, land/sky silhouette and sea surface are all
+   * antialiased over +/- hw rows.
    */
   private void renderSurface(Apotheneum.Orientation surface, double[] height, double[] overlay,
-                             int fullHeight, double shakeAmp, double flashLevel, int flashByte) {
+                             double[] roughField, double[] smoothHeight, int fullHeight,
+                             double shakeAmp, double crestAlpha, double flashLevel, int flashByte) {
     final double seaRows = this.seaFrac * fullHeight;
-    final double shiftRows = this.bandShift.getValue() * fullHeight;
-    final double sandTop = SAND_TOP * fullHeight + shiftRows;
-    final double grassTop = GRASS_TOP * fullHeight + shiftRows;
-    final double rockTop = ROCK_TOP * fullHeight + shiftRows;
-    final double flashFloor = rockTop - FLASH_ROCK_SPILL_ROWS;
-    // Anti-alias half-width (rows) for band and sea-surface edges; 0 = hard edges
+    // At SeaLevel 0 the surface sits on the physical ground plane, so the AA
+    // band that would straddle it has nowhere below to render — draw nothing
+    // wet at all. Without this the bottom row pins at a 50% waterline tint
+    // (edge() is 0.5 exactly at the boundary), breaking the "0 = dry" invariant.
+    final boolean dry = this.seaFrac <= 0;
+    final int m = this.mBands;
+    final double phaseShift = this.bndPhase.getValue();
+    final double roughAmp = this.rough.getValue() * ROUGH_AMP_FRAC * fullHeight;
+    // Anti-alias half-width (rows) for band, silhouette and sea-surface edges; 0 = hard
     final double hw = this.smoothing.getValue() * SMOOTH_MAX_ROWS;
-    // White flash on white caps would be invisible; crackle the peaks dark instead
-    final boolean flashDarkPeaks = this.whiteCaps.isOn();
+    // White-cap crests flash dark (white-on-white would be invisible)
+    final int flashColor = this.whiteCaps.isOn() ? LXColor.BLACK : LXColor.WHITE;
+
     final Apotheneum.Column[] columns = surface.columns();
     for (int x = 0; x < columns.length; ++x) {
-      double h = height[x] + overlay[x];
+      // Displayed height = flat base + eruption overlay + (land-gated) roughness
+      // + shake. Roughness fades in with land height so cleared ground stays flat
+      // and eruptions don't pop craggy at birth.
+      final double landRows = height[x] + overlay[x];
+      final double roughGate = LXUtils.constrain(landRows / ROUGH_FADE_ROWS, 0, 1);
+      double disp = landRows + roughAmp * roughField[x] * roughGate;
       if (shakeAmp > 0) {
-        h += shakeAmp * Math.sin(x * SHAKE_WAVE + this.shakePhase);
+        disp += shakeAmp * Math.sin(x * SHAKE_WAVE + this.shakePhase);
       }
+      // Motion low-pass: instant at Smooth 0 (alpha 1), gliding at Smooth 1
+      smoothHeight[x] += (disp - smoothHeight[x]) * crestAlpha;
+      final double h = smoothHeight[x];
+
       final Apotheneum.Column column = columns[x];
       final int len = column.points.length;
       for (int yi = 0; yi < len; ++yi) {
         final int elev = fullHeight - 1 - yi; // rows above the physical ground
 
-        // Land color with smoothed band-to-band edges: chained lerps across the
-        // band tops. Bands are far wider than hw, so at most one edge blends.
-        int land = this.bandColor[3];
-        land = LXColor.lerp(land, this.bandColor[2], (float) edge(elev, sandTop, hw));
-        land = LXColor.lerp(land, this.bandColor[1], (float) edge(elev, grassTop, hw));
-        land = LXColor.lerp(land, this.bandColor[0], (float) edge(elev, rockTop, hw));
-        // Treble flash: white bursts on the peaks band plus a short spill into
-        // the rock band; the flashing subset is stable across one flash's decay
-        // (hash re-seeded per hit) so it reads as a burst
-        if ((flashLevel > 0) && (elev >= flashFloor)) {
+        int land = bandLandColor(elev, fullHeight, m, phaseShift, hw);
+
+        // Treble flash: white (or dark under WhtCps) bursts on the top rows of
+        // the terrain; the flashing subset is stable across one flash's decay.
+        if ((flashLevel > 0) && (elev <= h) && (elev >= h - FLASH_CREST_ROWS)) {
           int hh = (x * 0x9E3779B1) ^ (elev * 0x85EBCA6B) ^ this.flashSeed;
           hh ^= hh >>> 15;
           hh *= 0x2C1B3C6D;
           hh ^= hh >>> 12;
           if ((hh & 0xFF) < flashByte) {
-            final int flashColor = (flashDarkPeaks && (elev >= rockTop)) ? LXColor.BLACK : LXColor.WHITE;
             land = LXColor.lerp(land, flashColor, (float) flashLevel);
           }
         }
 
-        // Above the water: land up to the terrain top, sky beyond. The land/sky
-        // silhouette at h stays a hard edge (only bands and the sea top smooth).
-        final int aboveWater = (elev <= h) ? land : SKY;
+        // Land below the crest, sky above, antialiased across the silhouette
+        final int aboveWater = LXColor.lerp(land, SKY, (float) edge(elev, h, hw));
 
-        // Water (bright specular waterline on the top row), then the smoothed
-        // sea surface: water below, the above-water color above.
-        final int waterCol = (elev > seaRows - 1) ? WATERLINE : WATER_DEEP;
-        this.colors[column.points[yi].index] =
-          LXColor.lerp(waterCol, aboveWater, (float) edge(elev, seaRows, hw));
+        // Water (bright specular waterline on the top row) below the sea surface,
+        // antialiased at the surface into the above-water color. When dry there
+        // is no sea, so skip the water term entirely (see `dry` above).
+        if (dry) {
+          this.colors[column.points[yi].index] = aboveWater;
+        } else {
+          final int waterCol = (elev > seaRows - 1) ? WATERLINE : WATER_DEEP;
+          this.colors[column.points[yi].index] =
+            LXColor.lerp(waterCol, aboveWater, (float) edge(elev, seaRows, hw));
+        }
       }
     }
   }
 
   /**
+   * Color of a land pixel at elevation {@code elev} under M circular color
+   * bands with the given phase shift, antialiased between adjacent bands over
+   * +/- hw rows. M = 1 is monochrome. The bands are circular, so band M-1 blends
+   * into band 0 (phase 0 == phase 1, top and bottom can share a color).
+   */
+  private int bandLandColor(int elev, int fullHeight, int m, double phaseShift, double hw) {
+    if (m <= 1) {
+      return this.bandColor[0];
+    }
+    final double u = elev / (double) fullHeight;       // 0..1 up the wall
+    double pos = u + phaseShift;
+    pos -= Math.floor(pos);                            // frac -> circular [0,1)
+    final double b = pos * m;                          // band coordinate [0, m)
+    int idx = (int) b;
+    if (idx >= m) {
+      idx = m - 1;
+    }
+    final int base = this.bandColor[idx];
+    if (hw <= 0) {
+      return base; // hard bands
+    }
+    // Blend toward the nearest band boundary in ROWS. One band spans
+    // fullHeight/m rows; distances to the boundaries above/below this pixel:
+    final double fb = b - idx;                          // fractional band position [0,1)
+    final double rowsPerBand = fullHeight / (double) m;
+    final double dUp = (1 - fb) * rowsPerBand;          // rows up to the next boundary
+    final double dDown = fb * rowsPerBand;              // rows down to the previous boundary
+    if (dUp <= dDown) {
+      // Near the upper boundary: blend toward the next band (0.5 weight at the
+      // boundary, fading to 0 by hw rows below it) — continuous across the seam.
+      final double w = 0.5 * (1 - smoothstep(dUp / hw));
+      return LXColor.lerp(base, this.bandColor[(idx + 1) % m], (float) w);
+    }
+    // Near the lower boundary: blend toward the previous band, symmetrically.
+    final double w = 0.5 * (1 - smoothstep(dDown / hw));
+    return LXColor.lerp(base, this.bandColor[(idx - 1 + m) % m], (float) w);
+  }
+
+  /**
    * Edge weight for an anti-aliased boundary: 0 below the boundary, 1 above,
    * smoothstepped across +/- halfWidth rows. A halfWidth <= 0 collapses to a
-   * hard step matching the original integer thresholds.
+   * hard step.
    */
   private static double edge(double elev, double boundary, double halfWidth) {
     if (halfWidth <= 0) {
       return elev < boundary ? 0 : 1;
     }
     final double t = LXUtils.constrain((elev - boundary) / (2 * halfWidth) + 0.5, 0, 1);
+    return t * t * (3 - 2 * t);
+  }
+
+  /** Smoothstep of a value clamped to [0,1]: 0 at 0, 1 at 1, zero slope at both ends. */
+  private static double smoothstep(double t) {
+    t = LXUtils.constrain(t, 0, 1);
     return t * t * (3 - 2 * t);
   }
 }
