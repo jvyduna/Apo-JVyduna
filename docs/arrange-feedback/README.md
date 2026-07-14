@@ -24,6 +24,13 @@ none of this touches the `apotheneum.jvyduna` package — the fixes are host-sid
   the pattern that should be active. The value-at-cursor and pattern-at-cursor
   evaluators already exist but are reachable only during playback; a
   stopped-transport `seekToCursor` reusing them is the minimal fix.
+- 🐞🧩 [Composition `length` can only grow, never shrink — no UI to trim it, and `playEnd`/`playStart` are dead for compositions](2026-07-14-composition-length-grow-only-no-trim-ui.md)
+  — `runAutomation` special-cases `LXComposition` to always play to `length`,
+  ignoring `playEnd` entirely; `length` only ever auto-grows on content
+  import and nothing shrinks it back; and `UICompositionScrubLane` (unlike
+  clips' `UIScrubLane`) exposes no drag handle for `length` or `playEnd` at
+  all. Found while tracking down why `2 - Bliss.lxp` played ~2 minutes of
+  black after the song ended — fixed for now with a hand-edited `.lxp`.
 
 ### Timeline layout & state
 
