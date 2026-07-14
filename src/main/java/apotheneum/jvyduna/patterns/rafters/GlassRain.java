@@ -18,6 +18,7 @@ import heronarts.lx.color.LXColor;
 import heronarts.lx.color.LXDynamicColor;
 import heronarts.lx.parameter.BooleanParameter;
 import heronarts.lx.parameter.CompoundParameter;
+import heronarts.lx.parameter.EnumParameter;
 import heronarts.lx.parameter.TriggerParameter;
 import heronarts.lx.utils.LXUtils;
 
@@ -31,24 +32,25 @@ import heronarts.lx.utils.LXUtils;
  * one lush maj7 bloom (1:22–2:20), then yanks it back to cold nervous streaks
  * and finally to a hollow near-black outro. At peaks a faint 1/16-grid moiré
  * shimmers over the rain, and — the theme's spine — abstracted pseudo-religious
- * symbols CONDENSE OUT OF THE RAIN as liquid: with {@code Symbols} on, drops
- * flow into the selected glyph's form, pool by gravity, tint toward the palette's
- * warm 3rd swatch, spread until the glyph is full, then overflow and drip out its
- * lowest surfaces. The glyphs ride the shared {@link SymbolGlyphs} module (now
- * true vector art) and read correctly from inside and outside via the surface's
- * reverse-normal mirror.
+ * symbols CONDENSE OUT OF THE RAIN as liquid: in {@code Rain+Glyph} mode, drops
+ * flow into the selected glyph's form, pool by gravity, spread until the glyph is
+ * full, then overflow and drip out its lowest surfaces. {@code Mode} also offers
+ * {@code Rain} (drops only) and {@code Glyph} (the glyph shown instantly full with
+ * rain hidden; Release drains it, SheetWash refills). The glyphs ride the shared
+ * {@link SymbolGlyphs} module (true vector art) and read correctly from inside and
+ * outside via the surface's reverse-normal mirror.
  *
  * <p><b>Liquid symbol model.</b> Each surface carries a per-cell liquid field
- * (fill/mask/overflow grids, preallocated). When {@code Symbols} is on, a rain
- * drop whose head crosses a masked glyph cell is absorbed into that cell's fill;
- * a gravity + lateral-leveling sweep settles the liquid down and spreads it to
+ * (fill/mask/overflow grids, preallocated). While a glyph is active, a rain drop
+ * whose head crosses a masked glyph cell is absorbed into that cell's fill; a
+ * gravity + lateral-leveling sweep settles the liquid down and spreads it to
  * neighboring regions (surface tension) so a glyph fills from its low points up;
  * excess at a bottom lip (a masked cell with no masked cell below — a slope-0 /
  * concave-up discontinuity) spills back out as a new liquid-colored drip. When
- * the glyph changes ({@code Glyph} floors to a new index) or {@code Symbols}
- * turns off, all held liquid is released instantly as downward drops that run on
- * down the glass, and a fresh glyph starts accumulating. The liquid color eases
- * from the cold droplet color toward the warm 3rd swatch over {@code TINT_SECONDS}.
+ * the glyph changes ({@code Glyph} floors to a new index) or {@code Mode} returns
+ * to {@code Rain}, all held liquid is released instantly as downward drops that run
+ * on down the glass. The liquid/glyph color is chosen by {@code GColor} — a point
+ * on a cyclic RGB gradient through the 5 palette colors.
  *
  * <p>Values that can only be judged on the LEDs are marked with inline
  * {@code CURATE:} notes. See GlassRain.md beside this file.
@@ -99,9 +101,13 @@ public class GlassRain extends ApotheneumPattern {
 
   // ---- Symbol / liquid constants -----------------------------------------------
 
-  /** Glyph render box in canvas cells (square). Scale 24 → ~half the 45-row cube
-   *  / 43-row cylinder height. CURATE. */
+  /** Default glyph render box in canvas cells (square), used to seed GlySize.
+   *  Scale 24 → ~half the 45-row cube / 43-row cylinder height. CURATE. */
   private static final int GLYPH_PX = 24;
+
+  /** GlySize = 1.0 rasters the glyph box at this size (the full cube height), so
+   *  the symbol fills the surface top-to-bottom; GlySize = 0 removes it. */
+  private static final int GLYPH_PX_MAX = Apotheneum.GRID_HEIGHT; // 45
 
   /** Glyph instance center columns, placed SYMMETRIC about each surface's
    *  horizontal center so the whole-canvas reverse-normal mirror
@@ -137,9 +143,12 @@ public class GlassRain extends ApotheneumPattern {
   /** Max overflow drips spawned per surface per frame (rate-limit the pool). */
   private static final int MAX_SPILL_PER_FRAME = 5;
 
-  /** Seconds for the liquid color to ease from the droplet color to the warm 3rd
-   *  swatch after Symbols turns on / the glyph changes. CURATE. */
-  private static final double TINT_SECONDS = 4.0;
+  /** Per-masked-cell water a SheetWash contributes — 50% of a cell's render-full
+   *  level (1.0). Deposited progressively at the sweeping band's row (so the glyph
+   *  fills as the sheet passes) yet conserved: capped at render-full and any
+   *  remainder settled bottom-up, so ~50% of the glyph's capacity is retained for
+   *  any GlySize with no drain/spill loss (see feedWash). CURATE. */
+  private static final float WASH_GLYPH_FILL = 0.5f;
 
   // ---- Moiré constants ---------------------------------------------------------
 
@@ -150,8 +159,9 @@ public class GlassRain extends ApotheneumPattern {
   private static final double MOIRE_PHASE_V_PER_16 = 0.33;
   private static final double MOIRE_MAX_BRIGHT = 0.35;
 
-  /** Sheet-wash sweep duration (seconds) and thickness. CURATE. */
-  private static final double WASH_SECONDS = 2.5;
+  /** Sheet-wash sweep: duration in beats (spanned at the live tempo) and band
+   *  thickness. CURATE. */
+  private static final double WASH_BEATS = 4.0;
   private static final int WASH_THICKNESS = 3;
 
   // ---- Cold/warm palette fallbacks (documented; used only on empty swatch) -----
@@ -168,6 +178,18 @@ public class GlassRain extends ApotheneumPattern {
   private final AudioReactive audio;
   private final Random random = new Random();
 
+  /** Display mode: rain only, rain condensing into a glyph, or a full glyph with
+   *  rain hidden. Replaces the old Symbols on/off boolean. */
+  public enum Mode {
+    RAIN("Rain"),
+    RAIN_GLYPH("Rain+Glyph"),
+    GLYPH("Glyph");
+
+    private final String label;
+    Mode(String label) { this.label = label; }
+    @Override public String toString() { return this.label; }
+  }
+
   // ---- Parameters (registration order referenced by saved .lxp) ----------------
 
   public final TriggerParameter dropBurst =
@@ -177,6 +199,10 @@ public class GlassRain extends ApotheneumPattern {
   public final TriggerParameter wash =
     new TriggerParameter("SheetWash", this::sheetWash)
     .setDescription("Send a bright sheet of water washing down the glass, rinsing the field (large change; on a section change)");
+
+  public final TriggerParameter release =
+    new TriggerParameter("Release", this::releaseNow)
+    .setDescription("Spill the liquid held in the glyph so it runs down the glass (keeps its accumulated warm color)");
 
   public final CompoundParameter energy =
     new CompoundParameter("Energy", 0.3)
@@ -194,13 +220,33 @@ public class GlassRain extends ApotheneumPattern {
     new CompoundParameter("Bloom", 0)
     .setDescription("Arc dynamics envelope (automate in the timeline): 0 = cold spine, 1 = warm maj7 bloom with deep trail-smear");
 
-  public final BooleanParameter symbols =
-    new BooleanParameter("Symbols", false)
-    .setDescription("Condense the selected glyph out of the rain as liquid: drops flow into its form, tint to the warm swatch, fill and overflow. Off releases the held liquid to run down");
+  public final EnumParameter<Mode> mode =
+    new EnumParameter<Mode>("Mode", Mode.RAIN)
+    .setDescription("Rain = drops only (glyph hidden); Rain+Glyph = drops condense into the glyph and fill it; Glyph = glyph shown instantly full with rain hidden (Release drains it, SheetWash refills)");
 
   public final CompoundParameter glyph =
     new CompoundParameter("Glyph", 1, 1, SymbolGlyphs.count())
     .setDescription("Which religious symbol condenses (continuous; floored to a glyph). Changing it releases the current liquid and starts the next glyph");
+
+  public final CompoundParameter glyRate =
+    new CompoundParameter("GlyRate", 4.0, 1.0, 16.0)
+    .setDescription("How fast a glyph fills per captured drop: 1 = original slow pooling, higher = each drop deposits more liquid so the symbol forms faster");
+
+  public final CompoundParameter glySize =
+    new CompoundParameter("GlySize", GLYPH_PX / (double) GLYPH_PX_MAX, 0, 1)
+    .setDescription("Glyph size: 0 = gone, 1 = fills the cube height. Scales live, keeping the current fill level");
+
+  public final CompoundParameter glyY =
+    new CompoundParameter("GlyY", 0.5, 0, 1)
+    .setDescription("Glyph vertical center: higher = higher on the sculpture (0 = bottom, 1 = top). Moves live, keeping the current fill level");
+
+  public final CompoundParameter glyColor =
+    new CompoundParameter("GColor", 1.0, 1.0, 5.99)
+    .setDescription("Glyph/liquid color: a point on a cyclic RGB gradient through the 5 palette colors. 1.0 = swatch color 1, 5.5 = halfway between color 5 and color 1, wrapping at 6");
+
+  public final BooleanParameter carry =
+    new BooleanParameter("Carry", false)
+    .setDescription("On a Glyph change: off = release the held water and start the next glyph empty; on = keep the accumulated fill and render the next glyph instantly");
 
   public final CompoundParameter moire =
     new CompoundParameter("Moire", 0)
@@ -227,13 +273,24 @@ public class GlassRain extends ApotheneumPattern {
   private int cachedC0 = 0, cachedC2 = 0;
   private int cold = COLD_FALLBACK;
   private int warm = WARM_FALLBACK;
+  private final int[] pal = new int[5]; // the 5 swatch colors for the GColor gradient
 
   // ---- Liquid-symbol state -----------------------------------------------------
 
   private int lastGlyphIndex = -1;   // floor(Glyph)-1 last frame; -1 forces rebuild
   private int lastSmoothQ = -1;      // quantized Smooth used to raster the mask
-  private boolean symbolsWereOn = false;
-  private double liquidTint = 0;     // eases droplet color → warm swatch, [0,1]
+  private int lastGlyphPx = -1;      // GlySize in cells used to raster the mask
+  private int lastGlyphYRow = -1;    // GlyY center row used to raster the mask
+  private Mode lastMode = null;      // previous frame's Mode; null forces first-frame setup
+  private int lastLiquidColor = WARM_FALLBACK; // last frame's liquid color, frozen into releases
+
+  // "Entered Glyph-only" detection at the parameter-listener level (fires per
+  // setValue), so a real transition INTO Glyph-only refills the glyph even when two
+  // mode changes coalesce within one render frame (automation / scrub) and render's
+  // per-frame lastMode check would miss the intermediate mode. Same-value
+  // re-applications don't set the flag, so a Release-drained glyph stays drained.
+  private Mode modeListenerPrev = null;
+  private boolean fillGlyphOnEnter = false;
 
   /** Sheet-wash sweep progress in [0,1]; < 0 = inactive. */
   private double washT = -1;
@@ -244,15 +301,33 @@ public class GlassRain extends ApotheneumPattern {
 
     addParameter("dropBurst", this.dropBurst);
     addParameter("wash", this.wash);
+    addParameter("release", this.release);
     addParameter("energy", this.energy);
     addParameter("density", this.density);
     addParameter("streak", this.streak);
     addParameter("bloom", this.bloom);
-    addParameter("symbols", this.symbols);
+    addParameter("mode", this.mode);
     addParameter("glyph", this.glyph);
+    addParameter("glyRate", this.glyRate);
+    addParameter("glySize", this.glySize);
+    addParameter("glyY", this.glyY);
+    addParameter("gcolor", this.glyColor);
+    addParameter("carry", this.carry);
     addParameter("moire", this.moire);
     addParameter("smooth", this.smooth);
     addParameter("audio", this.audioDepth);
+
+    // Refill the glyph on any real transition INTO Glyph-only. Detected here (per
+    // setValue) rather than only from render's per-frame lastMode, so a mode switch
+    // back into Glyph-only refills even when the intermediate mode never lands on a
+    // rendered frame (fast/automated switches, scrub). See fillGlyphOnEnter.
+    this.mode.addListener(p -> {
+      final Mode m = this.mode.getEnum();
+      if (m == Mode.GLYPH && this.modeListenerPrev != Mode.GLYPH) {
+        this.fillGlyphOnEnter = true;
+      }
+      this.modeListenerPrev = m;
+    });
   }
 
   // ---- Trigger handlers --------------------------------------------------------
@@ -263,7 +338,14 @@ public class GlassRain extends ApotheneumPattern {
   }
 
   private void sheetWash() {
-    this.washT = 0;
+    this.washT = 0;                  // start the band sweeping from the top
+    this.cubeField.washFedRow = -1;  // arm both surfaces to feed the glyph as the band passes
+    this.cylField.washFedRow = -1;
+  }
+
+  private void releaseNow() {
+    releaseLiquid(this.cubeField, this.lastLiquidColor);
+    releaseLiquid(this.cylField, this.lastLiquidColor);
   }
 
   private void burst(RainField f, int n) {
@@ -288,41 +370,89 @@ public class GlassRain extends ApotheneumPattern {
     final int glyphIndex = LXUtils.constrain(
       (int) Math.floor(this.glyph.getValue()) - 1, 0, SymbolGlyphs.count() - 1);
     final SymbolGlyphs.Symbol sym = SymbolGlyphs.byIndex(glyphIndex);
-    final boolean symbolsOn = this.symbols.isOn();
+    final Mode mode = this.mode.getEnum();
+    final boolean glyphActive = (mode != Mode.RAIN);  // mask/absorb/liquid sim run
+    final boolean rainVisible = (mode != Mode.GLYPH); // ambient rain spawns + paints
 
-    // ---- Liquid-symbol lifecycle -------------------------------------------
-    if (symbolsOn) {
-      final boolean turnedOn = !this.symbolsWereOn;
+    // GlySize → glyph raster box in cells (0 = gone, GLYPH_PX_MAX = cube height).
+    final int glyphPx = LXUtils.constrain(
+      (int) Math.round(this.glySize.getValue() * GLYPH_PX_MAX), 0, GLYPH_PX_MAX);
+    // GlyY → vertical center (fraction of surface height). Tracked finely so any
+    // move re-stamps the mask; the raster is position-independent and cached, so a
+    // re-stamp is cheap. Per-field center row (cube 45 rows, cylinder 43). Higher
+    // GlyY = higher on the sculpture, so invert (canvas y = 0 is the top row).
+    final double glyYval = this.glyY.getValue();
+    final int glyphYQ = (int) Math.round(glyYval * 1000);
+    final int cubeCy = (int) Math.round((1 - glyYval) * (this.cubeField.canvas.height - 1));
+    final int cylCy = (int) Math.round((1 - glyYval) * (this.cylField.canvas.height - 1));
+
+    // ---- Glyph lifecycle (mode-aware) --------------------------------------
+    if (glyphActive) {
+      // Entering glyph-active from Rain (or first frame): stamp a fresh mask.
+      final boolean freshActivate = (this.lastMode == null) || (this.lastMode == Mode.RAIN);
       final boolean glyphChanged = (glyphIndex != this.lastGlyphIndex);
-      // A glyph change (mid-run) releases the liquid held in the old glyph so it
-      // runs down, then starts empty.
-      if (glyphChanged && !turnedOn && this.lastGlyphIndex >= 0) {
-        releaseLiquid(this.cubeField);
-        releaseLiquid(this.cylField);
+      final boolean geomChanged = (glyphPx != this.lastGlyphPx) || (glyphYQ != this.lastGlyphYRow);
+      final boolean smoothChanged = (smoothQ != this.lastSmoothQ);
+      if (freshActivate) {
+        rebuildMask(this.cubeField, sym, CUBE_CENTERS, smoothAmt, glyphPx, cubeCy);
+        rebuildMask(this.cylField, sym, CYL_CENTERS, smoothAmt, glyphPx, cylCy);
+      } else if (glyphChanged) {
+        if (this.carry.isOn()) {
+          // Carry: keep the accumulated fill %, render the new glyph instantly.
+          rebuildKeepingFill(this.cubeField, sym, CUBE_CENTERS, smoothAmt, glyphPx, cubeCy);
+          rebuildKeepingFill(this.cylField, sym, CYL_CENTERS, smoothAmt, glyphPx, cylCy);
+        } else {
+          // Release the old glyph's water (frozen at its color), start empty.
+          releaseLiquid(this.cubeField, this.lastLiquidColor);
+          releaseLiquid(this.cylField, this.lastLiquidColor);
+          rebuildMask(this.cubeField, sym, CUBE_CENTERS, smoothAmt, glyphPx, cubeCy);
+          rebuildMask(this.cylField, sym, CYL_CENTERS, smoothAmt, glyphPx, cylCy);
+        }
+      } else if (geomChanged) {
+        // GlySize / GlyY moved the glyph: scale/move live, preserving the fill level.
+        rebuildKeepingFill(this.cubeField, sym, CUBE_CENTERS, smoothAmt, glyphPx, cubeCy);
+        rebuildKeepingFill(this.cylField, sym, CYL_CENTERS, smoothAmt, glyphPx, cylCy);
+      } else if (smoothChanged) {
+        // AA change only: re-raster the mask, keep the existing (aligned) fill.
+        rebuildMask(this.cubeField, sym, CUBE_CENTERS, smoothAmt, glyphPx, cubeCy);
+        rebuildMask(this.cylField, sym, CYL_CENTERS, smoothAmt, glyphPx, cylCy);
       }
-      // (Re)raster + stamp the mask when the glyph or the Smooth AA changed, or
-      // on first activation. Only the mask is rebuilt; existing fill is kept.
-      if (glyphChanged || turnedOn || smoothQ != this.lastSmoothQ) {
-        rebuildMask(this.cubeField, sym, CUBE_CENTERS, smoothAmt);
-        rebuildMask(this.cylField, sym, CYL_CENTERS, smoothAmt);
+      // Glyph-only mode always shows the glyph full: fill it completely on entry
+      // and on any structural change (new glyph / size / position / AA). A
+      // uniformly-full glyph is stable under the liquid sim; Release drains it and
+      // SheetWash refills it between such changes.
+      if (mode == Mode.GLYPH) {
+        // Enter = either the per-frame edge OR a listener-caught transition that
+        // render's frame sampling missed (fillGlyphOnEnter). Consume the flag here.
+        final boolean enteringGlyph = (this.lastMode != Mode.GLYPH) || this.fillGlyphOnEnter;
+        this.fillGlyphOnEnter = false;
+        final boolean structuralChange =
+          freshActivate || glyphChanged || geomChanged || smoothChanged;
+        if (enteringGlyph || structuralChange) {
+          fillGlyphFull(this.cubeField);
+          fillGlyphFull(this.cylField);
+        }
+        if (enteringGlyph) {
+          // Hide ambient rain instantly on entry.
+          this.cubeField.clearRain();
+          this.cylField.clearRain();
+        }
       }
-      if (glyphChanged || turnedOn) {
-        this.liquidTint = 0; // fresh glyph starts cold and tints toward warm
-      }
-      this.liquidTint = Math.min(1, this.liquidTint + deltaMs / (TINT_SECONDS * 1000.0));
-    } else if (this.symbolsWereOn) {
-      // Symbols just turned off: release everything and stop absorbing.
-      releaseLiquid(this.cubeField);
-      releaseLiquid(this.cylField);
+    } else if (this.lastMode != null && this.lastMode != Mode.RAIN) {
+      // Left glyph-active for Rain: release everything and stop absorbing.
+      releaseLiquid(this.cubeField, this.lastLiquidColor);
+      releaseLiquid(this.cylField, this.lastLiquidColor);
       clearMask(this.cubeField);
       clearMask(this.cylField);
     }
-    this.symbolsWereOn = symbolsOn;
+    this.lastMode = mode;
     this.lastGlyphIndex = glyphIndex;
     this.lastSmoothQ = smoothQ;
+    this.lastGlyphPx = glyphPx;
+    this.lastGlyphYRow = glyphYQ;
 
-    // Bass hit → an extra spatter (audio-gated by the depth knob)
-    if (this.audio.bassHit()) {
+    // Bass hit → an extra spatter (audio-gated by the depth knob), rain only.
+    if (rainVisible && this.audio.bassHit()) {
       burst(this.cubeField, (int) Math.round(BURST_DROPS * this.audio.depth()));
     }
 
@@ -331,9 +461,10 @@ public class GlassRain extends ApotheneumPattern {
     halfLifeMs *= 1 + BLOOM_TRAIL_STRETCH * this.bloom.getValue();
     final double decayMult = Math.pow(0.5, deltaMs / halfLifeMs);
 
-    // Advance the wash sweep
+    // Advance the wash sweep — spans WASH_BEATS beats at the current tempo.
     if (this.washT >= 0) {
-      this.washT += deltaMs / (WASH_SECONDS * 1000.0);
+      final double washMs = WASH_BEATS * Math.max(1.0, this.lx.engine.tempo.period.getValue());
+      this.washT += deltaMs / washMs;
       if (this.washT > 1) {
         this.washT = -1;
       }
@@ -347,13 +478,16 @@ public class GlassRain extends ApotheneumPattern {
     final double moirePhaseV = sixteenth * MOIRE_PHASE_V_PER_16;
 
     final int dropletColor = LXColor.lerp(this.cold, this.warm, this.bloom.getValue());
-    // Liquid symbol color eases from the droplet color toward the warm 3rd swatch.
-    final int liquidColor = LXColor.lerp(dropletColor, this.warm, this.liquidTint);
+    // Glyph/liquid color: GColor picks a point on the cyclic 5-color palette gradient.
+    final int liquidColor = gcolor(this.glyColor.getValue());
+    // Cache it so releases (glyph change / mode → Rain / Release trigger, which may
+    // fire off-thread) freeze drips to the glyph's color.
+    this.lastLiquidColor = liquidColor;
 
     renderField(this.cubeField, deltaMs, decayMult, dropletColor, liquidColor,
-      symbolsOn, moirePhaseH, moirePhaseV, smoothAmt);
+      glyphActive, rainVisible, moirePhaseH, moirePhaseV, smoothAmt);
     renderField(this.cylField, deltaMs, decayMult, dropletColor, liquidColor,
-      symbolsOn, moirePhaseH, moirePhaseV, smoothAmt);
+      glyphActive, rainVisible, moirePhaseH, moirePhaseV, smoothAmt);
 
     // Reverse-normal: exterior straight, interior horizontally mirrored so the
     // glyphs read un-reversed from inside (rain is mirrored too — invisible).
@@ -363,30 +497,106 @@ public class GlassRain extends ApotheneumPattern {
     this.cylField.canvas.copyToMirrored(Apotheneum.cylinder.interior, this.colors, 1.0);
   }
 
-  /** One surface's frame: spawn rain, step droplets (absorbing into the glyph),
-   *  step the liquid sim, render the liquid, then overlay moiré + wash. */
+  /** One surface's frame: spawn rain (when visible), step droplets (absorbing into
+   *  the glyph), step the liquid sim, render the liquid, then overlay moiré + wash. */
   private void renderField(RainField f, double deltaMs, double decayMult,
-                           int dropletColor, int liquidColor, boolean symbolsOn,
-                           double moirePhaseH, double moirePhaseV, double smoothAmt) {
-    spawnRain(f, deltaMs);
-    // Absorb drops into the glyph only when Symbols is on (mask is populated).
-    f.step(deltaMs, decayMult, dropletColor, liquidColor, smoothAmt, symbolsOn, INFLOW_PER_DROP);
+                           int dropletColor, int liquidColor, boolean glyphActive,
+                           boolean rainVisible, double moirePhaseH, double moirePhaseV, double smoothAmt) {
+    if (rainVisible) {
+      spawnRain(f, deltaMs);
+    }
+    // Absorb drops into the glyph only when a glyph is active (mask is populated).
+    // GlyRate scales the fill each captured drop deposits (form speed per drop).
+    final float inflow = INFLOW_PER_DROP * (float) this.glyRate.getValue();
+    f.step(deltaMs, decayMult, dropletColor, smoothAmt, glyphActive, inflow);
 
-    if (symbolsOn) {
-      stepLiquid(f, smoothAmt);
+    if (glyphActive) {
+      if (this.washT >= 0) {
+        feedWash(f); // pour into the glyph at the band's row, before gravity settles
+      }
+      stepLiquid(f, smoothAmt, liquidColor);
       renderLiquid(f, liquidColor);
     }
 
-    // Moiré overlay (peaks): tempo-locked 2D interference, flickered by treble.
+    // Moiré overlay (peaks): tempo-locked 2D interference, flickered by treble. A
+    // rain-side effect — hidden in Glyph-only mode with the rain.
     final double moireAmt = this.moire.getValue()
       * (1 + LXUtils.constrain(this.audio.trebleRatio - 1, 0, 2));
-    if (moireAmt > 0.01) {
+    if (rainVisible && moireAmt > 0.01) {
       drawMoire(f, moireAmt, moirePhaseH, moirePhaseV, dropletColor);
     }
 
     // Sheet-wash band
     if (this.washT >= 0) {
       drawWash(f.canvas, this.washT, dropletColor);
+    }
+  }
+
+  /** Pour the SheetWash into the glyph in the rows the band front has newly crossed
+   *  since last frame, so the glyph fills AS the sheet passes over it. Each masked
+   *  cell gets {@code WASH_GLYPH_FILL} (0.5): as much as fits at the band's own row
+   *  (capped at render-full 1.0, the visible top-down splash that gravity then
+   *  sinks), with any capped remainder settled bottom-up. Conserved and spill-safe
+   *  — nothing exceeds 1.0, so the lip-spill never fires for wash water — so ~50%
+   *  of the glyph's capacity is retained for any GlySize (unless a column is already
+   *  full, which can't take more). */
+  private void feedWash(RainField f) {
+    final int w = f.canvas.width;
+    final int h = f.canvas.height;
+    final float[] mask = f.mask;
+    final float[] fill = f.fill;
+    final int frontRow = (int) Math.round(this.washT * (h - 1));
+    for (int y = Math.max(0, f.washFedRow + 1); y <= frontRow && y < h; ++y) {
+      final int row = y * w;
+      for (int x = 0; x < w; ++x) {
+        final int idx = row + x;
+        if (mask[idx] < MASK_MIN) {
+          continue;
+        }
+        final float here = Math.max(0f, Math.min(WASH_GLYPH_FILL, 1f - fill[idx]));
+        fill[idx] += here;
+        final float leftover = WASH_GLYPH_FILL - here;
+        if (leftover > 0f) {
+          settleColumnBottomUp(f, x, leftover);
+        }
+      }
+    }
+    f.washFedRow = frontRow;
+  }
+
+  /** Settle {@code amount} of liquid into column {@code x}'s masked cells from the
+   *  bottom up, each capped at render-full (1.0). Any remainder that doesn't fit
+   *  (column already full) is dropped — the glyph can't exceed full. */
+  private void settleColumnBottomUp(RainField f, int x, float amount) {
+    final int w = f.canvas.width;
+    final int h = f.canvas.height;
+    final float[] mask = f.mask;
+    final float[] fill = f.fill;
+    for (int y = h - 1; y >= 0 && amount > 0f; --y) {
+      final int idx = y * w + x;
+      if (mask[idx] < MASK_MIN) {
+        continue;
+      }
+      final float room = 1f - fill[idx];
+      if (room <= 0f) {
+        continue;
+      }
+      final float add = Math.min(room, amount);
+      fill[idx] += add;
+      amount -= add;
+    }
+  }
+
+  /** Set every masked glyph cell to render-full (1.0) — the instant-full glyph on
+   *  entering Glyph-only mode. A uniformly-full glyph is a stable fixed point under
+   *  the liquid sim (gravity caps at 1.0; lip cells spill only strictly above 1.0). */
+  private void fillGlyphFull(RainField f) {
+    final float[] mask = f.mask;
+    final float[] fill = f.fill;
+    for (int i = 0; i < mask.length; ++i) {
+      if (mask[i] >= MASK_MIN) {
+        fill[i] = 1f;
+      }
     }
   }
 
@@ -417,12 +627,13 @@ public class GlassRain extends ApotheneumPattern {
     final double wobblePhase = this.random.nextDouble() * Math.PI * 2;
     final double fallMs = f.canvas.height / vy * 1000.0;
     final double ttlMs = fallMs * (0.75 + 0.7 * this.random.nextDouble());
-    f.spawn(col, 0, vy, ttlMs, weight, headBright, wobbleAmp, wobbleRate, wobblePhase, false);
+    f.spawn(col, 0, vy, ttlMs, weight, headBright, wobbleAmp, wobbleRate, wobblePhase, false, 0);
   }
 
-  /** Spawn a liquid drop (colored the liquid color) starting at (col, yStart),
-   *  running on down the glass — used by overflow spills and the release burst. */
-  private void spawnLiquidDrop(RainField f, int col, int yStart, double headBright) {
+  /** Spawn a liquid drop frozen at {@code color} starting at (col, yStart), running
+   *  on down the glass — used by overflow spills and the release burst. Freezing
+   *  the color keeps released water the warm glyph color as it falls. */
+  private void spawnLiquidDrop(RainField f, int col, int yStart, double headBright, int color) {
     final double vy = Ranges.lin(this.energy.getValue(), FALL_MIN, FALL_MAX)
       * (0.8 + 0.4 * this.random.nextDouble());
     final double remainingRows = Math.max(1, f.canvas.height - yStart);
@@ -431,30 +642,37 @@ public class GlassRain extends ApotheneumPattern {
     final double wobbleAmp = WOBBLE_MAX_COLS * 0.15 * this.random.nextDouble();
     final double wobbleRate = (0.6 + 0.8 * this.random.nextDouble()) * 0.001;
     final double wobblePhase = this.random.nextDouble() * Math.PI * 2;
-    f.spawn(col, yStart, vy, ttlMs, weight, headBright, wobbleAmp, wobbleRate, wobblePhase, true);
+    f.spawn(col, yStart, vy, ttlMs, weight, headBright, wobbleAmp, wobbleRate, wobblePhase, true, color);
   }
 
   // ---- Liquid symbol sim -------------------------------------------------------
 
-  /** (Re)raster the vector glyph to a coverage grid and stamp it into the field's
-   *  mask at each symmetric instance center; recompute the bottom-lip cells (a
-   *  masked cell with no masked cell directly below) used for overflow spill. */
-  private void rebuildMask(RainField f, SymbolGlyphs.Symbol sym, int[] centers, double smooth) {
+  /** (Re)raster the vector glyph to a {@code glyphPx}-cell coverage grid and stamp
+   *  it into the field's mask centered vertically on row {@code cyRow} (GlyY) at
+   *  each symmetric instance center; recompute the bottom-lip cells (a masked cell
+   *  with no masked cell directly below) used for overflow spill. {@code glyphPx <
+   *  1} (GlySize 0) leaves the mask empty. */
+  private void rebuildMask(RainField f, SymbolGlyphs.Symbol sym, int[] centers,
+                           double smooth, int glyphPx, int cyRow) {
+    if (glyphPx < 1) {
+      clearMask(f);
+      return;
+    }
     final int w = f.canvas.width;
     final int h = f.canvas.height;
     Arrays.fill(f.mask, 0f);
-    final float[] cov = SymbolGlyphs.coverage(sym, GLYPH_PX, GLYPH_PX, smooth);
-    final int cy = h / 2;
+    final float[] cov = SymbolGlyphs.coverage(sym, glyphPx, glyphPx, smooth);
+    final int cy = cyRow;
     for (int center : centers) {
-      final int x0 = center - GLYPH_PX / 2;
-      final int y0 = cy - GLYPH_PX / 2;
-      for (int gy = 0; gy < GLYPH_PX; ++gy) {
+      final int x0 = center - glyphPx / 2;
+      final int y0 = cy - glyphPx / 2;
+      for (int gy = 0; gy < glyphPx; ++gy) {
         final int y = y0 + gy;
         if (y < 0 || y >= h) {
           continue;
         }
-        for (int gx = 0; gx < GLYPH_PX; ++gx) {
-          final float c = cov[gy * GLYPH_PX + gx];
+        for (int gx = 0; gx < glyphPx; ++gx) {
+          final float c = cov[gy * glyphPx + gx];
           if (c <= 0f) {
             continue;
           }
@@ -490,10 +708,37 @@ public class GlassRain extends ApotheneumPattern {
     f.lipCount = 0;
   }
 
+  /** Rebuild the mask at a new size/position while preserving the glyph's fill
+   *  LEVEL (so GlySize/GlyY scale/move the symbol live with no empty-and-refill
+   *  fadeout). Captures the average masked fill, rebuilds, then re-pours that
+   *  average into the new masked cells; gravity re-settles the gradient. */
+  private void rebuildKeepingFill(RainField f, SymbolGlyphs.Symbol sym, int[] centers,
+                                  double smooth, int glyphPx, int cyRow) {
+    float sum = 0f;
+    int n = 0;
+    for (int i = 0; i < f.mask.length; ++i) {
+      if (f.mask[i] >= MASK_MIN) {
+        sum += Math.min(1f, f.fill[i]);
+        ++n;
+      }
+    }
+    final float avg = (n > 0) ? sum / n : 0f;
+    rebuildMask(f, sym, centers, smooth, glyphPx, cyRow);
+    Arrays.fill(f.fill, 0f);
+    f.overflowAccum = 0f;
+    if (avg > 0f) {
+      for (int i = 0; i < f.mask.length; ++i) {
+        if (f.mask[i] >= MASK_MIN) {
+          f.fill[i] = avg;
+        }
+      }
+    }
+  }
+
   /** Gravity + lateral leveling + bottom-lip overflow. Surface tension: liquid
    *  sinks where it can, otherwise levels sideways into neighboring glyph cells,
    *  so a glyph fills from its low points up until it saturates and spills. */
-  private void stepLiquid(RainField f, double smooth) {
+  private void stepLiquid(RainField f, double smooth, int liquidColor) {
     final int w = f.canvas.width;
     final int h = f.canvas.height;
     final float[] fill = f.fill;
@@ -557,7 +802,7 @@ public class GlassRain extends ApotheneumPattern {
         final int idx = f.lipCells[this.random.nextInt(f.lipCount)];
         final int lx = idx % w;
         final int ly = idx / w;
-        spawnLiquidDrop(f, lx, Math.min(h - 1, ly + 1), 0.9);
+        spawnLiquidDrop(f, lx, Math.min(h - 1, ly + 1), 0.9, liquidColor);
       }
     }
   }
@@ -604,9 +849,10 @@ public class GlassRain extends ApotheneumPattern {
   }
 
   /** Release all held liquid as downward drops (one per filled column, at the
-   *  column's lowest filled cell) and clear the fill grid — the "instant release"
-   *  when the glyph changes or Symbols turns off. */
-  private void releaseLiquid(RainField f) {
+   *  column's lowest filled cell), each frozen at {@code color} (the accumulated
+   *  glyph color, so the water "was transformed by being accumulated"), and clear
+   *  the fill grid — the "instant release" on glyph change / Symbols-off / Release. */
+  private void releaseLiquid(RainField f, int color) {
     final int w = f.canvas.width;
     final int h = f.canvas.height;
     final float[] fill = f.fill;
@@ -615,7 +861,7 @@ public class GlassRain extends ApotheneumPattern {
       for (int y = h - 1; y >= 0; --y) {
         final int idx = y * w + x;
         if (mask[idx] >= MASK_MIN && fill[idx] > REL_MIN) {
-          spawnLiquidDrop(f, x, y, 0.7 + 0.3 * Math.min(1f, fill[idx]));
+          spawnLiquidDrop(f, x, y, 0.7 + 0.3 * Math.min(1f, fill[idx]), color);
           break; // lowest filled cell in this column
         }
       }
@@ -626,11 +872,18 @@ public class GlassRain extends ApotheneumPattern {
 
   // ---- Palette -----------------------------------------------------------------
 
-  /** cold = swatch color 0, warm = swatch color 2 (the reserved warm accent, also
-   *  the liquid-symbol target color); documented fallbacks otherwise. */
+  /** cold = swatch color 0, warm = swatch color 2 (the reserved warm accent). Also
+   *  caches all 5 swatch colors into {@link #pal} for the GColor gradient. Documented
+   *  fallbacks otherwise. */
   private void updatePalette() {
     final List<LXDynamicColor> sw = this.lx.engine.palette.swatch.colors;
     final int n = sw.size();
+    // Cache the 5 gradient colors every frame (cheap, no allocation); when the swatch
+    // has fewer than 5 entries, wrap so the gradient still cycles through what exists.
+    for (int i = 0; i < 5; ++i) {
+      this.pal[i] = (n > 0) ? sw.get(i % n).getColor()
+        : ((i % 2 == 0) ? COLD_FALLBACK : WARM_FALLBACK);
+    }
     final int c0 = (n > 0) ? sw.get(0).getColor() : 0;
     final int c2 = (n > 2) ? sw.get(2).getColor() : ((n > 0) ? sw.get(n - 1).getColor() : 0);
     if (n == this.cachedSwatchCount && c0 == this.cachedC0 && c2 == this.cachedC2) {
@@ -641,6 +894,18 @@ public class GlassRain extends ApotheneumPattern {
     this.cachedC2 = c2;
     this.cold = (n > 0) ? c0 : COLD_FALLBACK;
     this.warm = (n > 2) ? c2 : WARM_FALLBACK; // CURATE: warm/liquid = 3rd swatch color
+  }
+
+  /** GColor gradient: map v in [1, 5.99] to a point on the cyclic RGB path through
+   *  the 5 palette colors. Integer k = pure color k; fractional interpolates in
+   *  linear RGB toward the next color, wrapping color 5 → color 1. */
+  private int gcolor(double v) {
+    final double vv = LXUtils.constrain(v, 1.0, 5.999);
+    final int seg = (int) Math.floor(vv);        // 1..5
+    final double frac = vv - seg;
+    final int from = this.pal[(seg - 1) % 5];
+    final int to = this.pal[seg % 5];            // seg == 5 → pal[0], wrapping
+    return LXColor.lerp(from, to, frac);
   }
 
   // ---- Moiré + wash overlays ---------------------------------------------------
@@ -712,12 +977,14 @@ public class GlassRain extends ApotheneumPattern {
                    wobbleAmp, wobbleRate, wobblePhase;
     final boolean[] active;
     final boolean[] isLiquid; // true = drip released from / overflowing a glyph
+    final int[] dropColor;    // frozen ARGB for liquid drips (glyph color at spawn)
     // Liquid-symbol grids (canvas-sized). mask = glyph coverage, fill = liquid.
     final float[] mask, fill;
     final boolean[] overflow;
     final int[] lipCells; // indices of bottom-lip cells, [0, lipCount)
     int lipCount = 0;
     float overflowAccum = 0;
+    int washFedRow = -1;      // last canvas row the sheet-wash has fed into the glyph
     // Moiré scratch (per-column fringe / per-row shimmer).
     final double[] moireCol, moireRow;
     double spawnAccum = 0;
@@ -738,6 +1005,7 @@ public class GlassRain extends ApotheneumPattern {
       this.wobblePhase = new double[cap];
       this.active = new boolean[cap];
       this.isLiquid = new boolean[cap];
+      this.dropColor = new int[cap];
       final int cells = width * height;
       this.mask = new float[cells];
       this.fill = new float[cells];
@@ -747,13 +1015,16 @@ public class GlassRain extends ApotheneumPattern {
       this.moireRow = new double[height];
     }
 
-    /** Spawn a droplet; silently dropped if the pool is full. */
+    /** Spawn a droplet; silently dropped if the pool is full. {@code color} is the
+     *  frozen paint color for a liquid drip (ignored for rain, which tracks the
+     *  live rain color). */
     void spawn(int col, int yStart, double vyRowsPerSec, double ttl, double wt, double head,
-               double wAmp, double wRate, double wPhase, boolean liquid) {
+               double wAmp, double wRate, double wPhase, boolean liquid, int color) {
       for (int i = 0; i < this.cap; ++i) {
         if (!this.active[i]) {
           this.active[i] = true;
           this.isLiquid[i] = liquid;
+          this.dropColor[i] = color;
           this.x0[i] = col;
           this.x[i] = col;
           this.y[i] = yStart;
@@ -770,10 +1041,22 @@ public class GlassRain extends ApotheneumPattern {
       }
     }
 
+    /** Instantly hide ambient rain: retire every non-liquid drop and wipe the trail
+     *  canvas. Liquid drips (isLiquid) are kept, so a glyph's drain/overflow still
+     *  runs down while entering Glyph-only mode. */
+    void clearRain() {
+      for (int i = 0; i < this.cap; ++i) {
+        if (this.active[i] && !this.isLiquid[i]) {
+          this.active[i] = false;
+        }
+      }
+      this.canvas.fill(0);
+    }
+
     /** Decay the trail, advance every droplet, paint its streak, and — when
      *  {@code absorb} is on — capture a (non-liquid) drop into the glyph mask
      *  when its head crosses a masked cell (the drop "flows into" the form). */
-    void step(double deltaMs, double decayMult, int rainColor, int liquidColor,
+    void step(double deltaMs, double decayMult, int rainColor,
               double smooth, boolean absorb, float inflowPerDrop) {
       this.canvas.decay(decayMult);
       final int w = this.canvas.width;
@@ -798,7 +1081,10 @@ public class GlassRain extends ApotheneumPattern {
           final int hy = (int) Math.round(yNew);
           if (hy >= 0 && hy < h && this.mask[hy * w + hx] >= MASK_MIN) {
             final int cell = hy * w + hx;
-            this.fill[cell] = Math.min(FILL_MAX, this.fill[cell] + inflowPerDrop);
+            // Let a single drop deposit its full (GlyRate-scaled) inflow even past
+            // FILL_MAX; the transient over-cap drains via gravity / lip-spill next
+            // frames, so high GlyRate isn't silently truncated to the cell cap.
+            this.fill[cell] = Math.min(FILL_MAX + inflowPerDrop, this.fill[cell] + inflowPerDrop);
             this.active[i] = false;
             continue;
           }
@@ -812,7 +1098,8 @@ public class GlassRain extends ApotheneumPattern {
           }
         }
 
-        final int color = this.isLiquid[i] ? liquidColor : rainColor;
+        // Liquid drips keep the (warm) glyph color frozen at spawn; rain tracks live.
+        final int color = this.isLiquid[i] ? this.dropColor[i] : rainColor;
         paintStreak(xOld, yOld, xNew, yNew, this.weight[i], this.headBright[i] * env, color, smooth);
 
         if ((yNew >= h) || (this.ageMs[i] >= this.ttlMs[i])) {
