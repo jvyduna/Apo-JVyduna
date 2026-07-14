@@ -271,7 +271,7 @@ UI/registration order (sixth pass — gesture triggers first): Sparkle,
 Teleport, the three pulses, Drain, then Pipes, Speed, CapDiv,
 Thick, CapDia, Density, Shaded, Reverse, JmpPct, JumpTo, HoldBars, RotX,
 RotY, RstRot, Audio
-(20 total — well past the ~12 series guideline; this is the series'
+(21 total — well past the ~12 series guideline; this is the series'
 flagship-complexity pattern).
 
 | Param | Label | Type | Default | Range | Meaning |
@@ -287,12 +287,12 @@ flagship-complexity pattern).
 | `onBeats` | CapDiv | EnumParameter&lt;Beats&gt; | 1 | 3/4, 1, 2, 4, 8 | beat division every cap lands on, phase-aligned to the global tempo grid (key `onBeats` kept for .lxp compat) |
 | `thickness` | Thick | CompoundParameter | 3.5 | 1..6 | pipe thickness in px, whole model in realtime (unclamped; 6 px at high density merges cells) |
 | `capDia` | CapDia | CompoundParameter | 0 | 0..2 | joint/cap ball size as a multiple of the classic cap; **0 (default) hides caps** — PlsCap pulses them in |
-| `density` | Density | DiscreteParameter | 10 | 6..12 | room grid cells per axis; **takes effect at the next drain** |
+| `density` | Density | DiscreteParameter | 12 | 6..12 | room grid cells per axis; **takes effect at the next drain/JumpTo** (default = max, ninth pass) |
 | `shaded` | Shaded | CompoundParameter | 0.5 | 0..1 | Phong shading: 0 = flat fast render (all shader compute skipped); 0→0.1 fades shading/AA in; 0.5 = nominal |
-| `reverse` | Reverse | BooleanParameter | off | — | play backward: unbuild the lattice newest-first on the CapDiv grid; auto-flips forward when empty |
+| `reverse` | Reverse | BooleanParameter | off | — | play backward: unbuild the lattice newest-first on the CapDiv grid; idles at empty (never self-resets, ninth pass) |
 | `jmpPct` | JmpPct | CompoundParameter | 1 | 0..1 | how far through the build JumpTo seeds: 0 = empty (instant drain/restart), 1 = the busy auto-drain fill level |
 | `jumpTo` | JumpTo | TriggerParameter | — | — | jump the animation to JmpPct through the build; playback continues in the current direction (Reverse unbuilds it) |
-| `holdBars` | HoldBars | BooleanParameter | off | — | progress-bar mode: instant clear, bars fill L-to-R (interior view, replicated projection), park in depth between bars (see HoldBars section) |
+| `holdBars` | HoldBars | BooleanParameter | off | — | progress-bar mode (no clear): FB/LR bar roles at distinct heights fill each wall pair, idling between bars (see HoldBars section) |
 | `rotX` | RotX | CompoundParameter | 0 | 0..1 | lattice rotation speed about the horizontal x axis; 100% = 90°/beat |
 | `rotY` | RotY | CompoundParameter | 0 | 0..1 | lattice rotation speed about the vertical y axis; 100% = 90°/beat |
 | `rstRot` | RstRot | TriggerParameter | — | — | zero RotX/RotY and snap back to the orthogonal projection (jump-cut; the lighting rig keeps turning) |
@@ -357,17 +357,24 @@ pops, the balls created after it vanish (a `segBallCount` snapshot logged
 at every segment's creation — elbows disappear with their segment), and its
 swept cells free up (guarded `unoccupy`; shared joint/intersection cells
 free exactly once — occupancy only steers planning, drift accepted). When
-the last segment is consumed, Reverse **auto-flips off and fresh pipes
-respawn** — the animation ping-pongs. Toggling forward mid-unbuild also
-respawns immediately (old pipes are not resumed). A drain forces Reverse
-off. `CURATE:` unbuild pacing, ping-pong feel.
+the last segment is consumed, the room **idles empty, still in Reverse**
+(ninth pass — never self-resets): flipping Reverse off respawns; Drain and
+JumpTo also restart. Toggling forward mid-unbuild respawns immediately (old
+pipes are not resumed). A drain forces Reverse off. The same rule applies
+forward (ninth pass): at the 60% fill limit growth **parks** at its last
+caps instead of auto-draining — the gated ∞-cap self-heal resumes it
+automatically once Reverse/Drain/JumpTo frees cells; dead-end spawns and
+teleports also park rather than drain (list overflow remains the only
+self-drain, as a resource backstop). `CURATE:` unbuild pacing, the
+full-park and empty-idle resting looks.
 
 `JumpTo` (seventh pass — generalizes the day-old JmpEnd) jumps the
 animation to **`JmpPct`** of the way through the build: it synthesizes a
 room filled to `JmpPct × 60%` (the auto-drain level) with the current
 settings — density applies immediately, colors/thickness per the usual
-rules — by running the same growth walk (`walkStep`) synchronously with
-`Pipes`-many walkers. **Playback then continues in the current direction**
+rules — by running the same growth walk (`walkStep`; in HoldBars mode the
+bar phase machine `barStep`, ninth pass) synchronously with `Pipes`-many
+walkers. **Playback then continues in the current direction**
 (JumpTo no longer touches Reverse): forward keeps the walkers alive and
 growing seamlessly from the seeded state (`JmpPct = 0` reads as an instant
 drain + restart), while Reverse leaves the geometry to the unbuild cursor
@@ -376,7 +383,7 @@ walks ~hundreds of cells in one call at high percentages (`CURATE:` measure
 the frame hitch); bounded by the retained-list capacities and an iteration
 guard.
 
-## HoldBars (eighth pass) — progress bars that secretly build 3D
+## HoldBars (eighth pass, reworked ninth) — progress bars that secretly build 3D
 
 Conceived for the rafters→opus transition of *Communicating*: with `Shaded` at
 0 (flat) and `HoldBars` on, the pattern impersonates an institutional loading
@@ -384,38 +391,47 @@ screen — **progress bars completing left-to-right that never go away** — whi
 secretly accruing a 3D lattice for a later reveal (`Shaded` + `RotX`/`RotY`
 automation). "There is joy in waiting if you just use your imagination."
 
-- **Replicated projection.** All four walls share ONE mapping
-  (`u = (gx − x)·cw`, `v = y·ch`, `depth = z`) instead of the
-  corner-continuous table — corner continuity intentionally breaks (CURATE).
-  Mirrored on the exterior plane, so `+x` growth reads **left→right for a
-  viewer INSIDE the cube** (interior faces are pixel copies of exterior
-  faces), and **±z runs are invisible on every wall** (u,v independent of z).
-  `HOLD_BARS_FLIP` (CURATE) swaps the read if the interior is backwards on
-  hardware. Rotation still works — rotate-then-project is upstream — so the
-  reveal needs no projection change.
-- **Bar lifecycle.** On enable: **instant clear** (no drain fade; cancels any
-  drain/reverse), then Pipes-many walkers spawn as bars. Spawn/advance picks
-  a free cell in the **interior-left half** (`x < gx/2`) at a **Y not among
-  the last `BAR_Y_HISTORY = 4` bar rows** (CURATE), random z. FILLING: runs
-  forced **+x** (straight; random 1..maxRun lengths, so the bar advances in
-  beat-planned chunks on the CapDiv grid — Speed/CapDiv pace it), intersecting
-  occupied cells rather than turning. At the right edge → PARKED: runs forced
-  **±z** (longest free side, bouncing; intersects when boxed) for
-  `HOLD_WAIT_CAPS = 4` caps (CURATE — the invisible "wait"), then
-  **auto-advance via the teleport mechanism** (cap ball hidden at CapDia 0)
-  to a fresh bar. The manual `Teleport` trigger forces the advance
-  immediately, so the wait can also be performed from the timeline.
-- **Bars never go away**: the fill-based auto-drain is bypassed in bar
-  planning; overflow/no-free-cell drains remain as safety valves (CURATE:
-  long holds eventually exhaust rows/cells — findBarCell degrades to any
-  free cell, and a truly full room drains). Manual `Drain` still works.
-- **Disable** keeps all geometry: walkers replan as free pipes at their next
-  caps and the projection snaps back corner-continuous (a jump-cut — mask it
-  with rotation, or leave HoldBars on through the reveal).
-- **Not adapted in v1** (doc'd, accepted): `JumpTo` synthesis uses the free
-  walk; Reverse unbuilds bars right-to-left (fun — CURATE); pipe color rules
-  unchanged (a walker's bars share its palette slot — CURATE: per-bar slot
-  cycling as an option).
+- **True projection + bar roles (ninth pass — replicated projection
+  retired).** Hold mode renders through the SAME corner-continuous
+  projection as everything else; it is purely a *planner* mode now. The
+  per-wall coverage comes from role constraints instead: **role FB** (even
+  pipe slots) holds its Z index constant and fills **+x** bars, which read
+  on the front/back wall pair; **role LR** (odd slot) holds its X index
+  constant and fills **+z** bars, which read on left/right. Opposite walls
+  see mirrored fill direction (the same physical bar viewed from both sides
+  — accepted). Pipes seed at **distinct height bands** (`y ≈ slot·gy/count`,
+  CURATE: spacing) so the perpendicular runners can never collide in the
+  lattice. With Pipes = 1 only front/back get bars (accepted); Pipes ≥ 2
+  covers all four walls. Corner continuity and the rotation reveal are now
+  geometrically true in hold mode.
+- **Bar lifecycle.** Spawn/advance (`findBarCell`) picks a free cell in the
+  role's starting half (FB: `x < gx/2`; LR: `z < gz/2`) at a Y from the
+  pipe's band avoiding the last `BAR_Y_HISTORY = 4` bar rows (CURATE).
+  FILLING: runs forced along the role axis (random 1..maxRun lengths, so
+  the bar advances in beat-planned chunks on the CapDiv grid — Speed/CapDiv
+  pace it), intersecting occupied cells rather than turning. At the far
+  edge → PARKED: a **pure idle** for `HOLD_WAIT_CAPS = 4` caps (ninth pass —
+  the true projection has no globally-invisible axis, so the wait is time,
+  not secret depth motion; CURATE: wait feel), then **auto-advance via the
+  teleport mechanism** (cap ball hidden at CapDia 0) to a fresh bar. The
+  manual `Teleport` trigger forces the advance immediately.
+- **Toggling is seamless and non-destructive (ninth pass)**: enabling
+  HoldBars NO LONGER clears — the current lattice, pipes, and history stay
+  as the constraint, and each live pipe's next cap replans as a bar; a
+  running drain or reverse is left alone. Disabling likewise keeps all
+  geometry (free planning resumes at next caps). The projection is identical
+  in both modes, so there is no visual jump-cut either way. NB: a toggle
+  shifts the effective "plan" — a later JumpTo x% is a fresh synthesis in
+  the current mode, not x% of the pre-toggle animation.
+- **Bars never go away**: no fill-based auto-drain in bar planning, and
+  (ninth pass) dead-end spawns/teleports PARK instead of draining; overflow
+  drains remain as the resource backstop. Manual `Drain` still works.
+- **JumpTo is hold-aware (ninth pass)**: with HoldBars on, the synthesis
+  drives the bar phase machine (`barStep` — bars, idle parks, teleport
+  advances), so a jump lands on a state hold playback would actually
+  produce, in the current direction. Reverse still unbuilds bars
+  edge-backward (fun — CURATE); pipe color rules unchanged (a walker's bars
+  share its palette slot — CURATE: per-bar slot cycling as an option).
 
 ## Triggers
 
@@ -441,9 +457,10 @@ Gesture triggers, small → large:
   the room clears, the pending density applies, and the **Pipes-knob count**
   of pipes respawns in the **first palette colors** (fifth pass — consistent
   every drain, no palette rotation; caps stay phase-aligned to the global
-  tempo grid — a drain does not reset cap phase, fourth pass). Also fires
-  automatically at >60% fill, if a teleport/spawn finds no free cell, or on
-  retained-geometry overflow. Forces Reverse off.
+  tempo grid — a drain does not reset cap phase, fourth pass). As of the
+  ninth pass the drain only auto-fires on retained-geometry overflow (a
+  resource backstop): the 60%-fill and no-free-cell cases now PARK instead
+  (never self-reset). Forces Reverse off.
 
 Boxed-in pipes no longer teleport — they intersect (see Beat planning §3).
 
@@ -497,6 +514,7 @@ performance tempos.
 | Date | Change | Why |
 |---|---|---|
 | 2026-07-08 | Removed Sync/TempoDiv/Meta + TriggerBag/TempoLock (convention retired; free-run behavior = old Sync-off path): `rndTrig` param deleted with the TriggerBag (the non-UI `RevTgl` toggle went with it); `TempoLock.msUntilNext(QUARTER)` in `startDrain` inlined as `(1 − tempo.getBasis(QUARTER)) × period` — drain still concludes exactly on a beat; the CapDiv global-grid planner is core and unchanged | Jeff 2026-07-08: Sync/TempoDiv + Meta pattern-control convention retired project-wide |
+| 2026-07-09 (9th pass) | HoldBars reworked with Jeff's projection decision + never-self-reset semantics. **Projection reverted**: the replicated single-mapping projection (and `HOLD_BARS_FLIP`, `pickDepthDir`, `frameHoldBars`) deleted — hold mode renders through the true corner-continuous projection and is purely a planner mode. Coverage comes from **bar roles**: even pipe slots = FB (+x bars, read front/back), odd slot = LR (+z bars, read left/right), seeded at **distinct height bands** (`slot·gy/count`) so perpendicular runners never collide; opposite walls mirror fill direction (accepted); Pipes=1 → front/back only. The park is now a **pure idle** (no invisible axis exists). **No-clear toggle**: enabling HoldBars keeps the lattice/pipes/history as the constraint (bar state re-inits; drain/reverse left alone; a toggle shifts the effective plan, so JumpTo x% ≠ the old plan's x%). **Hold-aware JumpTo**: synthesis drives `barStep` (factored from `planBarRun`), including idle parks + teleport advances, with role-aware `findBarCell(i)` placement. **Never self-reset**: forward growth PARKS at the 60% fill limit (`latticeFull` gate on the ∞ self-heal — resumes automatically when cells free), dead-end spawns/teleports park instead of draining, reverse idles at empty instead of auto-flipping; list overflow remains the only self-drain. **Density default → 12**. CURATE: band spacing, third-pipe role (FB again), Pipes=1 two-dark-walls, full-park/empty-idle resting looks, mirrored fill direction on hardware | Jeff round 9: hold-aware JumpTo; replan-not-reset toggles; density 12; never self-reset; bar roles at distinct heights — confirmed the roles make the replicated projection unnecessary |
 | 2026-07-07 (8th pass) | **HoldBars** boolean (registered after JumpTo): progress-bar mode for the rafters→opus transition. Replicated single-mapping projection on all four walls (`u=(gx−x)·cw`, depth=z; `HOLD_BARS_FLIP` CURATE) so bars read L-to-R from the cube interior and ±z runs are invisible everywhere; instant clear on enable; constrained spawn picks (interior-left half, un-recent Y via `BAR_Y_HISTORY=4` ring); `planBarRun` phase machine (FILLING forced +x → PARKED forced ±z for `HOLD_WAIT_CAPS=4` caps → auto-advance via the teleport mechanism; manual Teleport forces it); fill auto-drain bypassed in bar mode (overflow/no-free-cell drains kept); disable keeps geometry + snaps projection back. `forceDir` hook added to `walkStep` (reset after each use; JumpTo synthesis unaffected). CURATE: interior read direction, wait length, Y-history size, corner-continuity break, long-hold row exhaustion, Reverse-unbuild feel | Jeff's HoldBars concept: unshaded pipes as never-completing progress bars, depth-parking as the hidden wait, Shaded+rotation automation as the 3D reveal |
 | 2026-07-04 | Initial implementation | First pass per approved plan; all CURATE: constants unverified on sculpture |
 | 2026-07-05 | Adversarial review pass: `beginSegment` retime estimate now folds in the audio level boost — previously completions landed up to 23% early of the retimed boundary whenever the Audio knob was up; corrected the thickness-clamp figure | Verified improver's claims against HEAD |
